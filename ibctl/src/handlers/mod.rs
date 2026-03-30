@@ -19,6 +19,8 @@ pub mod version_notice;
 use std::future::Future;
 use std::pin::Pin;
 
+use secrecy::ExposeSecret;
+
 use crate::agent_client::{AgentClient, WindowInfo};
 
 use thiserror::Error;
@@ -97,7 +99,7 @@ impl DialogHandlerRegistry {
         // Use already-resolved config (env vars applied during Config::load)
         registry.register(Box::new(login::LoginHandler::new(
             config.auth.username.clone(),
-            config.auth.password.clone(),
+            config.auth.password.expose_secret().to_string(),
             config.auth.trading_mode,
         )));
         registry.register(Box::new(totp_entry::TotpEntryHandler::new(

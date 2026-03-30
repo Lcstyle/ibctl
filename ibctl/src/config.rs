@@ -8,6 +8,7 @@
 use std::fmt;
 use std::path::Path;
 
+use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -170,24 +171,73 @@ pub struct Config {
     _extra: std::collections::HashMap<String, toml::Value>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
     pub username: String,
     /// Password is env-only (TWS_PASSWORD / TWS_PASSWORD_FILE). Never in config file.
     #[serde(skip)]
-    pub password: String,
+    pub password: SecretString,
     pub trading_mode: TradingMode,
     pub paper: PaperAuthConfig,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+impl Clone for AuthConfig {
+    fn clone(&self) -> Self {
+        Self {
+            username: self.username.clone(),
+            password: SecretString::from(self.password.expose_secret().to_string()),
+            trading_mode: self.trading_mode,
+            paper: self.paper.clone(),
+        }
+    }
+}
+
+impl fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthConfig")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("trading_mode", &self.trading_mode)
+            .field("paper", &self.paper)
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 #[serde(default)]
 pub struct PaperAuthConfig {
     pub username: String,
     /// Paper password is env-only (TWS_PASSWORD_PAPER / TWS_PASSWORD_PAPER_FILE).
     #[serde(skip)]
-    pub password: String,
+    pub password: SecretString,
+}
+
+impl Clone for PaperAuthConfig {
+    fn clone(&self) -> Self {
+        Self {
+            username: self.username.clone(),
+            password: SecretString::from(self.password.expose_secret().to_string()),
+        }
+    }
+}
+
+impl Default for PaperAuthConfig {
+    fn default() -> Self {
+        Self {
+            username: String::new(),
+            password: SecretString::from(String::new()),
+        }
+    }
+}
+
+impl fmt::Debug for PaperAuthConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PaperAuthConfig")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -277,7 +327,7 @@ impl Default for AuthConfig {
     fn default() -> Self {
         Self {
             username: String::new(),
-            password: String::new(),
+            password: SecretString::from(String::new()),
             trading_mode: TradingMode::Live,
             paper: PaperAuthConfig::default(),
         }
@@ -386,7 +436,7 @@ impl Config {
             self.auth.username = v;
         }
         if let Some(v) = env_or_file("TWS_PASSWORD") {
-            self.auth.password = v;
+            self.auth.password = SecretString::from(v);
         }
         if let Some(v) = env_or_file("TRADING_MODE") {
             match v.to_lowercase().as_str() {
@@ -402,7 +452,7 @@ impl Config {
             self.auth.paper.username = v;
         }
         if let Some(v) = env_or_file("TWS_PASSWORD_PAPER") {
-            self.auth.paper.password = v;
+            self.auth.paper.password = SecretString::from(v);
         }
 
         // 2FA
@@ -499,7 +549,7 @@ impl Config {
                 "auth.username (or TWS_USERID env var)".to_string(),
             ));
         }
-        if self.auth.password.is_empty() {
+        if self.auth.password.expose_secret().is_empty() {
             return Err(ConfigError::Missing(
                 "TWS_PASSWORD or TWS_PASSWORD_FILE env var".to_string(),
             ));
@@ -697,7 +747,26 @@ key = "value"
     fn test_validate_ok_with_credentials() {
         let mut config = Config::default();
         config.auth.username = "testuser".to_string();
-        config.auth.password = "testpass".to_string();
+        config.auth.password = SecretString::from("testpass".to_string());
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_password_redacted_in_debug() {
+        let mut config = Config::default();
+        config.auth.password = SecretString::from("supersecret".to_string());
+        let debug_output = format!("{:?}", config.auth);
+        assert!(
+            !debug_output.contains("supersecret"),
+            "Password leaked in Debug output: {}", debug_output
+        );
+        assert!(debug_output.contains("REDACTED"));
+    }
+
+    #[test]
+    fn test_password_expose_secret() {
+        let mut config = Config::default();
+        config.auth.password = SecretString::from("mypass".to_string());
+        assert_eq!(config.auth.password.expose_secret(), "mypass");
     }
 }
