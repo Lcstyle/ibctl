@@ -196,6 +196,33 @@ fn get_gateway_advisory(host: &str, port: u16) -> Option<serde_json::Value> {
 | `RESTART` | `OK` | Restart Gateway JVM |
 | `RECONNECTDATA` | `OK` | Reconnect market data (Ctrl+F) |
 | `RECONNECTACCOUNT` | `OK` | Reconnect account (Ctrl+R) |
+| `PAUSE` | `OK` | Freeze state machine (Direct Drive mode) |
+| `RESUME` | `OK` | Resume automatic transitions |
+| `SETSTATE <Name>` | `OK` | Force state (e.g., `SETSTATE Connected`) |
+
+## Dual-Mode Deployments (TRADING_MODE=both)
+
+When running in dual mode, the container runs **two ibctl instances**, each
+with its own command server:
+
+| Instance | API Port | Command Server Port | Default |
+|----------|----------|--------------------|---------|
+| Live | 4001 (via socat 4003) | **7462** | Yes |
+| Paper | 4002 (via socat 4004) | **7463** | — |
+
+**Clients must query the command server matching their trading mode:**
+
+- Connecting to live API (port 4001/4003) → poll `STATUS` on port **7462**
+- Connecting to paper API (port 4002/4004) → poll `STATUS` on port **7463**
+
+Each command server is independent — querying live STATUS tells you nothing
+about paper's readiness, and vice versa. Commands (RESTART, STOP, PAUSE) sent
+to one instance do not affect the other.
+
+### Single-Mode Deployments
+
+When `TRADING_MODE=live` or `TRADING_MODE=paper`, there is only one ibctl
+instance on port 7462. No special handling needed.
 
 ## Access Control
 
