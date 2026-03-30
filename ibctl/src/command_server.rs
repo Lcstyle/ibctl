@@ -38,6 +38,8 @@ pub enum Command {
     ReconnectAccount,
     EnableApi,
     Exit,
+    /// Restart socat port forwarding
+    RestartSocat,
     /// Pause state machine — freeze in current state, still responds to queries
     Pause,
     /// Resume normal state transitions
@@ -102,6 +104,7 @@ pub(crate) fn parse_command(input: &str) -> Option<ParsedCommand> {
         Some("RECONNECTACCOUNT") => Some(ParsedCommand::Action(Command::ReconnectAccount)),
         Some("ENABLEAPI") => Some(ParsedCommand::Action(Command::EnableApi)),
         Some("EXIT") => Some(ParsedCommand::Action(Command::Exit)),
+        Some("RESTARTSOCAT") => Some(ParsedCommand::Action(Command::RestartSocat)),
         // State machine control commands (God Mode)
         Some("PAUSE") => Some(ParsedCommand::Action(Command::Pause)),
         Some("RESUME") => Some(ParsedCommand::Action(Command::Resume)),

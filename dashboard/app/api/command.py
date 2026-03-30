@@ -12,7 +12,7 @@ from app.domain.errors import DashboardError
 logger = logging.getLogger("dashboard.api.command")
 router = APIRouter()
 
-ALLOWED_COMMANDS = {"STOP", "RESTART", "RECONNECTDATA", "RECONNECTACCOUNT", "ENABLEAPI", "PAUSE", "RESUME"}
+ALLOWED_COMMANDS = {"STOP", "RESTART", "RECONNECTDATA", "RECONNECTACCOUNT", "ENABLEAPI", "PAUSE", "RESUME", "RESTARTSOCAT"}
 # SETSTATE is handled specially (has an argument)
 SETSTATE_PREFIX = "SETSTATE "
 

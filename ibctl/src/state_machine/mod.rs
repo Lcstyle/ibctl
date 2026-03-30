@@ -659,6 +659,17 @@ impl StateMachine {
 
     async fn handle_command(&mut self, cmd: Command) -> Result<(), StateMachineError> {
         match cmd {
+            Command::RestartSocat => {
+                log::info!("Restarting socat port forwarding");
+                let (api_port, socat_port) = if self.config.auth.trading_mode == crate::config::TradingMode::Paper {
+                    (self.config.gateway.paper_api_port, self.config.gateway.paper_socat_port)
+                } else {
+                    (self.config.gateway.live_api_port, self.config.gateway.live_socat_port)
+                };
+                self.stop_socat();
+                self.start_socat(api_port, socat_port);
+                Ok(())
+            }
             Command::ReconnectData => {
                 log::info!("Sending reconnect data keystroke (Ctrl+F)");
                 if let Ok(windows) = self.agent_client.list_windows().await {

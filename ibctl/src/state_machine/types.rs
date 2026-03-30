@@ -199,13 +199,17 @@ pub(crate) fn client_advisory(state: &State) -> (bool, bool, Option<&'static str
     (should_connect, should_wait, wait_reason, client_id_likely_stale)
 }
 
-/// Simple UTC timestamp string (avoids chrono dependency).
+/// Human-readable UTC timestamp (avoids chrono dependency).
+/// Format: "HH:MM:SS" for dashboard readability.
 pub(super) fn chrono_timestamp() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    format!("{}", secs)
+    let h = (secs % 86400) / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    format!("{:02}:{:02}:{:02}", h, m, s)
 }
 
 #[cfg(test)]
