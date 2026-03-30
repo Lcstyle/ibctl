@@ -3,7 +3,7 @@
 <h2>State Machine</h2>
 
 <!-- Mode selector -->
-<div style="margin-bottom: 12px;">
+<div style="margin-bottom: 12px; display: flex; align-items: center; gap: 12px;">
     <select id="state-mode-select"
             hx-get="/partials/state-history"
             hx-trigger="change"
@@ -18,6 +18,50 @@
     </select>
 </div>
 
+<!-- Direct Drive Controls -->
+<div class="card" style="margin-bottom: 16px;">
+    <div class="card-label">Direct Drive</div>
+    <div style="color: #888; font-size: 12px; margin-bottom: 10px;">
+        Pause freezes transitions — the state machine still responds to status queries but won't advance.
+        Resume returns to automatic. Reset kills the JVM and re-authenticates from scratch.
+    </div>
+    <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+        <button class="btn btn-warning" style="font-size: 18px; padding: 6px 14px;"
+                id="btn-pause" title="Pause — freeze transitions">⏸</button>
+        <button class="btn btn-primary" style="font-size: 18px; padding: 6px 14px;"
+                id="btn-resume" title="Resume — automatic transitions">▶</button>
+        <button class="btn btn-danger" style="font-size: 18px; padding: 6px 14px;"
+                id="btn-restart" title="Reset — kill JVM and restart from Init">⏮</button>
+        <span style="color: #555; margin: 0 4px;">|</span>
+        <label style="color: #888; font-size: 12px;">Force State:</label>
+        <select id="setstate-select"
+                style="padding: 4px 8px; background: #1a1a2e; color: #e0e0e0; border: 1px solid #333; border-radius: 4px; font-size: 12px;">
+            <option value="">— select —</option>
+            <option value="Init">Init</option>
+            <option value="Launching">Launching</option>
+            <option value="WaitingForAgent">WaitingForAgent</option>
+            <option value="WaitingForLogin">WaitingForLogin</option>
+            <option value="Authenticating">Authenticating</option>
+            <option value="WaitingFor2fa">WaitingFor2fa</option>
+            <option value="HandlingSessionConflict">HandlingSessionConflict</option>
+            <option value="DismissingPopups">DismissingPopups</option>
+            <option value="ConfiguringApi">ConfiguringApi</option>
+            <option value="Connected">Connected</option>
+            <option value="Restarting">Restarting</option>
+            <option value="Shutdown">Shutdown</option>
+        </select>
+        <span style="color: #555; margin: 0 4px;">|</span>
+        <button class="btn btn-warning" style="font-size: 12px; padding: 4px 10px;"
+                id="btn-reconnect-data" title="Reconnect market data (Ctrl+F)">Reconnect Data</button>
+        <button class="btn btn-warning" style="font-size: 12px; padding: 4px 10px;"
+                id="btn-reconnect-acct" title="Reconnect account (Ctrl+R)">Reconnect Account</button>
+        <button class="btn btn-danger" style="font-size: 12px; padding: 4px 10px;"
+                id="btn-stop" title="Stop this ibctl instance">Stop</button>
+    </div>
+    <div id="command-result" style="margin-top: 8px; display: none;" class="card-detail"></div>
+</div>
+
+<!-- State + Transition History (auto-polling) -->
 <div id="state-content"
      hx-get="/partials/state-history?mode={{ default_mode }}"
      hx-trigger="load, every 3s"
@@ -26,13 +70,64 @@
 </div>
 
 <script>
-// When auto-polling, include the current dropdown value
+// Get current mode from dropdown
+function getMode() {
+    return document.getElementById('state-mode-select').value;
+}
+
+// Send command to the selected instance
+function sendCmd(command, needsConfirm, confirmMsg) {
+    if (needsConfirm && !confirm(confirmMsg)) return;
+    htmx.ajax('POST', '/api/v1/command', {
+        target: '#command-result',
+        values: {command: command, mode: getMode()}
+    });
+}
+
+// Transport buttons
+document.getElementById('btn-pause').addEventListener('click', function() { sendCmd('PAUSE'); });
+document.getElementById('btn-resume').addEventListener('click', function() { sendCmd('RESUME'); });
+document.getElementById('btn-restart').addEventListener('click', function() {
+    sendCmd('RESTART', true, 'Reset ' + getMode().toUpperCase() + ' Gateway? Kills JVM and re-authenticates.');
+});
+document.getElementById('btn-reconnect-data').addEventListener('click', function() { sendCmd('RECONNECTDATA'); });
+document.getElementById('btn-reconnect-acct').addEventListener('click', function() { sendCmd('RECONNECTACCOUNT'); });
+document.getElementById('btn-stop').addEventListener('click', function() {
+    sendCmd('STOP', true, 'Stop ' + getMode().toUpperCase() + ' instance? This shuts down the daemon.');
+});
+
+// SETSTATE dropdown
+document.getElementById('setstate-select').addEventListener('change', function() {
+    var state = this.value;
+    if (!state) return;
+    if (!confirm('Force ' + getMode().toUpperCase() + ' to ' + state + '? No validation — Direct Drive.')) {
+        this.value = '';
+        return;
+    }
+    sendCmd('SETSTATE ' + state);
+    this.value = '';
+});
+
+// Auto-poll includes current mode
 document.addEventListener('htmx:configRequest', function(evt) {
     if (evt.detail.elt.id === 'state-content') {
-        var sel = document.getElementById('state-mode-select');
-        if (sel) {
-            evt.detail.path = '/partials/state-history?mode=' + sel.value;
-        }
+        evt.detail.path = '/partials/state-history?mode=' + getMode();
+    }
+});
+
+// Format command results
+document.body.addEventListener('htmx:afterSwap', function(evt) {
+    if (evt.detail.target.id === 'command-result') {
+        evt.detail.target.style.display = 'block';
+        try {
+            var data = JSON.parse(evt.detail.target.textContent);
+            var ok = data.ok;
+            var mode = data.mode ? ' (' + data.mode.toUpperCase() + ')' : '';
+            evt.detail.target.innerHTML =
+                '<span class="' + (ok ? 'status-connected' : 'status-error') + '">' +
+                (ok ? '✓ ' + data.command + mode : '✗ ' + data.error + mode) + '</span>';
+            setTimeout(function() { evt.detail.target.style.display = 'none'; }, 3000);
+        } catch(e) {}
     }
 });
 </script>
