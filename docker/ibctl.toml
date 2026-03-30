@@ -1,8 +1,9 @@
-# ibctl config for Docker paper trading test
+# ibctl configuration — defaults for Docker deployment
+# Override any value via environment variables (see README).
 
 [auth]
 username = ""  # set via TWS_USERID env var
-trading_mode = "paper"
+trading_mode = "live"
 
 [twofa]
 provider = "oathtool"
@@ -12,7 +13,7 @@ timeout_seconds = 120
 [gateway]
 tws_path = "/home/ibgateway/Jts"
 settings_path = ""
-version = "ibgateway/10.45.1b"
+version = ""  # auto-detected from TWS_MAJOR_VRSN env var
 java_heap_mb = 768
 program = "gateway"
 
@@ -38,7 +39,7 @@ token = ""
 debug_mode = false
 
 [logging]
-level = "debug"
+level = "info"
 
 [timing]
 # Delay between UI actions in config dialog (ms) — lower = faster config
