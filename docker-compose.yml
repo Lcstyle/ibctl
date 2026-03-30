@@ -30,6 +30,10 @@ services:
       IBCTL_DASHBOARD_PORT: ${IBCTL_DASHBOARD_PORT:-8080}
       IBCTL_AUTO_UPDATE: ${IBCTL_AUTO_UPDATE:-false}
       IBCTL_VERSION: ${IBCTL_VERSION:-latest}
+    # Optional: mount pre-downloaded binaries for fast updates without rebuild
+    # Download with: curl -sL -o bin/ibctl https://github.com/Lcstyle/ibctl/releases/latest/download/ibctl
+    # volumes:
+    #   - ./bin:/opt/ibctl/bin:ro
     ports:
       - "127.0.0.1:4001:4003"
       - "127.0.0.1:4002:4004"
