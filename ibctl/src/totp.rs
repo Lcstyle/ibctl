@@ -1,7 +1,7 @@
 //! TOTP (Time-based One-Time Password) generation for two-factor authentication.
 //!
-//! The primary implementation shells out to `oathtool`, which is widely available
-//! in Docker images. A built-in Rust implementation may be added in a future version.
+//! The primary implementation shells out to `oathtool`, piping the secret via
+//! stdin to avoid exposing it in /proc/PID/cmdline.
 
 use crate::config::TotpProvider;
 use thiserror::Error;
@@ -12,6 +12,8 @@ pub enum TotpError {
     ExecutionFailed(#[from] std::io::Error),
     #[error("oathtool returned non-zero exit code: {0}")]
     OathtoolFailed(String),
+    #[error("builtin TOTP provider not yet implemented — use provider = \"oathtool\"")]
+    BuiltinNotImplemented,
 }
 
 /// Trait for TOTP code generation providers.
@@ -22,14 +24,28 @@ pub trait TotpCodeGenerator: Send + Sync {
 
 /// TOTP provider that shells out to the `oathtool` command-line utility.
 ///
-/// Equivalent to: `oathtool --totp --base32 $SECRET`
+/// The secret is piped via stdin (not passed as a command-line argument)
+/// to prevent exposure in /proc/PID/cmdline.
 pub struct OathtoolProvider;
 
 impl TotpCodeGenerator for OathtoolProvider {
     fn generate(&self, secret: &str) -> Result<String, TotpError> {
-        let output = std::process::Command::new("oathtool")
-            .args(["--totp", "--base32", secret])
-            .output()?;
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("oathtool")
+            .args(["--totp", "--base32", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+
+        // Write secret to stdin and close it
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(secret.as_bytes())?;
+        }
+
+        let output = child.wait_with_output()?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -43,9 +59,9 @@ impl TotpCodeGenerator for OathtoolProvider {
 }
 
 /// Factory function to create a TOTP code generator by provider type.
-pub fn create_provider(provider: TotpProvider) -> Box<dyn TotpCodeGenerator> {
+pub fn create_provider(provider: TotpProvider) -> Result<Box<dyn TotpCodeGenerator>, TotpError> {
     match provider {
-        TotpProvider::Oathtool => Box::new(OathtoolProvider),
-        TotpProvider::Builtin => Box::new(OathtoolProvider), // TODO: native impl
+        TotpProvider::Oathtool => Ok(Box::new(OathtoolProvider)),
+        TotpProvider::Builtin => Err(TotpError::BuiltinNotImplemented),
     }
 }

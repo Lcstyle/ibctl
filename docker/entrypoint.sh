@@ -134,7 +134,7 @@ create_jts_ini "$LIVE_SETTINGS"
 echo "Starting live instance..."
 TRADING_MODE=live \
 TWS_SETTINGS_PATH="$LIVE_SETTINGS" \
-IBCTL_AGENT_SOCKET="/tmp/ibctl-live.sock" \
+IBCTL_AGENT_SOCKET="/run/ibctl/agent-live.sock" \
 /opt/ibctl/ibctl --config /opt/ibctl/ibctl.toml &
 PIDS+=($!)
 echo "Live instance PID: ${PIDS[-1]}"
@@ -156,7 +156,7 @@ TRADING_MODE=paper \
 TWS_USERID="$PAPER_USER" \
 TWS_PASSWORD="$PAPER_PASS" \
 TWS_SETTINGS_PATH="$PAPER_SETTINGS" \
-IBCTL_AGENT_SOCKET="/tmp/ibctl-paper.sock" \
+IBCTL_AGENT_SOCKET="/run/ibctl/agent-paper.sock" \
 IBCTL_COMMAND_SERVER_ENABLED=false \
 /opt/ibctl/ibctl --config /opt/ibctl/ibctl.toml &
 PIDS+=($!)

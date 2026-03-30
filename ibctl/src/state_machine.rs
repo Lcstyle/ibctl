@@ -835,7 +835,7 @@ impl StateMachine {
             self.config_retries, MAX_CONFIG_RETRIES
         );
 
-        let settings = crate::handlers::api_config::ApiConfigSettings::from_config(&self.config);
+        let settings = crate::handlers::api_config::ApiConfigSettings::from_env();
 
         match crate::handlers::api_config::apply_api_config(&self.agent_client, &settings, self.config.timing.ui_tick_ms).await {
             Ok(()) => {

@@ -5,7 +5,6 @@
 //! bypasses, auto-restart time. Mirrors IBC's ConfigureApiTask.
 
 use crate::agent_client::AgentClient;
-use crate::config::Config;
 
 /// Parse an env var as a boolean: "yes", "true", "1" → true.
 fn env_bool(var: &str) -> Option<bool> {
@@ -14,6 +13,9 @@ fn env_bool(var: &str) -> Option<bool> {
     })
 }
 
+/// API configuration settings resolved from environment variables.
+/// These mirror IBC's env-var-only settings (TWS_MASTER_CLIENT_ID, etc.)
+/// and are intentionally not in the TOML config file.
 #[derive(Debug, Clone)]
 pub struct ApiConfigSettings {
     pub master_client_id: Option<String>,
@@ -25,20 +27,17 @@ pub struct ApiConfigSettings {
 }
 
 impl ApiConfigSettings {
-    pub fn from_config(_config: &Config) -> Self {
-        let master_client_id = std::env::var("TWS_MASTER_CLIENT_ID").ok()
-            .filter(|s| !s.is_empty());
-        let read_only_api = env_bool("READ_ONLY_API");
-        let bypass_order_precautions = env_bool("BYPASS_WARNING");
-        let allow_blind_trading = env_bool("ALLOW_BLIND_TRADING");
-        let auto_restart_time = std::env::var("AUTO_RESTART_TIME").ok()
-            .filter(|s| !s.is_empty());
-        let auto_logoff_time = std::env::var("AUTO_LOGOFF_TIME").ok()
-            .filter(|s| !s.is_empty());
+    pub fn from_env() -> Self {
         Self {
-            master_client_id, read_only_api,
-            bypass_order_precautions, allow_blind_trading,
-            auto_restart_time, auto_logoff_time,
+            master_client_id: std::env::var("TWS_MASTER_CLIENT_ID").ok()
+                .filter(|s| !s.is_empty()),
+            read_only_api: env_bool("READ_ONLY_API"),
+            bypass_order_precautions: env_bool("BYPASS_WARNING"),
+            allow_blind_trading: env_bool("ALLOW_BLIND_TRADING"),
+            auto_restart_time: std::env::var("AUTO_RESTART_TIME").ok()
+                .filter(|s| !s.is_empty()),
+            auto_logoff_time: std::env::var("AUTO_LOGOFF_TIME").ok()
+                .filter(|s| !s.is_empty()),
         }
     }
 

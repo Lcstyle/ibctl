@@ -154,7 +154,7 @@ pub enum ConfigError {
 /// Unknown TOML sections are silently ignored — this allows the config file
 /// to contain sections for other components (e.g., [dashboard]) without
 /// breaking ibctl's parser.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub auth: AuthConfig,
@@ -259,22 +259,6 @@ pub struct TimingConfig {
 
 // --- Default implementations ---
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            auth: AuthConfig::default(),
-            twofa: TwoFaConfig::default(),
-            gateway: GatewayConfig::default(),
-            session: SessionConfig::default(),
-            command_server: CommandServerConfig::default(),
-            agent: AgentConfig::default(),
-            logging: LoggingConfig::default(),
-            timing: TimingConfig::default(),
-            _extra: std::collections::HashMap::new(),
-        }
-    }
-}
-
 impl Default for TimingConfig {
     fn default() -> Self {
         Self {
@@ -347,7 +331,7 @@ impl Default for CommandServerConfig {
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
-            socket_path: "/tmp/ibctl.sock".to_string(),
+            socket_path: "/run/ibctl/agent.sock".to_string(),
         }
     }
 }

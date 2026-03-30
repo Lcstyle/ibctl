@@ -60,7 +60,7 @@ impl DialogHandler for TotpEntryHandler {
             let provider_type = self.provider;
             let handler_name = self.name().to_string();
             let code = tokio::task::spawn_blocking(move || {
-                let provider = totp::create_provider(provider_type);
+                let provider = totp::create_provider(provider_type)?;
                 provider.generate(&secret)
             })
             .await

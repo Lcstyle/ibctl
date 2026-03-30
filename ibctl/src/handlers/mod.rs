@@ -94,24 +94,11 @@ impl DialogHandlerRegistry {
     pub fn with_defaults(config: &crate::config::Config) -> Self {
         let mut registry = Self::new();
 
-        // Resolve credentials: env vars take precedence over config file
-        let username = crate::config::env_or_file("TWS_USERID")
-            .unwrap_or_else(|| config.auth.username.clone());
-        let password = crate::config::env_or_file("TWS_PASSWORD")
-            .unwrap_or_else(|| config.auth.password.clone());
-        let trading_mode = std::env::var("TRADING_MODE")
-            .and_then(|v| match v.to_lowercase().as_str() {
-                "live" => Ok(crate::config::TradingMode::Live),
-                "paper" => Ok(crate::config::TradingMode::Paper),
-                "both" => Ok(crate::config::TradingMode::Both),
-                _ => Err(std::env::VarError::NotPresent),
-            })
-            .unwrap_or(config.auth.trading_mode);
-
+        // Use already-resolved config (env vars applied during Config::load)
         registry.register(Box::new(login::LoginHandler::new(
-            username,
-            password,
-            trading_mode,
+            config.auth.username.clone(),
+            config.auth.password.clone(),
+            config.auth.trading_mode,
         )));
         registry.register(Box::new(totp_entry::TotpEntryHandler::new(
             config.twofa.secret_env.clone(),

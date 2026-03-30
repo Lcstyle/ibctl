@@ -125,16 +125,16 @@ COPY --from=setup /root/Jts /home/ibgateway/Jts
 RUN apt-get update -y \
     && apt-get upgrade -y \
     && apt-get install --no-install-recommends --yes \
-        gettext-base socat xvfb x11vnc sshpass openssh-client sudo telnet \
+        gettext-base socat xvfb x11vnc sshpass openssh-client telnet \
     && apt-get clean && rm -rf /var/lib/apt/lists/* \
     # Remove default ubuntu user if present
     && if id ubuntu 2>/dev/null; then userdel -rf ubuntu; fi \
     # Create ibgateway user (matching gnzsnz)
     && groupadd --gid ${USER_GID} ibgateway \
     && useradd -ms /bin/bash --uid ${USER_ID} --gid ${USER_GID} ibgateway \
-    && echo "ibgateway ALL=(ALL) NOPASSWD:ALL" | tee -a /etc/sudoers \
     && mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix \
-    && mkdir -p /opt/ibctl
+    && mkdir -p /opt/ibctl \
+    && mkdir -p /run/ibctl && chmod 700 /run/ibctl
 
 # Copy ibctl binaries — prefer pre-built, fall back to source
 COPY --from=prebuilt-downloader /prebuilt/ /tmp/prebuilt/
@@ -154,10 +154,13 @@ RUN if [ -f /tmp/prebuilt/ibctl ]; then \
 COPY docker/entrypoint.sh /opt/ibctl/entrypoint.sh
 COPY docker/ibctl.toml /opt/ibctl/ibctl.toml
 RUN chmod +x /opt/ibctl/ibctl /opt/ibctl/entrypoint.sh \
-    && chown -R ibgateway:ibgateway /home/ibgateway /opt/ibctl
+    && chown -R ibgateway:ibgateway /home/ibgateway /opt/ibctl /run/ibctl
 
 USER ${USER_ID}:${USER_GID}
 WORKDIR /home/ibgateway
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+    CMD bash -c 'echo STATUS > /dev/tcp/127.0.0.1/7462 && exit 0 || exit 1'
 
 ENTRYPOINT ["/opt/ibctl/entrypoint.sh"]
 

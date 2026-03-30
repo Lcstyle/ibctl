@@ -27,7 +27,7 @@ bind_address = "0.0.0.0"
 control_from = ["127.0.0.1", "172.0.0.0/8"]
 
 [agent]
-socket_path = "/tmp/ibctl.sock"
+socket_path = "/run/ibctl/agent.sock"
 
 [logging]
 level = "debug"
