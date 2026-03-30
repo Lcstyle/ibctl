@@ -38,6 +38,12 @@ pub enum Command {
     ReconnectAccount,
     EnableApi,
     Exit,
+    /// Pause state machine — freeze in current state, still responds to queries
+    Pause,
+    /// Resume normal state transitions
+    Resume,
+    /// Force state machine to a specific state (God Mode)
+    SetState(String),
 }
 
 /// Query commands that expect a JSON response via oneshot channel.
@@ -96,6 +102,19 @@ pub(crate) fn parse_command(input: &str) -> Option<ParsedCommand> {
         Some("RECONNECTACCOUNT") => Some(ParsedCommand::Action(Command::ReconnectAccount)),
         Some("ENABLEAPI") => Some(ParsedCommand::Action(Command::EnableApi)),
         Some("EXIT") => Some(ParsedCommand::Action(Command::Exit)),
+        // State machine control commands (God Mode)
+        Some("PAUSE") => Some(ParsedCommand::Action(Command::Pause)),
+        Some("RESUME") => Some(ParsedCommand::Action(Command::Resume)),
+        Some("SETSTATE") => {
+            // Use the original (non-uppercased) input to preserve state name casing
+            let orig_parts: Vec<&str> = trimmed.split_whitespace().collect();
+            let state_name = orig_parts.get(1).copied().unwrap_or("").to_string();
+            if state_name.is_empty() {
+                None
+            } else {
+                Some(ParsedCommand::Action(Command::SetState(state_name)))
+            }
+        }
         // JSON query commands (for dashboard)
         Some("STATUS") => Some(ParsedCommand::Query(QueryType::Status)),
         Some("STATE") => Some(ParsedCommand::Query(QueryType::State)),

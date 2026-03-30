@@ -57,6 +57,27 @@ pub enum State {
     Error(String),
 }
 
+impl State {
+    /// Parse a state name from a string (for SETSTATE command).
+    pub fn from_name(name: &str) -> Option<State> {
+        match name {
+            "Init" => Some(State::Init),
+            "Launching" => Some(State::Launching),
+            "WaitingForAgent" => Some(State::WaitingForAgent),
+            "WaitingForLogin" => Some(State::WaitingForLogin),
+            "Authenticating" => Some(State::Authenticating),
+            "WaitingFor2fa" => Some(State::WaitingFor2fa),
+            "HandlingSessionConflict" => Some(State::HandlingSessionConflict),
+            "DismissingPopups" => Some(State::DismissingPopups),
+            "ConfiguringApi" => Some(State::ConfiguringApi),
+            "Connected" => Some(State::Connected),
+            "Restarting" => Some(State::Restarting),
+            "Shutdown" => Some(State::Shutdown),
+            _ => None,
+        }
+    }
+}
+
 impl std::fmt::Display for State {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -112,6 +133,7 @@ pub struct StateMachine {
     pub(super) cold_restart_rx: mpsc::Receiver<ColdRestartSignal>,
     pub(super) socat_process: Option<std::process::Child>,
     pub(super) config_retries: u32,
+    pub(super) paused: bool,
     pub(super) start_time: Instant,
     pub(super) connected_since: Option<Instant>,
     pub(super) transition_history: VecDeque<Transition>,
@@ -138,6 +160,7 @@ impl StateMachine {
             cold_restart_rx: channels.cold_restart,
             socat_process: None,
             config_retries: 0,
+            paused: false,
             start_time: Instant::now(),
             connected_since: None,
             transition_history: VecDeque::with_capacity(100),

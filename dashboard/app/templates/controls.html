@@ -1,51 +1,164 @@
 {% extends "base.html" %}
 {% block content %}
 <h2>Controls</h2>
-<div class="controls-grid">
-    <button class="btn btn-primary"
-            hx-post="/api/v1/command"
-            hx-vals='{"command": "RESTART"}'
-            hx-target="#command-result"
-            hx-confirm="Restart the Gateway? This will disconnect all clients.">
-        Restart
-    </button>
-    <button class="btn btn-warning"
-            hx-post="/api/v1/command"
-            hx-vals='{"command": "RECONNECTDATA"}'
-            hx-target="#command-result">
-        Reconnect Data
-    </button>
-    <button class="btn btn-warning"
-            hx-post="/api/v1/command"
-            hx-vals='{"command": "RECONNECTACCOUNT"}'
-            hx-target="#command-result">
-        Reconnect Account
-    </button>
-    <button class="btn btn-primary"
-            hx-post="/api/v1/command"
-            hx-vals='{"command": "ENABLEAPI"}'
-            hx-target="#command-result">
-        Enable API
-    </button>
-    <button class="btn btn-danger"
-            hx-post="/api/v1/command"
-            hx-vals='{"command": "STOP"}'
-            hx-target="#command-result"
-            hx-confirm="Stop the Gateway? This will shut down ibctl completely.">
-        Stop
-    </button>
+
+<!-- Mode selector -->
+<div style="margin-bottom: 16px; display: flex; align-items: center; gap: 12px;">
+    <label style="color: #888;">Target Instance:</label>
+    <select id="control-mode-select"
+            style="padding: 6px 12px; background: #1a1a2e; color: #e0e0e0; border: 1px solid #333; border-radius: 4px; font-size: 14px;">
+        {% for m in modes %}
+        <option value="{{ m }}" {% if m == default_mode %}selected{% endif %}>{{ m | upper }}</option>
+        {% endfor %}
+    </select>
+    <span style="color: #555; font-size: 12px;">All commands target the selected instance only</span>
 </div>
+
+{% for m in modes %}
+<div class="instance-controls" id="controls-{{ m }}" {% if m != default_mode %}style="display:none;"{% endif %}>
+
+    <!-- State Machine Controls (God Mode) -->
+    <div class="card" style="margin-bottom: 16px;">
+        <div class="card-label">State Machine (Tiptronic Mode)</div>
+        <div style="color: #888; font-size: 12px; margin-bottom: 10px;">
+            Pause freezes the {{ m }} state machine in its current state — it will still respond to status queries
+            but won't advance through login/2FA/config steps. Resume returns to automatic operation.
+        </div>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+            <button class="btn btn-warning" style="font-size: 18px; padding: 6px 14px;"
+                    hx-post="/api/v1/command"
+                    hx-vals='{"command": "PAUSE", "mode": "{{ m }}"}'
+                    hx-target="#command-result"
+                    title="Pause — freeze state machine transitions">
+                ⏸
+            </button>
+            <button class="btn btn-primary" style="font-size: 18px; padding: 6px 14px;"
+                    hx-post="/api/v1/command"
+                    hx-vals='{"command": "RESUME", "mode": "{{ m }}"}'
+                    hx-target="#command-result"
+                    title="Resume — return to automatic transitions">
+                ▶
+            </button>
+            <button class="btn btn-danger" style="font-size: 18px; padding: 6px 14px;"
+                    hx-post="/api/v1/command"
+                    hx-vals='{"command": "RESTART", "mode": "{{ m }}"}'
+                    hx-target="#command-result"
+                    hx-confirm="Reset {{ m | upper }} Gateway? This kills the JVM and re-authenticates from scratch."
+                    title="Reset — kill JVM and restart from Init">
+                ⏮
+            </button>
+            <span style="color: #555; margin: 0 4px;">|</span>
+            <label style="color: #888; font-size: 12px;">Force State:</label>
+            <select class="setstate-select" data-mode="{{ m }}"
+                    style="padding: 4px 8px; background: #1a1a2e; color: #e0e0e0; border: 1px solid #333; border-radius: 4px; font-size: 12px;">
+                <option value="">— select —</option>
+                <option value="Init">Init</option>
+                <option value="Launching">Launching</option>
+                <option value="WaitingForAgent">WaitingForAgent</option>
+                <option value="WaitingForLogin">WaitingForLogin</option>
+                <option value="Authenticating">Authenticating</option>
+                <option value="WaitingFor2fa">WaitingFor2fa</option>
+                <option value="HandlingSessionConflict">HandlingSessionConflict</option>
+                <option value="DismissingPopups">DismissingPopups</option>
+                <option value="ConfiguringApi">ConfiguringApi</option>
+                <option value="Connected">Connected</option>
+                <option value="Restarting">Restarting</option>
+                <option value="Shutdown">Shutdown</option>
+            </select>
+        </div>
+    </div>
+
+    <!-- Gateway Connection Controls -->
+    <div class="card" style="margin-bottom: 16px;">
+        <div class="card-label">Gateway Connection</div>
+        <div style="color: #888; font-size: 12px; margin-bottom: 10px;">
+            These send commands to the {{ m | upper }} IB Gateway instance.
+            Reconnect Data/Account trigger the same keystrokes IB Gateway uses internally (Ctrl+F / Ctrl+R).
+        </div>
+        <div class="controls-grid">
+            <button class="btn btn-warning"
+                    hx-post="/api/v1/command"
+                    hx-vals='{"command": "RECONNECTDATA", "mode": "{{ m }}"}'
+                    hx-target="#command-result">
+                Reconnect Data
+            </button>
+            <button class="btn btn-warning"
+                    hx-post="/api/v1/command"
+                    hx-vals='{"command": "RECONNECTACCOUNT", "mode": "{{ m }}"}'
+                    hx-target="#command-result">
+                Reconnect Account
+            </button>
+            <button class="btn btn-primary"
+                    hx-post="/api/v1/command"
+                    hx-vals='{"command": "ENABLEAPI", "mode": "{{ m }}"}'
+                    hx-target="#command-result">
+                Enable API
+            </button>
+        </div>
+    </div>
+
+    <!-- Lifecycle Controls -->
+    <div class="card" style="margin-bottom: 16px;">
+        <div class="card-label">Instance Lifecycle</div>
+        <div style="color: #888; font-size: 12px; margin-bottom: 10px;">
+            Stop shuts down the {{ m | upper }} ibctl daemon and its JVM. The container stays running —
+            the other instance (if running) is unaffected.
+        </div>
+        <div class="controls-grid">
+            <button class="btn btn-danger"
+                    hx-post="/api/v1/command"
+                    hx-vals='{"command": "STOP", "mode": "{{ m }}"}'
+                    hx-target="#command-result"
+                    hx-confirm="Stop {{ m | upper }} instance? This shuts down the ibctl daemon and its Gateway JVM.">
+                Stop {{ m | upper }}
+            </button>
+        </div>
+    </div>
+
+</div>
+{% endfor %}
+
 <div id="command-result" class="card" style="margin-top: 16px; display: none;"></div>
+
 <script>
+    // Toggle visibility based on mode selector
+    document.getElementById('control-mode-select').addEventListener('change', function() {
+        var modes = {{ modes | tojson }};
+        var selected = this.value;
+        modes.forEach(function(m) {
+            document.getElementById('controls-' + m).style.display = (m === selected) ? 'block' : 'none';
+        });
+    });
+
+    // Handle SETSTATE dropdown
+    document.querySelectorAll('.setstate-select').forEach(function(sel) {
+        sel.addEventListener('change', function() {
+            var state = this.value;
+            var mode = this.dataset.mode;
+            if (!state) return;
+            if (!confirm('Force ' + mode.toUpperCase() + ' state to ' + state + '? This is God Mode — no validation.')) {
+                this.value = '';
+                return;
+            }
+            htmx.ajax('POST', '/api/v1/command', {
+                target: '#command-result',
+                values: {command: 'SETSTATE ' + state, mode: mode}
+            });
+            this.value = '';
+        });
+    });
+
+    // Format command results
     document.body.addEventListener('htmx:afterSwap', function(evt) {
         if (evt.detail.target.id === 'command-result') {
             evt.detail.target.style.display = 'block';
             try {
-                const data = JSON.parse(evt.detail.target.textContent);
-                const ok = data.ok;
+                var data = JSON.parse(evt.detail.target.textContent);
+                var ok = data.ok;
+                var mode = data.mode ? ' (' + data.mode.toUpperCase() + ')' : '';
                 evt.detail.target.innerHTML = '<div class="card-label">Command Result</div>' +
                     '<div class="' + (ok ? 'status-connected' : 'status-error') + '">' +
-                    (ok ? 'OK: ' + data.command : 'Error: ' + data.error) + '</div>';
+                    (ok ? 'OK: ' + data.command + mode : 'Error: ' + data.error + mode) + '</div>';
             } catch(e) {}
         }
     });

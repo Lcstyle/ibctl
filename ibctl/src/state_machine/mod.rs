@@ -53,6 +53,13 @@ impl StateMachine {
                 }
             }
 
+            // Pause mode: skip transitions but keep processing queries/interrupts
+            if self.paused {
+                self.process_queries().await;
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                continue;
+            }
+
             let next = self.transition().await?;
             log::info!("State transition: {} -> {}", self.state, next);
 
@@ -638,6 +645,28 @@ impl StateMachine {
             Command::EnableApi => {
                 log::info!("EnableApi command received (not yet implemented)");
                 Ok(())
+            }
+            Command::Pause => {
+                log::info!("State machine PAUSED — transitions frozen");
+                self.paused = true;
+                Ok(())
+            }
+            Command::Resume => {
+                log::info!("State machine RESUMED — transitions active");
+                self.paused = false;
+                Ok(())
+            }
+            Command::SetState(ref name) => {
+                if let Some(new_state) = State::from_name(name) {
+                    log::warn!("GOD MODE: forcing state to {}", new_state);
+                    let old = self.state.clone();
+                    self.state = new_state.clone();
+                    self.record_transition(&old, &new_state);
+                    Ok(())
+                } else {
+                    log::error!("SETSTATE: unknown state '{}'", name);
+                    Ok(())
+                }
             }
             _ => Ok(()),
         }

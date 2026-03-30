@@ -50,7 +50,14 @@ async def logs_page(request: Request):
 @router.get("/controls", response_class=HTMLResponse)
 async def controls_page(request: Request):
     templates = request.app.state.templates
-    return templates.TemplateResponse(request, "controls.html", {"active_tab": "controls"})
+    registry = request.app.state.instance_registry
+    modes = registry.modes()
+    default_mode = "paper" if "paper" in modes else modes[0]
+    return templates.TemplateResponse(request, "controls.html", {
+        "active_tab": "controls",
+        "modes": modes,
+        "default_mode": default_mode,
+    })
 
 
 @router.get("/vnc", response_class=HTMLResponse)
