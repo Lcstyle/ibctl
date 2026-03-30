@@ -7,345 +7,27 @@
 //! The main loop calls `transition()` which matches on the current state and
 //! calls the appropriate handler method. Each handler returns the next state.
 
+mod queries;
+mod socat;
+mod types;
+
+// Re-export public API
+pub use types::{Channels, State, StateMachine, StateMachineError};
+
 use std::path::Path;
+use std::time::Instant;
 
-use thiserror::Error;
-use tokio::sync::mpsc;
-
-use std::collections::VecDeque;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
-
-use crate::agent_client::AgentClient;
-use crate::cold_restart::ColdRestartSignal;
-use crate::command_server::{Command, Query};
-use crate::config::Config;
-use crate::handlers::DialogHandlerRegistry;
+use crate::command_server::Command;
 use crate::signals::Signal;
-use crate::supervisor::Supervisor;
 
-#[derive(Debug, Error)]
-pub enum StateMachineError {
-    #[error("supervisor error: {0}")]
-    Supervisor(#[from] crate::supervisor::SupervisorError),
-    #[error("agent error: {0}")]
-    Agent(#[from] crate::agent_client::AgentError),
-    #[error("handler error: {0}")]
-    Handler(#[from] crate::handlers::HandlerError),
-    #[error("fatal error in state {state}: {reason}")]
-    Fatal { state: String, reason: String },
-}
-
-/// All possible states in the ibctl lifecycle.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum State {
-    /// Initial state: parse config, validate environment
-    Init,
-    /// Launching the JVM with -javaagent
-    Launching,
-    /// Polling the agent's /health endpoint until it responds
-    WaitingForAgent,
-    /// Waiting for the login window to appear
-    WaitingForLogin,
-    /// Filling in credentials and clicking login
-    Authenticating,
-    /// Waiting for 2FA dialog (if TOTP configured)
-    WaitingFor2fa,
-    /// Handling an "existing session detected" dialog
-    HandlingSessionConflict,
-    /// Dismissing startup popups (tip of day, version notice, paper warning)
-    DismissingPopups,
-    /// Applying post-login API configuration (master client ID, read-only, etc.)
-    ConfiguringApi,
-    /// Fully connected and monitoring for new dialogs
-    Connected,
-    /// Restarting the Gateway JVM
-    Restarting,
-    /// Shutting down cleanly
-    Shutdown,
-    /// Unrecoverable error state
-    Error(String),
-}
-
-impl std::fmt::Display for State {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            State::Error(msg) => write!(f, "Error({})", msg),
-            other => write!(f, "{:?}", other),
-        }
-    }
-}
-
-/// Runtime statistics collected by the state machine.
-#[derive(Debug, Clone, Default, serde::Serialize)]
-pub struct Stats {
-    pub restarts_today: u32,
-    pub relogins_today: u32,
-    pub dialogs_dismissed: u32,
-    pub last_2fa_duration_secs: Option<f64>,
-    pub config_apply_duration_secs: Option<f64>,
-}
-
-/// A recorded state transition.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct Transition {
-    pub timestamp: String,
-    pub from: String,
-    pub to: String,
-}
-
-/// Bundled mpsc receivers for the state machine's inbound channels.
-pub struct Channels {
-    pub signals: mpsc::Receiver<Signal>,
-    pub commands: mpsc::Receiver<Command>,
-    pub queries: mpsc::Receiver<Query>,
-    pub cold_restart: mpsc::Receiver<ColdRestartSignal>,
-}
-
-/// The main state machine that orchestrates the IB Gateway lifecycle.
-pub struct StateMachine {
-    state: State,
-    config: Config,
-    agent_client: AgentClient,
-    supervisor: Supervisor,
-    handler_registry: DialogHandlerRegistry,
-    signal_rx: mpsc::Receiver<Signal>,
-    command_rx: mpsc::Receiver<Command>,
-    query_rx: mpsc::Receiver<Query>,
-    cold_restart_rx: mpsc::Receiver<ColdRestartSignal>,
-    socat_process: Option<std::process::Child>,
-    config_retries: u32,
-    // Dashboard state tracking
-    start_time: Instant,
-    connected_since: Option<Instant>,
-    transition_history: VecDeque<Transition>,
-    pub stats: Stats,
-}
+use types::Interrupt;
 
 impl StateMachine {
-    pub fn new(
-        config: Config,
-        agent_client: AgentClient,
-        supervisor: Supervisor,
-        handler_registry: DialogHandlerRegistry,
-        channels: Channels,
-    ) -> Self {
-        Self {
-            state: State::Init,
-            config,
-            agent_client,
-            supervisor,
-            handler_registry,
-            signal_rx: channels.signals,
-            command_rx: channels.commands,
-            query_rx: channels.queries,
-            cold_restart_rx: channels.cold_restart,
-            socat_process: None,
-            config_retries: 0,
-            start_time: Instant::now(),
-            connected_since: None,
-            transition_history: VecDeque::with_capacity(100),
-            stats: Stats::default(),
-        }
-    }
-
-    /// Start socat to forward external port to Gateway's localhost port.
-    /// Called only after configuration is complete — no race condition possible.
-    fn start_socat(&mut self, api_port: u16, socat_port: u16) {
-        // Kill any existing socat first
-        self.stop_socat();
-
-        log::info!("Starting socat: 0.0.0.0:{} -> 127.0.0.1:{}", socat_port, api_port);
-        match std::process::Command::new("socat")
-            .arg(format!("TCP-LISTEN:{},fork,reuseaddr", socat_port))
-            .arg(format!("TCP:127.0.0.1:{}", api_port))
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(child) => {
-                log::info!("socat started (PID {}): port {} -> {}", child.id(), socat_port, api_port);
-                self.socat_process = Some(child);
-            }
-            Err(e) => {
-                log::error!("Failed to start socat: {} — clients won't be able to connect externally", e);
-            }
-        }
-    }
-
-    /// Stop socat if running.
-    fn stop_socat(&mut self) {
-        if let Some(ref mut child) = self.socat_process {
-            log::info!("Stopping socat (PID {})", child.id());
-            let _ = child.kill();
-            let _ = child.wait();
-            self.socat_process = None;
-        }
-    }
-
-    /// Record a state transition in the history ring buffer.
-    fn record_transition(&mut self, from: &State, to: &State) {
-        if self.transition_history.len() >= 100 {
-            self.transition_history.pop_front();
-        }
-        self.transition_history.push_back(Transition {
-            timestamp: chrono_timestamp(),
-            from: from.to_string(),
-            to: to.to_string(),
-        });
-    }
-
-    /// Process any pending queries from the command server (non-blocking).
-    async fn process_queries(&mut self) {
-        loop {
-            match self.query_rx.try_recv() {
-                Ok(query) => self.handle_query(query).await,
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
-            }
-        }
-    }
-
-    /// Handle a single query by building the JSON response and sending it back.
-    async fn handle_query(&mut self, query: Query) {
-        match query {
-            Query::Status(tx) => {
-                let json = self.build_status_json().await;
-                let _ = tx.send(json);
-            }
-            Query::State(tx) => {
-                let json = self.build_state_json();
-                let _ = tx.send(json);
-            }
-            Query::Config(tx) => {
-                let json = self.build_config_json();
-                let _ = tx.send(json);
-            }
-            Query::Logs(limit, tx) => {
-                // TODO: implement log buffer
-                let json = serde_json::json!({
-                    "error": "not_implemented",
-                    "message": "LOGS command is not yet implemented — use container logs instead",
-                    "limit": limit,
-                }).to_string();
-                let _ = tx.send(json);
-            }
-            Query::Windows(tx) => {
-                let json = self.build_windows_json().await;
-                let _ = tx.send(json);
-            }
-        }
-    }
-
-    /// Build the full STATUS JSON response for the dashboard.
-    async fn build_status_json(&mut self) -> String {
-        let uptime = self.start_time.elapsed().as_secs();
-        let connected_uptime = self.connected_since.map(|t| t.elapsed().as_secs());
-        let socat_running = self.socat_process.as_mut()
-            .map(|c| c.try_wait().ok().flatten().is_none())
-            .unwrap_or(false);
-
-        let is_connected = self.state == State::Connected;
-        let (should_connect, should_wait, wait_reason, client_id_likely_stale) =
-            client_advisory(&self.state);
-
-        serde_json::json!({
-            "ready": is_connected && socat_running,
-            "state": self.state.to_string(),
-            "trading_mode": self.config.auth.trading_mode.to_string(),
-            "uptime_secs": uptime,
-            "connected_uptime_secs": connected_uptime,
-            "socat_running": socat_running,
-            "jvm_running": self.supervisor.is_running(),
-            "stats": self.stats,
-            "client_advisory": {
-                "should_connect": should_connect && socat_running,
-                "should_wait": should_wait,
-                "wait_reason": wait_reason,
-                "client_id_likely_stale": client_id_likely_stale,
-            }
-        }).to_string()
-    }
-
-    /// Build the STATE JSON response.
-    fn build_state_json(&self) -> String {
-        serde_json::json!({
-            "current": self.state.to_string(),
-            "history": self.transition_history,
-        }).to_string()
-    }
-
-    /// Build the CONFIG JSON response (passwords masked).
-    fn build_config_json(&self) -> String {
-        serde_json::json!({
-            "auth": {
-                "username": self.config.auth.username,
-                "trading_mode": self.config.auth.trading_mode.to_string(),
-                "password": "********",
-            },
-            "gateway": {
-                "tws_path": self.config.gateway.tws_path,
-                "settings_path": self.config.gateway.settings_path,
-                "version": self.config.gateway.version,
-                "java_heap_mb": self.config.gateway.java_heap_mb,
-                "program": self.config.gateway.program.to_string(),
-            },
-            "session": {
-                "action": self.config.session.action.to_string(),
-                "accept_incoming": self.config.session.accept_incoming.to_string(),
-            },
-            "command_server": {
-                "enabled": self.config.command_server.enabled,
-                "port": self.config.command_server.port,
-                "bind_address": self.config.command_server.bind_address,
-            },
-            "timing": {
-                "ui_tick_ms": self.config.timing.ui_tick_ms,
-                "agent_tick_ms": self.config.timing.agent_tick_ms,
-                "post_login_delay_ms": self.config.timing.post_login_delay_ms,
-                "popup_quiet_secs": self.config.timing.popup_quiet_secs,
-            },
-            "agent": {
-                "socket_path": self.config.agent.socket_path,
-            },
-        }).to_string()
-    }
-
-    /// Build the WINDOWS JSON response including client tabs.
-    async fn build_windows_json(&self) -> String {
-        let windows = self.agent_client.list_windows().await.unwrap_or_default();
-
-        let mut windows_json = Vec::new();
-        for w in &windows {
-            // Try to get tabs for this window
-            let tabs: Vec<serde_json::Value> = if let Ok(dump) = self.agent_client.dump_components(w.id).await {
-                // Extract tabs from dump if available
-                dump.get("tabs").and_then(|t| t.as_array()).cloned().unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-
-            windows_json.push(serde_json::json!({
-                "id": w.id,
-                "title": w.title,
-                "class": w.class,
-                "tabs": tabs,
-            }));
-        }
-
-        serde_json::json!({
-            "windows": windows_json,
-        }).to_string()
-    }
-
     /// Run the state machine until shutdown or fatal error.
-    ///
-    /// This is the main loop: repeatedly call `transition()` to advance
-    /// through states, checking for signals and commands between transitions.
     pub async fn run(&mut self) -> Result<(), StateMachineError> {
         log::info!("State machine starting in state: {}", self.state);
 
         loop {
-            // Check for signals or commands before each transition
             if let Some(signal_or_cmd) = self.check_interrupts().await {
                 match signal_or_cmd {
                     Interrupt::Signal(Signal::Terminate | Signal::Interrupt) => {
@@ -374,17 +56,14 @@ impl StateMachine {
             let next = self.transition().await?;
             log::info!("State transition: {} -> {}", self.state, next);
 
-            // Record transition in history for dashboard
             self.record_transition(&self.state.clone(), &next);
 
-            // Track connected_since
             if next == State::Connected && self.state != State::Connected {
                 self.connected_since = Some(Instant::now());
             } else if next != State::Connected {
                 self.connected_since = None;
             }
 
-            // Process any pending queries (non-blocking)
             self.process_queries().await;
 
             if next == State::Shutdown {
@@ -439,7 +118,6 @@ impl StateMachine {
             )));
         }
 
-        // Check oathtool if TOTP is configured
         if self.config.twofa.provider == crate::config::TotpProvider::Oathtool {
             if let Ok(status) = std::process::Command::new("which")
                 .arg("oathtool")
@@ -468,12 +146,10 @@ impl StateMachine {
         let start = std::time::Instant::now();
 
         loop {
-            // Check if JVM crashed
             if !self.supervisor.is_running() {
                 return Ok(State::Error("JVM process exited before agent became ready".into()));
             }
 
-            // Try health check
             match self.agent_client.health().await {
                 Ok(true) => {
                     log::info!("Agent is healthy");
@@ -504,12 +180,10 @@ impl StateMachine {
                 Ok(windows) => {
                     for w in &windows {
                         let title_lower = w.title.to_lowercase();
-                        // Check for session conflict first
                         if title_lower.contains("existing session") {
                             log::info!("Session conflict dialog detected: {}", w.title);
                             return Ok(State::HandlingSessionConflict);
                         }
-                        // Check for login window
                         if title_lower.contains("ib gateway")
                             || title_lower.contains("ibkr gateway")
                             || title_lower.contains("login")
@@ -534,8 +208,6 @@ impl StateMachine {
     async fn do_authenticate(&mut self) -> Result<State, StateMachineError> {
         log::info!("Authenticating with IB Gateway");
 
-        // Find the login window and dispatch to LoginHandler
-        // This mirrors IBC's approach: LoginFrameHandler.handleWindow()
         let windows = self.agent_client.list_windows().await?;
         let login_window = windows.iter().find(|w| {
             let t = w.title.to_lowercase();
@@ -544,19 +216,15 @@ impl StateMachine {
 
         let win = match login_window {
             Some(w) => w,
-            None => return Ok(State::WaitingForLogin), // Window disappeared, go back
+            None => return Ok(State::WaitingForLogin),
         };
 
-        // Dispatch to the LoginHandler via the registry
-        // The LoginHandler fills credentials and clicks login,
-        // then sets its login_submitted flag to prevent re-dispatch
         match self.handler_registry.dispatch(&self.agent_client, win).await {
             Some(Ok(crate::handlers::HandlerResult::Handled)) => {
                 log::info!("Login submitted via handler");
             }
             Some(Ok(crate::handlers::HandlerResult::Error(msg))) => {
                 log::error!("Login handler reported error: {}", msg);
-                // Reset so we can retry
                 self.handler_registry.reset();
                 return Ok(State::WaitingForLogin);
             }
@@ -575,30 +243,11 @@ impl StateMachine {
             }
         }
 
-        // Wait for Gateway to process credentials, then check what appeared.
-        // IBC's flow: after clicking login, poll for either:
-        //   - 2FA dialog (Second Factor Authentication) -> handle it
-        //   - Session conflict dialog -> handle it
-        //   - Login error -> report it
-        //   - Main window (login succeeded) -> proceed
-        // We always go to WaitingFor2fa which handles all cases:
-        //   - If TOTP secret is set: enters the code
-        //   - If IB Key (mobile push): waits for user to approve on mobile
-        //   - If no 2FA required: dialog won't appear, we move on quickly
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         Ok(State::WaitingFor2fa)
     }
 
     async fn do_wait_for_2fa(&mut self) -> Result<State, StateMachineError> {
-        // This state handles three scenarios after login is submitted:
-        //
-        // 1. TOTP configured (TWOFACTOR_CODE set): detect 2FA dialog, enter code, submit
-        // 2. IB Key / mobile push (no TOTP): detect 2FA dialog, wait for user to approve
-        //    on mobile, dialog disappears when approved
-        // 3. No 2FA required (paper accounts): no 2FA dialog appears, move on quickly
-        //
-        // Mirrors IBC's SecondFactorAuthenticationDialogHandler which handles all cases.
-
         let has_totp = crate::config::env_or_file("TWOFACTOR_CODE")
             .map(|s| !s.is_empty())
             .unwrap_or(false);
@@ -609,11 +258,7 @@ impl StateMachine {
         let start = std::time::Instant::now();
         let mut twofa_seen = false;
         let mut device_selected = false;
-
-        // Short initial grace period — if no 2FA dialog appears within 10s,
-        // assume 2FA is not required (paper accounts, etc.)
         let grace_period = std::time::Duration::from_secs(10);
-
         let mut consecutive_agent_failures: u32 = 0;
 
         log::info!("Checking for 2FA dialog (timeout={}s, totp={})",
@@ -627,7 +272,6 @@ impl StateMachine {
             match self.agent_client.list_windows().await {
                 Ok(windows) => {
                     consecutive_agent_failures = 0;
-                    // Check for session conflict (can appear instead of 2FA)
                     let has_conflict = windows.iter().any(|w| {
                         w.title.to_lowercase().contains("existing session")
                     });
@@ -635,7 +279,6 @@ impl StateMachine {
                         return Ok(State::HandlingSessionConflict);
                     }
 
-                    // Check if 2FA dialog is present
                     let twofa = windows.iter().find(|w| {
                         w.title.to_lowercase().contains("second factor")
                     });
@@ -646,10 +289,6 @@ impl StateMachine {
                             log::info!("2FA dialog detected: {}", win.title);
                         }
 
-                        // IBC's SecondFactorDevice handling:
-                        // First appearance of the 2FA dialog may be a device selection list.
-                        // Select the configured device and click OK, then the actual
-                        // 2FA challenge dialog appears.
                         if !device_selected {
                             let twofa_device = std::env::var("TWOFA_DEVICE")
                                 .unwrap_or_default();
@@ -667,16 +306,15 @@ impl StateMachine {
                                     }
                                     _ => {
                                         log::debug!("No device list found — this is the actual 2FA challenge");
-                                        device_selected = true; // Skip future attempts
+                                        device_selected = true;
                                     }
                                 }
                             } else {
-                                device_selected = true; // No device configured, skip
+                                device_selected = true;
                             }
                         }
 
                         if has_totp {
-                            // TOTP mode: enter the code via handler
                             match self.handler_registry.dispatch(&self.agent_client, win).await {
                                 Some(Ok(crate::handlers::HandlerResult::Handled)) => {
                                     log::info!("TOTP code submitted, waiting for verification");
@@ -685,7 +323,6 @@ impl StateMachine {
                                 }
                                 Some(Ok(crate::handlers::HandlerResult::Error(msg))) => {
                                     log::error!("TOTP entry failed: {} — will retry on next loop", msg);
-                                    // Don't fall through — wait and retry
                                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                                     continue;
                                 }
@@ -699,16 +336,12 @@ impl StateMachine {
                                 }
                             }
                         } else {
-                            // IB Key / mobile push: just wait for user to approve
-                            // The dialog will disappear when approved on mobile
                             log::debug!("Waiting for 2FA approval on mobile device...");
                         }
                     } else if twofa_seen {
-                        // 2FA dialog was present but now gone — user approved on mobile
                         log::info!("2FA completed (approved on mobile device)");
                         return Ok(State::DismissingPopups);
                     } else if !twofa_seen && start.elapsed() > grace_period {
-                        // No 2FA dialog appeared within grace period — not required
                         log::info!("No 2FA dialog appeared — proceeding without 2FA");
                         return Ok(State::DismissingPopups);
                     }
@@ -724,13 +357,6 @@ impl StateMachine {
             }
 
             if start.elapsed() > max_wait {
-                // IBC's behavior on 2FA timeout:
-                // - ReloginAfterSecondFactorAuthenticationTimeout=yes -> restart login sequence
-                // - TWOFA_TIMEOUT_ACTION=restart -> restart the whole login flow
-                // - TWOFA_TIMEOUT_ACTION=exit -> shut down
-                //
-                // The "restart" action re-initiates the login sequence, giving the user
-                // another chance to approve on mobile. This can repeat indefinitely.
                 let relogin = std::env::var("RELOGIN_AFTER_TWOFA_TIMEOUT")
                     .map(|v| matches!(v.to_lowercase().as_str(), "yes" | "true" | "1"))
                     .unwrap_or(false);
@@ -740,10 +366,6 @@ impl StateMachine {
                         "2FA timed out after {}s — restarting login sequence (will retry until approved)",
                         timeout_secs
                     );
-                    // Reset the LoginHandler so it can fill credentials again
-                    // The handler's login_submitted flag needs to be cleared for re-login
-                    // For now, transition to Restarting which kills and relaunches the JVM
-                    // (matching IBC's cold restart behavior)
                     return Ok(State::Restarting);
                 } else {
                     log::error!("2FA timed out after {}s — shutting down", timeout_secs);
@@ -840,9 +462,7 @@ impl StateMachine {
                     Ok(State::Restarting)
                 } else {
                     log::error!("API configuration FAILED: {} — will retry ({}/{})", e, self.config_retries, MAX_CONFIG_RETRIES);
-                    // Wait before retrying to let any lingering dialogs/menus close
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    // Stay in ConfiguringApi — the state machine loop will call us again
                     Ok(State::ConfiguringApi)
                 }
             }
@@ -852,9 +472,6 @@ impl StateMachine {
     async fn do_connected(&mut self) -> Result<State, StateMachineError> {
         log::info!("Gateway connected — entering monitoring loop");
 
-        // Start socat port forwarding NOW — configuration is complete,
-        // Read-Only API is unchecked, all settings applied.
-        // ibctl owns socat directly, no race conditions possible.
         let (api_port, socat_port) = if self.config.auth.trading_mode == crate::config::TradingMode::Paper {
             (self.config.gateway.paper_api_port, self.config.gateway.paper_socat_port)
         } else {
@@ -865,22 +482,15 @@ impl StateMachine {
         let poll_interval = std::time::Duration::from_secs(5);
 
         loop {
-            // Check if JVM is still running
             if !self.supervisor.is_running() {
                 log::warn!("JVM process exited unexpectedly");
                 return Ok(State::Restarting);
             }
 
-            // Poll for new dialogs that need handling
             if let Ok(windows) = self.agent_client.list_windows().await {
                 for win in &windows {
                     let title_lower = win.title.to_lowercase();
 
-                    // Re-login dialog: "RE-LOGIN IS REQUIRED"
-                    // Clicking Re-login doesn't work reliably — IB Key keeps failing.
-                    // Instead click Cancel, which returns to the login form with
-                    // username/API type/trading mode pre-filled and cursor in password.
-                    // Then we re-enter password and click Login for a fresh auth cycle.
                     if title_lower.contains("re-login") || title_lower.contains("login is required") {
                         log::info!("Connection lost — clicking Cancel to return to login form");
                         let _ = self.agent_client.click_button(win.id, "Cancel").await;
@@ -889,15 +499,12 @@ impl StateMachine {
                         return Ok(State::WaitingForLogin);
                     }
 
-                    // Handle other dialogs normally (accept connection, etc.)
                     let _ = self.handler_registry.dispatch(&self.agent_client, win).await;
                 }
             }
 
-            // Process any pending dashboard queries
             self.process_queries().await;
 
-            // Check for signals/commands
             if let Some(interrupt) = self.check_interrupts().await {
                 match interrupt {
                     Interrupt::Signal(Signal::Terminate | Signal::Interrupt) => {
@@ -926,12 +533,8 @@ impl StateMachine {
     async fn do_restart(&mut self) -> Result<State, StateMachineError> {
         log::info!("Restarting IB Gateway");
 
-        // Stop socat first — no new client connections during restart
         self.stop_socat();
 
-        // Kill and WAIT for the JVM to fully exit before launching a new one.
-        // Without waiting, the old process can linger and cause "EXISTING SESSION DETECTED"
-        // when the new instance tries to log in with the same account.
         if self.supervisor.is_running() {
             log::info!("Sending SIGTERM to JVM");
             if let Err(e) = self.supervisor.kill().await {
@@ -939,28 +542,22 @@ impl StateMachine {
             }
         }
 
-        // Wait until the child process is fully reaped
         match self.supervisor.wait().await {
             Ok(status) => log::info!("JVM exited with status: {}", status),
             Err(e) => log::warn!("JVM wait failed: {} (may already be dead)", e),
         }
 
-        // Extra safety: sleep to let the OS fully clean up the process
-        // and release any ports/sockets held by the JVM
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
-        // Verify the old process is truly gone
         if self.supervisor.is_running() {
             log::error!("JVM still running after kill+wait — forcing SIGKILL");
             let _ = self.supervisor.kill().await;
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
 
-        // Clean up agent socket
         let socket = &self.config.agent.socket_path;
         let _ = std::fs::remove_file(socket);
 
-        // Reset all handler state so LoginHandler can fire again
         self.handler_registry.reset();
         log::info!("Handler state reset for fresh login");
 
@@ -969,16 +566,13 @@ impl StateMachine {
 
     async fn do_shutdown(&mut self) -> Result<(), StateMachineError> {
         log::info!("Shutting down");
-        // Stop socat
         self.stop_socat();
-        // Kill the JVM if it's running
         if self.supervisor.is_running() {
             log::info!("Stopping JVM process");
             if let Err(e) = self.supervisor.kill().await {
                 log::error!("Failed to kill JVM: {}", e);
             }
         }
-        // Clean up the agent socket
         let socket = &self.config.agent.socket_path;
         if std::path::Path::new(socket).exists() {
             if let Err(e) = std::fs::remove_file(socket) {
@@ -991,11 +585,9 @@ impl StateMachine {
 
     // --- Interrupt handling ---
 
-    /// Non-blocking check for pending signals or commands.
     async fn check_interrupts(&mut self) -> Option<Interrupt> {
         use tokio::sync::mpsc::error::TryRecvError;
 
-        // Check signals first (higher priority)
         match self.signal_rx.try_recv() {
             Ok(sig) => return Some(Interrupt::Signal(sig)),
             Err(TryRecvError::Empty) => {}
@@ -1004,14 +596,12 @@ impl StateMachine {
             }
         }
 
-        // Check commands
         match self.command_rx.try_recv() {
             Ok(cmd) => return Some(Interrupt::Command(cmd)),
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {}
         }
 
-        // Check cold restart (Sunday weekly)
         match self.cold_restart_rx.try_recv() {
             Ok(_) => return Some(Interrupt::ColdRestart),
             Err(TryRecvError::Empty) => {}
@@ -1021,7 +611,6 @@ impl StateMachine {
         None
     }
 
-    /// Handle a command received while in the Connected state.
     async fn handle_command(&mut self, cmd: Command) -> Result<(), StateMachineError> {
         match cmd {
             Command::ReconnectData => {
@@ -1046,148 +635,7 @@ impl StateMachine {
                 log::info!("EnableApi command received (not yet implemented)");
                 Ok(())
             }
-            // Stop, Exit, Restart are handled in the main loop
             _ => Ok(()),
         }
-    }
-}
-
-impl Drop for StateMachine {
-    fn drop(&mut self) {
-        // Reap socat child process to prevent zombies on abnormal exit
-        if let Some(ref mut child) = self.socat_process {
-            log::debug!("Drop: killing socat (PID {})", child.id());
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
-
-/// Internal enum for interrupt sources.
-enum Interrupt {
-    Signal(Signal),
-    Command(Command),
-    ColdRestart,
-}
-
-/// Compute client advisory fields from the current state.
-/// Returns (should_connect, should_wait, wait_reason, client_id_likely_stale).
-pub(crate) fn client_advisory(state: &State) -> (bool, bool, Option<&'static str>, bool) {
-    let (should_connect, should_wait, wait_reason) = match state {
-        State::Init | State::Launching | State::WaitingForAgent => (false, true, Some("launching")),
-        State::WaitingForLogin | State::Authenticating => (false, true, Some("logging_in")),
-        State::WaitingFor2fa => (false, true, Some("2fa_pending")),
-        State::HandlingSessionConflict => (false, true, Some("session_conflict")),
-        State::DismissingPopups | State::ConfiguringApi => (false, true, Some("configuring")),
-        State::Connected => (true, false, None),
-        State::Restarting => (false, true, Some("restarting")),
-        State::Shutdown => (false, false, None),
-        State::Error(_) => (false, false, None),
-    };
-    let client_id_likely_stale = matches!(state, State::Restarting);
-    (should_connect, should_wait, wait_reason, client_id_likely_stale)
-}
-
-/// Simple UTC timestamp string (avoids chrono dependency).
-fn chrono_timestamp() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    // Format as ISO-ish: just use epoch seconds for now
-    // A proper implementation would format as "2026-03-29T17:05:02Z"
-    format!("{}", secs)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // --- client_advisory tests ---
-
-    #[test]
-    fn test_connected_should_connect() {
-        let (should_connect, should_wait, reason, stale) = client_advisory(&State::Connected);
-        assert!(should_connect);
-        assert!(!should_wait);
-        assert!(reason.is_none());
-        assert!(!stale);
-    }
-
-    #[test]
-    fn test_init_should_wait() {
-        let (should_connect, should_wait, reason, _) = client_advisory(&State::Init);
-        assert!(!should_connect);
-        assert!(should_wait);
-        assert_eq!(reason, Some("launching"));
-    }
-
-    #[test]
-    fn test_2fa_pending() {
-        let (should_connect, should_wait, reason, _) = client_advisory(&State::WaitingFor2fa);
-        assert!(!should_connect);
-        assert!(should_wait);
-        assert_eq!(reason, Some("2fa_pending"));
-    }
-
-    #[test]
-    fn test_restarting_stale_ids() {
-        let (_, should_wait, reason, stale) = client_advisory(&State::Restarting);
-        assert!(should_wait);
-        assert_eq!(reason, Some("restarting"));
-        assert!(stale);
-    }
-
-    #[test]
-    fn test_shutdown_no_connect_no_wait() {
-        let (should_connect, should_wait, _, _) = client_advisory(&State::Shutdown);
-        assert!(!should_connect);
-        assert!(!should_wait);
-    }
-
-    #[test]
-    fn test_error_no_connect_no_wait() {
-        let (should_connect, should_wait, _, _) = client_advisory(&State::Error("test".into()));
-        assert!(!should_connect);
-        assert!(!should_wait);
-    }
-
-    #[test]
-    fn test_configuring_api_should_wait() {
-        let (should_connect, should_wait, reason, _) = client_advisory(&State::ConfiguringApi);
-        assert!(!should_connect);
-        assert!(should_wait);
-        assert_eq!(reason, Some("configuring"));
-    }
-
-    #[test]
-    fn test_all_states_covered() {
-        // Ensure every state variant produces valid advisory
-        let states = vec![
-            State::Init, State::Launching, State::WaitingForAgent,
-            State::WaitingForLogin, State::Authenticating,
-            State::WaitingFor2fa, State::HandlingSessionConflict,
-            State::DismissingPopups, State::ConfiguringApi,
-            State::Connected, State::Restarting, State::Shutdown,
-            State::Error("test".into()),
-        ];
-        for state in &states {
-            let (sc, sw, _, _) = client_advisory(state);
-            // Connected is the only state that allows connection
-            if matches!(state, State::Connected) {
-                assert!(sc, "Connected should allow connect");
-                assert!(!sw, "Connected should not wait");
-            }
-        }
-    }
-
-    // --- State Display tests ---
-
-    #[test]
-    fn test_state_display() {
-        assert_eq!(State::Init.to_string(), "Init");
-        assert_eq!(State::Connected.to_string(), "Connected");
-        assert_eq!(State::WaitingFor2fa.to_string(), "WaitingFor2fa");
-        assert_eq!(State::Error("boom".into()).to_string(), "Error(boom)");
     }
 }
