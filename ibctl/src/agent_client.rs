@@ -81,6 +81,7 @@ pub trait AgentApi: Send + Sync {
     fn click_at(&self, window_id: u64, x: i32, y: i32) -> impl std::future::Future<Output = Result<bool, AgentError>> + Send;
     fn select_tree_node(&self, window_id: u64, node_name: &str) -> impl std::future::Future<Output = Result<bool, AgentError>> + Send;
     fn dump_components(&self, window_id: u64) -> impl std::future::Future<Output = Result<serde_json::Value, AgentError>> + Send;
+    fn list_tabs(&self, window_id: u64) -> impl std::future::Future<Output = Result<serde_json::Value, AgentError>> + Send;
     fn send_key(&self, window_id: u64, key: &str) -> impl std::future::Future<Output = Result<bool, AgentError>> + Send;
 }
 
@@ -141,6 +142,9 @@ impl AgentClient {
     pub async fn dump_components(&self, window_id: u64) -> Result<serde_json::Value, AgentError> {
         self.inner.dump_components_boxed(window_id).await
     }
+    pub async fn list_tabs(&self, window_id: u64) -> Result<serde_json::Value, AgentError> {
+        self.inner.list_tabs_boxed(window_id).await
+    }
     pub async fn send_key(&self, window_id: u64, key: &str) -> Result<bool, AgentError> {
         self.inner.send_key_boxed(window_id, key).await
     }
@@ -163,6 +167,7 @@ trait AgentApiBoxed: Send + Sync {
     fn click_at_boxed(&self, window_id: u64, x: i32, y: i32) -> BoxFut<'_, Result<bool, AgentError>>;
     fn select_tree_node_boxed<'a>(&'a self, window_id: u64, node_name: &'a str) -> BoxFut<'a, Result<bool, AgentError>>;
     fn dump_components_boxed(&self, window_id: u64) -> BoxFut<'_, Result<serde_json::Value, AgentError>>;
+    fn list_tabs_boxed(&self, window_id: u64) -> BoxFut<'_, Result<serde_json::Value, AgentError>>;
     fn send_key_boxed<'a>(&'a self, window_id: u64, key: &'a str) -> BoxFut<'a, Result<bool, AgentError>>;
 }
 
@@ -197,6 +202,9 @@ impl<T: AgentApi> AgentApiBoxed for T {
     }
     fn dump_components_boxed(&self, window_id: u64) -> BoxFut<'_, Result<serde_json::Value, AgentError>> {
         Box::pin(self.dump_components(window_id))
+    }
+    fn list_tabs_boxed(&self, window_id: u64) -> BoxFut<'_, Result<serde_json::Value, AgentError>> {
+        Box::pin(self.list_tabs(window_id))
     }
     fn send_key_boxed<'a>(&'a self, window_id: u64, key: &'a str) -> BoxFut<'a, Result<bool, AgentError>> {
         Box::pin(self.send_key(window_id, key))
@@ -268,6 +276,11 @@ impl AgentApi for UdsAgent {
     }
     async fn dump_components(&self, window_id: u64) -> Result<serde_json::Value, AgentError> {
         let path = format!("/windows/{}/dump", window_id);
+        let resp: AgentResponse<serde_json::Value> = self.get(&path).await?;
+        self.unwrap_response(resp)
+    }
+    async fn list_tabs(&self, window_id: u64) -> Result<serde_json::Value, AgentError> {
+        let path = format!("/windows/{}/tabs", window_id);
         let resp: AgentResponse<serde_json::Value> = self.get(&path).await?;
         self.unwrap_response(resp)
     }
@@ -392,6 +405,7 @@ impl AgentApi for MockAgent {
     async fn click_at(&self, _: u64, _: i32, _: i32) -> Result<bool, AgentError> { Ok(true) }
     async fn select_tree_node(&self, _: u64, _: &str) -> Result<bool, AgentError> { Ok(true) }
     async fn dump_components(&self, _: u64) -> Result<serde_json::Value, AgentError> { Ok(serde_json::json!({})) }
+    async fn list_tabs(&self, _: u64) -> Result<serde_json::Value, AgentError> { Ok(serde_json::json!({"tabs": []})) }
     async fn send_key(&self, _: u64, _: &str) -> Result<bool, AgentError> { Ok(true) }
 }
 

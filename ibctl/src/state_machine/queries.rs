@@ -61,16 +61,16 @@ impl StateMachine {
 
         let jvm = self.supervisor.jvm_info();
 
-        // Get connected client tabs when in Connected state
+        // Get known client IDs from Gateway's JTabbedPane tabs
+        // Note: tabs persist after disconnect — they show "ever connected" IDs
         let mut client_ids: Vec<String> = Vec::new();
         if is_connected {
             if let Ok(windows) = self.agent_client.list_windows().await {
                 for w in &windows {
-                    if let Ok(dump) = self.agent_client.dump_components(w.id).await {
-                        if let Some(tabs) = dump.get("tabs").and_then(|t| t.as_array()) {
+                    if let Ok(tabs_data) = self.agent_client.list_tabs(w.id).await {
+                        if let Some(tabs) = tabs_data.get("tabs").and_then(|t| t.as_array()) {
                             for tab in tabs {
                                 if let Some(title) = tab.get("title").and_then(|t| t.as_str()) {
-                                    // Tab titles are like "Client 50", "Client 1"
                                     client_ids.push(title.to_string());
                                 }
                             }

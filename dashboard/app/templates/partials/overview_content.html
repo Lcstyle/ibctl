@@ -95,9 +95,9 @@
         </div>
     </div>
 
-    <!-- Connected Clients Card -->
+    <!-- Known Client IDs Card -->
     <div class="card" style="margin-top: 8px;">
-        <div class="card-label">Connected Clients</div>
+        <div class="card-label">Known Client IDs</div>
         <div style="display: flex; gap: 20px; margin-top: 6px; flex-wrap: wrap; align-items: center;">
             <span style="font-size: 20px; font-weight: bold; color: {% if clients.get('count', 0) > 0 %}#4ade80{% else %}#888{% endif %};">
                 {{ clients.get('count', 0) }}
