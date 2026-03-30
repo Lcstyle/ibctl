@@ -8,6 +8,39 @@ set -euo pipefail
 # and IPv4 clients can't connect. Matches gnzsnz's JDK_JAVA_OPTIONS setting.
 export JDK_JAVA_OPTIONS="${JDK_JAVA_OPTIONS:--Djava.net.preferIPv4Stack=true}"
 
+# --- Auto-update ibctl binaries from GitHub releases ---
+# Set IBCTL_AUTO_UPDATE=true to download latest release on every container start.
+# Set IBCTL_VERSION to pin a specific version (e.g., "v0.6.0").
+# Binaries are cached at /opt/ibctl/ — only re-downloaded when version changes.
+if [ "${IBCTL_AUTO_UPDATE:-false}" = "true" ]; then
+    IBCTL_DL_VERSION="${IBCTL_VERSION:-latest}"
+    if [ "$IBCTL_DL_VERSION" = "latest" ]; then
+        IBCTL_DL_URL="https://github.com/Lcstyle/ibctl/releases/latest/download"
+    else
+        IBCTL_DL_URL="https://github.com/Lcstyle/ibctl/releases/download/${IBCTL_DL_VERSION}"
+    fi
+
+    # Check if we need to update (compare with cached version marker)
+    CURRENT_VERSION=""
+    [ -f /opt/ibctl/.version ] && CURRENT_VERSION=$(cat /opt/ibctl/.version)
+
+    if [ "$IBCTL_DL_VERSION" = "latest" ] || [ "$CURRENT_VERSION" != "$IBCTL_DL_VERSION" ]; then
+        echo "Updating ibctl binaries (${IBCTL_DL_VERSION})..."
+        if curl -sfL -o /tmp/ibctl "${IBCTL_DL_URL}/ibctl" && \
+           curl -sfL -o /tmp/ibctl-agent.jar "${IBCTL_DL_URL}/ibctl-agent.jar"; then
+            cp /tmp/ibctl /opt/ibctl/ibctl && chmod +x /opt/ibctl/ibctl
+            cp /tmp/ibctl-agent.jar /opt/ibctl/ibctl-agent.jar
+            echo "$IBCTL_DL_VERSION" > /opt/ibctl/.version
+            echo "Updated ibctl to ${IBCTL_DL_VERSION}"
+        else
+            echo "WARNING: Failed to download ibctl binaries — using existing"
+        fi
+        rm -f /tmp/ibctl /tmp/ibctl-agent.jar
+    else
+        echo "ibctl ${CURRENT_VERSION} already installed — skipping update"
+    fi
+fi
+
 echo "=========================================="
 echo "  ibctl starting (mode=${TRADING_MODE:-live})"
 echo "=========================================="
