@@ -291,7 +291,7 @@ impl StateMachine {
                             let twofa_device = &self.config.twofa.device;
                             if !twofa_device.is_empty() {
                                 log::info!("Selecting 2FA device: {}", twofa_device);
-                                match self.agent_client.select_list_item(win.id, &twofa_device).await {
+                                match self.agent_client.select_list_item(win.id, twofa_device).await {
                                     Ok(true) => {
                                         log::info!("Selected '{}' in device list", twofa_device);
                                         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
