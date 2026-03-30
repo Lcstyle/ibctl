@@ -24,6 +24,9 @@ pub enum ConfigError {
 }
 
 /// Top-level configuration for ibctl.
+/// Unknown TOML sections are silently ignored — this allows the config file
+/// to contain sections for other components (e.g., [dashboard]) without
+/// breaking ibctl's parser.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -35,6 +38,9 @@ pub struct Config {
     pub agent: AgentConfig,
     pub logging: LoggingConfig,
     pub timing: TimingConfig,
+    /// Catch-all for unknown sections (e.g., [dashboard]) — silently ignored.
+    #[serde(flatten)]
+    _extra: std::collections::HashMap<String, toml::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -143,6 +149,7 @@ impl Default for Config {
             agent: AgentConfig::default(),
             logging: LoggingConfig::default(),
             timing: TimingConfig::default(),
+            _extra: std::collections::HashMap::new(),
         }
     }
 }
