@@ -24,7 +24,15 @@ async def overview_page(request: Request):
 @router.get("/state", response_class=HTMLResponse)
 async def state_page(request: Request):
     templates = request.app.state.templates
-    return templates.TemplateResponse(request, "state.html", {"active_tab": "state"})
+    registry = request.app.state.instance_registry
+    modes = registry.modes()
+    # Default to paper if available, otherwise first mode
+    default_mode = "paper" if "paper" in modes else modes[0]
+    return templates.TemplateResponse(request, "state.html", {
+        "active_tab": "state",
+        "modes": modes,
+        "default_mode": default_mode,
+    })
 
 
 @router.get("/config", response_class=HTMLResponse)
@@ -81,9 +89,13 @@ async def overview_partial(request: Request):
 
 
 @router.get("/partials/state-history", response_class=HTMLResponse)
-async def state_history_partial(request: Request):
-    client = request.app.state.ibctl_client
+async def state_history_partial(request: Request, mode: str | None = None):
+    registry = request.app.state.instance_registry
     templates = request.app.state.templates
+
+    # Use requested mode or default to primary
+    target_mode = mode or registry.primary_mode()
+    client = registry.get_client(target_mode)
 
     try:
         state = await client.state()

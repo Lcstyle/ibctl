@@ -1,10 +1,39 @@
 {% extends "base.html" %}
 {% block content %}
 <h2>State Machine</h2>
+
+<!-- Mode selector -->
+<div style="margin-bottom: 12px;">
+    <select id="state-mode-select"
+            hx-get="/partials/state-history"
+            hx-trigger="change"
+            hx-target="#state-content"
+            hx-swap="innerHTML"
+            name="mode"
+            hx-include="this"
+            style="padding: 6px 12px; background: #1a1a2e; color: #e0e0e0; border: 1px solid #333; border-radius: 4px;">
+        {% for m in modes %}
+        <option value="{{ m }}" {% if m == default_mode %}selected{% endif %}>{{ m | upper }}</option>
+        {% endfor %}
+    </select>
+</div>
+
 <div id="state-content"
-     hx-get="/partials/state-history"
+     hx-get="/partials/state-history?mode={{ default_mode }}"
      hx-trigger="load, every 3s"
      hx-swap="innerHTML">
     <div class="loading">Loading state history...</div>
 </div>
+
+<script>
+// When auto-polling, include the current dropdown value
+document.addEventListener('htmx:configRequest', function(evt) {
+    if (evt.detail.elt.id === 'state-content') {
+        var sel = document.getElementById('state-mode-select');
+        if (sel) {
+            evt.detail.path = '/partials/state-history?mode=' + sel.value;
+        }
+    }
+});
+</script>
 {% endblock %}
