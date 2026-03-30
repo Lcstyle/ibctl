@@ -14,13 +14,16 @@ router = APIRouter()
 
 
 @router.get("/api/v1/status")
-async def get_status(request: Request):
+async def get_status(request: Request, mode: str | None = None):
     """Full gateway status with client advisory.
 
     This is the primary endpoint for API clients to determine
     whether the gateway is ready for connections.
+    Pass ?mode=paper or ?mode=live to query a specific instance.
     """
-    client = request.app.state.ibctl_client
+    registry = request.app.state.instance_registry
+    target_mode = mode or registry.primary_mode()
+    client = registry.get_client(target_mode)
     try:
         status = await client.status()
         return asdict(status)

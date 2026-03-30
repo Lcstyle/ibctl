@@ -390,7 +390,7 @@ document.addEventListener('click', function(e) {
 });
 async function updateReel() {
     try {
-        var resp = await fetch('/api/v1/status');
+        var resp = await fetch('/api/v1/status?mode=' + getMode());
         var data = await resp.json();
         var state = data.state || '—';
         var uptime = data.uptime_secs || 0;
