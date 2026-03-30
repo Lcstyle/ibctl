@@ -1,0 +1,6 @@
+{% for entry in logs %}
+<div class="log-line log-level-{{ entry.level }}">{{ entry.timestamp }} [{{ entry.level }}] {{ entry.message }}</div>
+{% endfor %}
+{% if not logs %}
+<div style="color: #666;">No log entries (log buffer not yet implemented in ibctl)</div>
+{% endif %}

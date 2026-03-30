@@ -29,6 +29,14 @@ control_from = ["127.0.0.1", "172.0.0.0/8"]
 [agent]
 socket_path = "/run/ibctl/agent.sock"
 
+[dashboard]
+enabled = true
+port = 8080
+# Bearer token for API auth — empty means no auth (single-user default)
+token = ""
+# Enable debug endpoints (force state transitions, raw agent commands)
+debug_mode = false
+
 [logging]
 level = "debug"
 
