@@ -53,10 +53,13 @@ impl StateMachine {
         let socat_running = self.socat_process.as_mut()
             .map(|c| c.try_wait().ok().flatten().is_none())
             .unwrap_or(false);
+        let socat_pid = self.socat_process.as_ref().map(|c| c.id());
 
         let is_connected = self.state == State::Connected;
         let (should_connect, should_wait, wait_reason, client_id_likely_stale) =
             client_advisory(&self.state);
+
+        let jvm = self.supervisor.jvm_info();
 
         serde_json::json!({
             "ready": is_connected && socat_running,
@@ -64,8 +67,17 @@ impl StateMachine {
             "trading_mode": self.config.auth.trading_mode.to_string(),
             "uptime_secs": uptime,
             "connected_uptime_secs": connected_uptime,
-            "socat_running": socat_running,
-            "jvm_running": self.supervisor.is_running(),
+            "jvm": {
+                "pid": jvm.pid,
+                "alive": jvm.alive,
+                "uptime_secs": jvm.started_at,
+                "config_dir": jvm.config_dir,
+                "agent_socket": jvm.agent_socket,
+            },
+            "socat": {
+                "running": socat_running,
+                "pid": socat_pid,
+            },
             "stats": self.stats,
             "client_advisory": {
                 "should_connect": should_connect && socat_running,

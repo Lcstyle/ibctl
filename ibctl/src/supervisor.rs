@@ -57,6 +57,16 @@ pub const MODULE_ACCESS_FLAGS: &[&str] = &[
 const GATEWAY_MAIN_CLASS: &str = "ibgateway.GWClient";
 const TWS_MAIN_CLASS: &str = "jclient.LoginFrame";
 
+/// JVM process metadata exposed for dashboard visibility.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct JvmInfo {
+    pub pid: Option<u32>,
+    pub alive: bool,
+    pub started_at: Option<u64>,
+    pub config_dir: String,
+    pub agent_socket: String,
+}
+
 /// Supervisor manages the lifecycle of a single IB Gateway/TWS JVM process.
 pub struct Supervisor {
     config: GatewayConfig,
@@ -64,6 +74,8 @@ pub struct Supervisor {
     agent_socket_path: String,
     child: Option<Child>,
     shutdown_timeout_secs: u64,
+    launched_at: Option<std::time::Instant>,
+    settings_path_resolved: String,
 }
 
 impl Supervisor {
@@ -79,6 +91,8 @@ impl Supervisor {
             agent_socket_path,
             child: None,
             shutdown_timeout_secs,
+            launched_at: None,
+            settings_path_resolved: String::new(),
         }
     }
 
@@ -194,8 +208,22 @@ impl Supervisor {
         let child = cmd.spawn()?;
         log::info!("JVM started with PID {}", child.id());
         self.child = Some(child);
+        self.launched_at = Some(std::time::Instant::now());
+        self.settings_path_resolved = settings_path;
 
         Ok(())
+    }
+
+    /// Get JVM metadata for dashboard display.
+    pub fn jvm_info(&mut self) -> JvmInfo {
+        let alive = self.is_running();
+        JvmInfo {
+            pid: self.child.as_ref().map(|c| c.id()),
+            alive,
+            started_at: self.launched_at.map(|t| t.elapsed().as_secs()),
+            config_dir: self.settings_path_resolved.clone(),
+            agent_socket: self.agent_socket_path.clone(),
+        }
     }
 
     /// Wait for the JVM process to exit and return its exit status.

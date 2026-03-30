@@ -2,12 +2,14 @@
 {% set advisory = s.get('client_advisory', {}) %}
 {% set stats = s.get('stats', {}) %}
 {% set mode = s.get('trading_mode', 'unknown') %}
+{% set jvm = s.get('jvm', {}) %}
+{% set socat = s.get('socat', {}) %}
 
 <!-- Instance header -->
 <div class="instance-section">
     <div class="instance-header">
         <span class="instance-badge {% if mode == 'live' or mode == 'both' %}badge-live{% else %}badge-paper{% endif %}">
-            LIVE
+            {{ mode | upper }}
         </span>
         {% if s.get('ready') %}
         <span class="health-pill health-ok">Connected</span>
@@ -35,22 +37,56 @@
             </div>
         </div>
         <div class="card">
-            <div class="card-label">JVM</div>
-            <div class="card-value {% if s.get('jvm_running') %}status-connected{% else %}status-error{% endif %}">
-                {{ 'Running' if s.get('jvm_running') else 'Stopped' }}
-            </div>
-            <div class="card-detail">socat {{ 'active' if s.get('socat_running') else 'inactive' }}</div>
-        </div>
-        <div class="card">
             <div class="card-label">Stats</div>
-            <div class="card-value">{{ stats.get('dialogs_dismissed', 0) }}</div>
+            <div class="card-value">{{ stats.get('dialogs_dismissed', 0) }} dialogs</div>
             <div class="card-detail">{{ stats.get('restarts_today', 0) }} restarts</div>
         </div>
     </div>
 
+    <!-- JVM Process Card -->
+    <div class="card" style="margin-top: 8px;">
+        <div class="card-label">JVM Process</div>
+        <div style="display: flex; gap: 20px; margin-top: 6px; flex-wrap: wrap;">
+            <span class="{% if jvm.get('alive') %}status-connected{% else %}status-error{% endif %}">
+                {{ 'Running' if jvm.get('alive') else 'Stopped' }}
+            </span>
+            {% if jvm.get('pid') %}
+            <span style="color: #888;">PID {{ jvm.get('pid') }}</span>
+            {% endif %}
+            {% if jvm.get('uptime_secs') is not none %}
+            {% set ju = jvm.get('uptime_secs', 0) %}
+            <span style="color: #888;">
+                {% if ju > 3600 %}{{ (ju // 3600) }}h {{ ((ju % 3600) // 60) }}m
+                {% elif ju > 60 %}{{ (ju // 60) }}m {{ (ju % 60) }}s
+                {% else %}{{ ju }}s{% endif %}
+            </span>
+            {% endif %}
+        </div>
+        {% if jvm.get('config_dir') %}
+        <div class="card-detail" style="margin-top: 4px;">Config: {{ jvm.get('config_dir') }}</div>
+        {% endif %}
+        {% if jvm.get('agent_socket') %}
+        <div class="card-detail">Agent: {{ jvm.get('agent_socket') }}</div>
+        {% endif %}
+    </div>
+
+    <!-- Socat Port Forwarding Card -->
+    <div class="card" style="margin-top: 8px;">
+        <div class="card-label">Socat Port Forwarding</div>
+        <div style="display: flex; gap: 20px; margin-top: 6px;">
+            <span class="{% if socat.get('running') %}status-connected{% else %}status-error{% endif %}">
+                {{ 'Active' if socat.get('running') else 'Inactive' }}
+            </span>
+            {% if socat.get('pid') %}
+            <span style="color: #888;">PID {{ socat.get('pid') }}</span>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Client Advisory Card -->
     <div class="card" style="margin-top: 8px;">
         <div class="card-label">Client Advisory</div>
-        <div style="display: flex; gap: 20px; margin-top: 6px;">
+        <div style="display: flex; gap: 20px; margin-top: 6px; flex-wrap: wrap;">
             <span class="{% if advisory.get('should_connect') %}status-connected{% else %}status-error{% endif %}">
                 {{ 'Connect OK' if advisory.get('should_connect') else 'Do Not Connect' }}
             </span>
@@ -65,16 +101,17 @@
 </div>
 
 {% if mode == 'both' %}
-<!-- Paper instance placeholder -->
+<!-- Paper instance -->
 <div class="instance-section" style="margin-top: 16px;">
     <div class="instance-header">
         <span class="instance-badge badge-paper">PAPER</span>
-        <span class="health-pill" style="background: #333; color: #888;">Status pending</span>
+        <span class="health-pill" style="background: #333; color: #888;">Separate instance</span>
     </div>
     <div class="card">
         <div class="card-detail" style="color: #666;">
-            Paper instance monitoring requires multi-instance status API (planned).
-            Paper Gateway is running independently — check VNC for visual status.
+            Paper instance runs independently with its own ibctl process.
+            Paper command server is disabled — status available via VNC or
+            by querying the paper API port directly.
         </div>
     </div>
 </div>
