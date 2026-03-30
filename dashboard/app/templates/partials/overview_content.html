@@ -1,17 +1,19 @@
-{% set s = status %}
+{% for inst in instances %}
+{% set s = inst.get('status', {}) %}
 {% set advisory = s.get('client_advisory', {}) %}
 {% set stats = s.get('stats', {}) %}
-{% set mode = s.get('trading_mode', 'unknown') %}
 {% set jvm = s.get('jvm', {}) %}
 {% set socat = s.get('socat', {}) %}
+{% set mode = inst.get('mode', 'unknown') %}
 
-<!-- Instance header -->
-<div class="instance-section">
+<div class="instance-section" {% if not loop.first %}style="margin-top: 16px;"{% endif %}>
     <div class="instance-header">
-        <span class="instance-badge {% if mode == 'live' or mode == 'both' %}badge-live{% else %}badge-paper{% endif %}">
+        <span class="instance-badge {% if mode == 'live' %}badge-live{% else %}badge-paper{% endif %}">
             {{ mode | upper }}
         </span>
-        {% if s.get('ready') %}
+        {% if inst.get('error') %}
+        <span class="health-pill health-error">Unreachable</span>
+        {% elif s.get('ready') %}
         <span class="health-pill health-ok">Connected</span>
         {% elif advisory.get('should_wait') %}
         <span class="health-pill health-warning">{{ advisory.get('wait_reason', 'waiting') | title }}</span>
@@ -20,10 +22,17 @@
         {% endif %}
     </div>
 
+    {% if inst.get('error') %}
+    <div class="card">
+        <div class="card-label">Error</div>
+        <div class="status-error">{{ inst.get('error') }}</div>
+    </div>
+    {% else %}
+
     <div class="status-cards">
         <div class="card">
             <div class="card-label">State</div>
-            <div class="card-value {% if s.get('state') == 'Connected' %}status-connected{% elif 'Error' in s.get('state', '') %}status-error{% else %}status-warning{% endif %}">
+            <div class="card-value {% if s.get('state') == 'Connected' %}status-connected{% elif 'Error' in (s.get('state', '') | string) %}status-error{% else %}status-warning{% endif %}">
                 {{ s.get('state', 'Unknown') }}
             </div>
         </div>
@@ -31,9 +40,11 @@
             <div class="card-label">Uptime</div>
             <div class="card-value">
                 {% set u = s.get('connected_uptime_secs') or s.get('uptime_secs', 0) %}
+                {% if u is not none %}
                 {% if u > 3600 %}{{ (u // 3600) }}h {{ ((u % 3600) // 60) }}m
                 {% elif u > 60 %}{{ (u // 60) }}m {{ (u % 60) }}s
                 {% else %}{{ u }}s{% endif %}
+                {% else %}—{% endif %}
             </div>
         </div>
         <div class="card">
@@ -98,28 +109,7 @@
             {% endif %}
         </div>
     </div>
-</div>
 
-{% if mode == 'both' %}
-<!-- Paper instance -->
-<div class="instance-section" style="margin-top: 16px;">
-    <div class="instance-header">
-        <span class="instance-badge badge-paper">PAPER</span>
-        <span class="health-pill" style="background: #333; color: #888;">Separate instance</span>
-    </div>
-    <div class="card">
-        <div class="card-detail" style="color: #666;">
-            Paper instance runs independently with its own ibctl process.
-            Paper command server is disabled — status available via VNC or
-            by querying the paper API port directly.
-        </div>
-    </div>
+    {% endif %}
 </div>
-{% endif %}
-
-{% if s.get('error') %}
-<div class="card" style="margin-top: 12px; border-left: 3px solid #ef4444;">
-    <div class="card-label">Error</div>
-    <div class="status-error">{{ s.get('error') }}</div>
-</div>
-{% endif %}
+{% endfor %}

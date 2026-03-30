@@ -1,7 +1,8 @@
 """ibctl Dashboard — FastAPI application.
 
 Serves both the REST API and web UI from a single process.
-Connects to ibctl's TCP command server for all gateway interaction.
+Connects to one or more ibctl command servers (live, paper, or both)
+via the InstanceRegistry for multi-instance monitoring and control.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from fastapi.templating import Jinja2Templates
 
 from app.api.router import api_router
 from app.config import DashboardSettings
-from app.ibctl_client import TcpIbctlClient
+from app.instance_registry import InstanceRegistry
 
 logger = logging.getLogger("dashboard")
 
@@ -28,9 +29,11 @@ STATIC_DIR = Path(__file__).parent / "static"
 async def lifespan(app: FastAPI):
     """Application startup and shutdown."""
     settings: DashboardSettings = app.state.settings
+    endpoints = settings.endpoints
+    modes = ", ".join(f"{ep.mode}@{ep.host}:{ep.port}" for ep in endpoints)
     logger.info(
-        "Dashboard starting on port %d (ibctl at %s:%d)",
-        settings.port, settings.ibctl_host, settings.ibctl_port,
+        "Dashboard starting on port %d (instances: %s)",
+        settings.port, modes,
     )
     yield
     logger.info("Dashboard shutting down")
@@ -47,17 +50,21 @@ def create_app(settings: DashboardSettings | None = None) -> FastAPI:
 
     app = FastAPI(
         title="ibctl Dashboard",
-        version="0.1.0",
+        version="0.2.0",
         lifespan=lifespan,
     )
 
-    # Store settings and client on app state for route access
+    # Store settings on app state
     app.state.settings = settings
-    app.state.ibctl_client = TcpIbctlClient(
-        host=settings.ibctl_host,
-        port=settings.ibctl_port,
-    )
     app.state.debug_mode = settings.debug_mode
+
+    # Create instance registry for multi-instance monitoring
+    registry = InstanceRegistry(settings.endpoints)
+    app.state.instance_registry = registry
+
+    # Backward compatibility: ibctl_client points to the primary instance
+    # (existing API endpoints like /api/v1/status use this)
+    app.state.ibctl_client = registry.get_client(registry.primary_mode())
 
     # Mount API routes
     app.include_router(api_router)
@@ -66,7 +73,7 @@ def create_app(settings: DashboardSettings | None = None) -> FastAPI:
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-    # Templates (for web UI — Step 5)
+    # Templates (for web UI)
     app.state.templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
     return app

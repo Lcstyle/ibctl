@@ -171,7 +171,7 @@ TWS_USERID="$PAPER_USER" \
 TWS_PASSWORD="$PAPER_PASS" \
 TWS_SETTINGS_PATH="$PAPER_SETTINGS" \
 IBCTL_AGENT_SOCKET="/run/ibctl/agent-paper.sock" \
-IBCTL_COMMAND_SERVER_ENABLED=false \
+IBCTL_COMMAND_PORT=7463 \
 /opt/ibctl/ibctl --config /opt/ibctl/ibctl.toml &
 PIDS+=($!)
 echo "Paper instance PID: ${PIDS[-1]}"

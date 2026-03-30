@@ -61,17 +61,22 @@ async def vnc_page(request: Request):
 
 @router.get("/partials/overview", response_class=HTMLResponse)
 async def overview_partial(request: Request):
-    client = request.app.state.ibctl_client
+    registry = request.app.state.instance_registry
     templates = request.app.state.templates
 
-    try:
-        status = await client.status()
-        status_dict = asdict(status)
-    except DashboardError as e:
-        status_dict = {"ready": False, "state": "unreachable", "error": e.message}
+    instances = await registry.all_status()
+    instances_data = [
+        {
+            "mode": inst.mode,
+            "status": inst.status or {"ready": False, "state": "unreachable"},
+            "state_data": inst.state_data,
+            "error": inst.error,
+        }
+        for inst in instances
+    ]
 
     return templates.TemplateResponse(request, "partials/overview_content.html", {
-        "status": status_dict,
+        "instances": instances_data,
     })
 
 
