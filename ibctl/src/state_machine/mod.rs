@@ -343,8 +343,27 @@ impl StateMachine {
                             log::debug!("Waiting for 2FA approval on mobile device...");
                         }
                     } else if twofa_seen {
-                        log::info!("2FA completed (approved on mobile device)");
-                        return Ok(State::DismissingPopups);
+                        // 2FA dialog was visible but now gone — confirm it's really gone
+                        // (not just a redraw) by waiting and re-checking
+                        log::info!("2FA dialog disappeared — confirming...");
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+                        // Re-check: is the 2FA dialog really gone?
+                        let still_gone = match self.agent_client.list_windows().await {
+                            Ok(wins) => !wins.iter().any(|w| {
+                                let t = w.title.to_lowercase();
+                                t.contains("second factor") || t.contains("authentication")
+                            }),
+                            Err(_) => false, // Agent error — assume not gone
+                        };
+
+                        if still_gone {
+                            log::info!("2FA completed (confirmed — dialog gone for 3s)");
+                            return Ok(State::DismissingPopups);
+                        } else {
+                            log::warn!("2FA dialog reappeared after brief disappearance — still waiting");
+                            continue;
+                        }
                     } else if !twofa_seen && start.elapsed() > grace_period {
                         log::info!("No 2FA dialog appeared — proceeding without 2FA");
                         return Ok(State::DismissingPopups);
@@ -439,6 +458,22 @@ impl StateMachine {
 
     async fn do_configure_api(&mut self) -> Result<State, StateMachineError> {
         const MAX_CONFIG_RETRIES: u32 = 10;
+
+        // Guard: check if a 2FA dialog is blocking (from this or another instance)
+        // If so, go back to WaitingFor2fa instead of trying to open Settings
+        if let Ok(windows) = self.agent_client.list_windows().await {
+            for w in &windows {
+                let t = w.title.to_lowercase();
+                if t.contains("second factor") || t.contains("authentication") {
+                    log::warn!(
+                        "2FA dialog '{}' still visible — cannot configure API, returning to WaitingFor2fa",
+                        w.title
+                    );
+                    self.config_retries = 0;
+                    return Ok(State::WaitingFor2fa);
+                }
+            }
+        }
 
         self.config_retries += 1;
         log::info!(
