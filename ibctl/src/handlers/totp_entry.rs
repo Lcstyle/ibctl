@@ -1,0 +1,86 @@
+//! Two-factor authentication dialog handler.
+//!
+//! Recognizes the TOTP/2FA challenge dialog and submits a generated code.
+
+use std::future::Future;
+use std::pin::Pin;
+
+use crate::agent_client::{AgentClient, WindowInfo};
+use crate::handlers::{DialogHandler, HandlerError, HandlerResult};
+use crate::totp;
+
+/// Handles the second factor authentication dialog by generating a TOTP
+/// code and entering it.
+pub struct TotpEntryHandler {
+    /// Name of the env var holding the TOTP secret
+    secret_env: String,
+    /// TOTP provider name (e.g., "oathtool")
+    provider_name: String,
+}
+
+impl TotpEntryHandler {
+    pub fn new(secret_env: String, provider_name: String) -> Self {
+        Self {
+            secret_env,
+            provider_name,
+        }
+    }
+}
+
+impl DialogHandler for TotpEntryHandler {
+    fn name(&self) -> &str {
+        "TotpEntryHandler"
+    }
+
+    fn can_handle(&self, window: &WindowInfo) -> bool {
+        let title = window.title.to_lowercase();
+        title.contains("second factor authentication")
+            || title.contains("2fa")
+            || title.contains("two-factor")
+            || title.contains("security code")
+    }
+
+    fn handle<'a>(
+        &'a self,
+        client: &'a AgentClient,
+        window: &'a WindowInfo,
+    ) -> Pin<Box<dyn Future<Output = Result<HandlerResult, HandlerError>> + Send + 'a>> {
+        Box::pin(async move {
+            log::info!("Handling 2FA dialog '{}'", window.title);
+
+            // Read the TOTP secret from the configured env var
+            let secret =
+                std::env::var(&self.secret_env).map_err(|_| HandlerError::Failed {
+                    handler: self.name().to_string(),
+                    reason: format!("TOTP secret env var '{}' not set", self.secret_env),
+                })?;
+
+            // Create the TOTP provider and generate a code
+            let provider =
+                totp::create_provider(&self.provider_name).map_err(|e| HandlerError::Failed {
+                    handler: self.name().to_string(),
+                    reason: format!("failed to create TOTP provider: {}", e),
+                })?;
+
+            let code = provider.generate(&secret).map_err(|e| HandlerError::Failed {
+                handler: self.name().to_string(),
+                reason: format!("failed to generate TOTP code: {}", e),
+            })?;
+
+            // Type the code into the first text field
+            client
+                .type_text(window.id, 0, &code)
+                .await
+                .map_err(HandlerError::AgentError)?;
+
+            // Submit by pressing Enter
+            client
+                .send_key(window.id, "Enter")
+                .await
+                .map_err(HandlerError::AgentError)?;
+
+            log::info!("2FA code submitted");
+            Ok(HandlerResult::Handled)
+        })
+    }
+}

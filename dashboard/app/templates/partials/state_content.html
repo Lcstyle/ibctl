@@ -1,0 +1,31 @@
+{% set current = state.get('current', 'unknown') %}
+
+<div class="card" style="margin-bottom: 16px;">
+    <div class="card-label">Current State</div>
+    <div class="card-value {% if current == 'Connected' %}status-connected{% elif 'Error' in current %}status-error{% else %}status-warning{% endif %}">
+        {{ current }}
+    </div>
+</div>
+
+<h3>Transition History</h3>
+<table class="data-table">
+    <thead>
+        <tr>
+            <th>Timestamp</th>
+            <th>From</th>
+            <th>To</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for t in state.get('history', []) | reverse %}
+        <tr>
+            <td>{{ t.timestamp }}</td>
+            <td>{{ t.from_state }}</td>
+            <td>{{ t.to_state }}</td>
+        </tr>
+        {% endfor %}
+        {% if not state.get('history') %}
+        <tr><td colspan="3" style="color: #666;">No transitions recorded yet</td></tr>
+        {% endif %}
+    </tbody>
+</table>

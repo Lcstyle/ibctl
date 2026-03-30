@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-binary:
+    name: Build ibctl binary (x86_64 musl static)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain + musl target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl tools
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
+
+      - name: Build release binary (fat LTO, static musl)
+        run: |
+          cargo build --release --target x86_64-unknown-linux-musl
+          strip target/x86_64-unknown-linux-musl/release/ibctl
+          ls -la target/x86_64-unknown-linux-musl/release/ibctl
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ibctl-x86_64-linux
+          path: target/x86_64-unknown-linux-musl/release/ibctl
+
+  build-agent:
+    name: Build Java agent
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: 17
+
+      - name: Build agent jar
+        run: |
+          cd agent
+          mkdir -p target/classes
+          javac --release 17 -d target/classes src/main/java/ibctl/agent/*.java
+          jar cfm target/ibctl-agent.jar src/main/resources/META-INF/MANIFEST.MF -C target/classes .
+          ls -la target/ibctl-agent.jar
+
+      - name: Upload agent artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ibctl-agent
+          path: agent/target/ibctl-agent.jar
+
+  release:
+    name: Create GitHub Release
+    needs: [build-binary, build-agent]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ibctl-x86_64-linux
+          path: dist/
+
+      - name: Download agent
+        uses: actions/download-artifact@v4
+        with:
+          name: ibctl-agent
+          path: dist/
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/ibctl
+            dist/ibctl-agent.jar
+          generate_release_notes: true

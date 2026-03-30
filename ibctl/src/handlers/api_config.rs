@@ -1,0 +1,249 @@
+//! Post-login API configuration handler.
+//!
+//! After successful login, opens the Gateway's Global Configuration dialog
+//! and sets API options: Master Client ID, Read-only API, order precaution
+//! bypasses, auto-restart time. Mirrors IBC's ConfigureApiTask.
+
+use crate::agent_client::AgentClient;
+use crate::config::Config;
+
+#[derive(Debug, Clone)]
+pub struct ApiConfigSettings {
+    pub master_client_id: Option<String>,
+    pub read_only_api: Option<bool>,
+    pub accept_incoming: String,
+    pub bypass_order_precautions: Option<bool>,
+    pub allow_blind_trading: Option<bool>,
+    pub auto_restart_time: Option<String>,
+    pub auto_logoff_time: Option<String>,
+}
+
+impl ApiConfigSettings {
+    pub fn from_config(config: &Config) -> Self {
+        let master_client_id = std::env::var("TWS_MASTER_CLIENT_ID").ok()
+            .filter(|s| !s.is_empty());
+        let read_only_api = std::env::var("READ_ONLY_API").ok()
+            .map(|v| v.to_lowercase() == "yes" || v.to_lowercase() == "true");
+        let accept_incoming = std::env::var("TWS_ACCEPT_INCOMING")
+            .unwrap_or_else(|_| config.session.accept_incoming.clone());
+        let bypass_order_precautions = std::env::var("BYPASS_WARNING").ok()
+            .map(|v| v.to_lowercase() == "yes" || v.to_lowercase() == "true");
+        let allow_blind_trading = std::env::var("ALLOW_BLIND_TRADING").ok()
+            .map(|v| v.to_lowercase() == "yes" || v.to_lowercase() == "true");
+        let auto_restart_time = std::env::var("AUTO_RESTART_TIME").ok()
+            .filter(|s| !s.is_empty());
+        let auto_logoff_time = std::env::var("AUTO_LOGOFF_TIME").ok()
+            .filter(|s| !s.is_empty());
+        Self {
+            master_client_id, read_only_api, accept_incoming,
+            bypass_order_precautions, allow_blind_trading,
+            auto_restart_time, auto_logoff_time,
+        }
+    }
+
+    pub fn has_settings(&self) -> bool {
+        self.master_client_id.is_some()
+            || self.read_only_api.is_some()
+            || self.bypass_order_precautions.is_some()
+            || self.allow_blind_trading.is_some()
+    }
+}
+
+/// Short pause — just enough for the Swing EDT to process the previous action.
+/// Configurable via [timing] ui_tick_ms in ibctl.toml.
+async fn tick(ms: u64) {
+    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+}
+
+/// Dismiss any popup dialogs that aren't the config dialog.
+async fn dismiss_popups(client: &AgentClient, config_win_id: u64) {
+    if let Ok(windows) = client.list_windows().await {
+        for w in &windows {
+            if w.id != config_win_id {
+                let _ = client.click_button(w.id, "Yes").await;
+                let _ = client.click_button(w.id, "OK").await;
+            }
+        }
+    }
+}
+
+pub async fn apply_api_config(
+    client: &AgentClient,
+    settings: &ApiConfigSettings,
+    tick_ms: u64,
+) -> Result<(), String> {
+    if !settings.has_settings() {
+        log::info!("No API configuration settings to apply");
+        return Ok(());
+    }
+
+    log::info!("Applying API configuration settings");
+
+    // Find the main Gateway window
+    let windows = client.list_windows().await
+        .map_err(|e| format!("Failed to list windows: {}", e))?;
+    let main_window = windows.iter().find(|w| {
+        let t = w.title.to_lowercase();
+        t.contains("ibkr gateway") || t.contains("ib gateway")
+    });
+    let win = match main_window {
+        Some(w) => w,
+        None => {
+            return Err("Main Gateway window not found — cannot apply API config".to_string());
+        }
+    };
+
+    // Open Configure -> Settings
+    // Retry opening the config dialog up to 3 times.
+    // Failure to open it is an ERROR, not a warning — proceeding without
+    // configuration causes Read-Only API warnings when clients connect.
+    let mut config_win = None;
+    for attempt in 1..=3 {
+        log::info!("Opening config dialog (attempt {})", attempt);
+
+        match client.click_menu(win.id, "Configure/Settings").await {
+            Ok(true) => {}
+            _ => {
+                // Fallback: try just "Configure" then wait for Settings submenu
+                let _ = client.click_menu(win.id, "Configure").await;
+                tick(tick_ms).await;
+            }
+        }
+
+        // Poll for config dialog to appear
+        for _ in 0..20 {
+            tick(tick_ms).await;
+            let wins = client.list_windows().await.unwrap_or_default();
+            config_win = wins.into_iter().find(|w| {
+                w.title.to_lowercase().contains("configuration")
+            });
+            if config_win.is_some() { break; }
+        }
+
+        if config_win.is_some() { break; }
+
+        // Dismiss any lingering menu by clicking the window center
+        let cx = win.bounds.as_ref().map(|b| b.width / 2).unwrap_or(350);
+        let cy = win.bounds.as_ref().map(|b| b.height / 2).unwrap_or(275);
+        let _ = client.click_at(win.id, cx, cy).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+
+    let config_win = match config_win {
+        Some(w) => w,
+        None => {
+            log::error!("Configuration dialog not found after 3 attempts — config NOT applied");
+            return Err("Configuration dialog not found after 3 attempts".to_string());
+        }
+    };
+    let cid = config_win.id;
+    log::info!("Configuration dialog found: {}", config_win.title);
+
+    // --- API -> Settings ---
+    client.select_tree_node(cid, "API").await
+        .map_err(|e| format!("Failed to select API: {}", e))?;
+    tick(tick_ms).await;
+    client.select_tree_node(cid, "Settings").await
+        .map_err(|_| "Failed to navigate to API/Settings".to_string())?;
+    tick(tick_ms).await;
+
+    // Master Client ID (field index 1)
+    if let Some(ref id) = settings.master_client_id {
+        log::info!("Setting Master Client ID to {}", id);
+        let _ = client.type_text(cid, 1, id).await;
+    }
+
+    // Read-Only API: force toggle to ensure it registers
+    if let Some(read_only) = settings.read_only_api {
+        if !read_only {
+            log::info!("Ensuring Read-only API is OFF");
+            let _ = client.set_checkbox(cid, "Read-Only API", Some(true)).await;
+            let _ = client.set_checkbox(cid, "Read-Only API", Some(false)).await;
+        } else {
+            let _ = client.set_checkbox(cid, "Read-Only API", Some(true)).await;
+        }
+    }
+
+    // --- API -> Precautions ---
+    if let Some(bypass) = settings.bypass_order_precautions {
+        client.select_tree_node(cid, "Precautions").await.ok();
+        tick(tick_ms).await;
+        log::info!("Setting order precaution bypasses to {}", bypass);
+
+        let labels = [
+            "Bypass Order Precautions for API Orders",
+            "Bypass Bond warning for API Orders",
+            "Bypass negative yield to worst confirmation for API Orders",
+            "Bypass Called Bond warning for API Orders",
+            "Bypass \"same action pair trade\" warning for API orders",
+            "Bypass price-based volatility risk warning for API Orders",
+            "Bypass Redirect Order warning for Stock API Orders",
+            "Bypass No Overfill Protection precaution",
+            "Bypass Route Marketable to BBO warning for API orders",
+        ];
+        for label in &labels {
+            let _ = client.set_checkbox(cid, label, Some(bypass)).await;
+        }
+        // Single sweep for confirmation dialogs
+        tick(tick_ms).await;
+        dismiss_popups(client, cid).await;
+    }
+
+    // --- Lock and Exit ---
+    if let Some(ref restart_time) = settings.auto_restart_time {
+        client.select_tree_node(cid, "Lock and Exit").await.ok();
+        tick(tick_ms).await;
+
+        let parts: Vec<&str> = restart_time.split_whitespace().collect();
+        let time_val = parts.first().copied().unwrap_or(restart_time);
+        let am_pm = parts.get(1).copied().unwrap_or("PM");
+
+        log::info!("Setting Auto Restart: {} {}", time_val, am_pm);
+        let _ = client.type_text(cid, 0, time_val).await;
+        let _ = client.click_button(cid, am_pm).await;
+        let _ = client.click_button(cid, "Auto restart").await;
+
+        // Dismiss auto-restart confirmation
+        tick(tick_ms).await;
+        dismiss_popups(client, cid).await;
+    } else if let Some(ref logoff_time) = settings.auto_logoff_time {
+        client.select_tree_node(cid, "Lock and Exit").await.ok();
+        tick(tick_ms).await;
+
+        let parts: Vec<&str> = logoff_time.split_whitespace().collect();
+        let time_val = parts.first().copied().unwrap_or(logoff_time);
+        let am_pm = parts.get(1).copied().unwrap_or("PM");
+
+        log::info!("Setting Auto Logoff: {} {}", time_val, am_pm);
+        let _ = client.type_text(cid, 0, time_val).await;
+        let _ = client.click_button(cid, am_pm).await;
+        let _ = client.click_button(cid, "Auto logoff").await;
+    }
+
+    // --- Save and close ---
+    let _ = client.click_button(cid, "Apply").await;
+    tick(tick_ms).await;
+    let _ = client.click_button(cid, "OK").await;
+    tick(tick_ms).await;
+
+    // Dismiss post-config dialogs (max 3 sweeps)
+    for _ in 0..3 {
+        tick(tick_ms).await;
+        let post = client.list_windows().await.unwrap_or_default();
+        if post.len() <= 1 { break; }
+        for w in &post {
+            let _ = client.click_button(w.id, "OK").await;
+        }
+    }
+
+    // Click center of main window to dismiss any lingering menus
+    let final_windows = client.list_windows().await.unwrap_or_default();
+    if let Some(main_win) = final_windows.first() {
+        let cx = main_win.bounds.as_ref().map(|b| b.width / 2).unwrap_or(350);
+        let cy = main_win.bounds.as_ref().map(|b| b.height / 2).unwrap_or(275);
+        let _ = client.click_at(main_win.id, cx, cy).await;
+    }
+
+    log::info!("API configuration applied successfully");
+    Ok(())
+}

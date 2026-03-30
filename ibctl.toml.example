@@ -1,0 +1,65 @@
+# ibctl configuration file
+#
+# Precedence (highest to lowest):
+#   1. Environment variables (override everything)
+#   2. This config file
+#   3. Built-in defaults
+#
+# Passwords and TOTP secrets are env-var only (with _FILE support).
+# They are never read from this file to prevent committing secrets.
+#
+# Copy this file to ibctl.toml and edit as needed.
+
+[auth]
+# IB login username (env: TWS_USERID)
+username = ""
+# Trading mode: live | paper | both (env: TRADING_MODE)
+trading_mode = "live"
+
+[auth.paper]
+# Paper account username, only needed for dual mode (env: TWS_USERID_PAPER)
+username = ""
+
+[twofa]
+# TOTP provider: oathtool | builtin (env: TOTP_PROVIDER)
+provider = "oathtool"
+# Action on 2FA timeout: restart | exit (env: TWOFA_TIMEOUT_ACTION)
+timeout_action = "restart"
+# Seconds to wait for 2FA completion (env: TWOFA_EXIT_INTERVAL)
+timeout_seconds = 180
+
+[gateway]
+# Path to TWS/Gateway installation (env: TWS_PATH)
+tws_path = "/home/ibgateway/Jts"
+# Settings storage path, defaults to tws_path (env: TWS_SETTINGS_PATH)
+settings_path = ""
+# Gateway version, auto-detected if empty (env: TWS_MAJOR_VRSN)
+version = ""
+# JVM heap size in MB (env: JAVA_HEAP_SIZE)
+java_heap_mb = 768
+# Program type: gateway | tws (env: GATEWAY_OR_TWS)
+program = "gateway"
+
+[session]
+# Session conflict action: primary | secondary | primaryoverride (env: IBCTL_SESSION_ACTION)
+action = "primary"
+# Incoming API connections: accept | reject | manual (env: IBCTL_ACCEPT_INCOMING)
+accept_incoming = "accept"
+
+[command_server]
+# Enable IBC-compatible TCP command server
+enabled = true
+# TCP port (env: IBCTL_COMMAND_PORT)
+port = 7462
+# Bind address
+bind_address = "0.0.0.0"
+# IP allow-list for command access (env: IBCTL_CONTROL_FROM, comma-separated)
+control_from = ["127.0.0.1"]
+
+[agent]
+# Unix domain socket path for Rust<->Java agent IPC (env: IBCTL_AGENT_SOCKET)
+socket_path = "/tmp/ibctl.sock"
+
+[logging]
+# Log level: debug | info | warn | error (env: IBCTL_LOG_LEVEL)
+level = "info"

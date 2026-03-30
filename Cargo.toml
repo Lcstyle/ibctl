@@ -1,0 +1,3 @@
+[workspace]
+members = ["ibctl"]
+resolver = "2"

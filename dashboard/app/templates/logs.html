@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Logs</h2>
+<div style="margin-bottom: 12px;">
+    <select id="log-level" onchange="updateLogFilter()">
+        <option value="">All Levels</option>
+        <option value="ERROR">ERROR</option>
+        <option value="WARN">WARN</option>
+        <option value="INFO">INFO</option>
+        <option value="DEBUG">DEBUG</option>
+    </select>
+</div>
+<div id="log-content"
+     class="log-viewer"
+     hx-get="/partials/logs"
+     hx-trigger="load, every 2s"
+     hx-swap="innerHTML">
+    <div class="loading">Loading logs...</div>
+</div>
+<script>
+function updateLogFilter() {
+    const level = document.getElementById('log-level').value;
+    const el = document.getElementById('log-content');
+    el.setAttribute('hx-get', '/partials/logs' + (level ? '?level=' + level : ''));
+    htmx.trigger(el, 'load');
+}
+</script>
+{% endblock %}

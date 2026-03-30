@@ -1,0 +1,17 @@
+services:
+  ib-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ibctl-gateway
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - DISPLAY=:1
+    ports:
+      - "127.0.0.1:4001:4003"
+      - "127.0.0.1:4002:4004"
+      - "127.0.0.1:5900:5900"
+      - "127.0.0.1:7462:7462"
+    tty: true

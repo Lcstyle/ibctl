@@ -1,0 +1,8 @@
+# Default: native target for local development
+# For release builds (static musl binary), use:
+#   cargo build --release --target x86_64-unknown-linux-musl
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true

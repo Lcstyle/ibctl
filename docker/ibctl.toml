@@ -1,0 +1,55 @@
+# ibctl config for Docker paper trading test
+
+[auth]
+username = ""  # set via TWS_USERID env var
+trading_mode = "paper"
+
+[twofa]
+provider = "oathtool"
+timeout_action = "restart"
+timeout_seconds = 120
+
+[gateway]
+tws_path = "/home/ibgateway/Jts"
+settings_path = ""
+version = "ibgateway/10.45.1b"
+java_heap_mb = 768
+program = "gateway"
+
+[session]
+action = "primary"
+accept_incoming = "accept"
+
+[command_server]
+enabled = true
+port = 7462
+bind_address = "0.0.0.0"
+control_from = ["127.0.0.1", "172.0.0.0/8"]
+
+[agent]
+socket_path = "/tmp/ibctl.sock"
+
+[dashboard]
+enabled = true
+port = 8080
+# Bearer token for API auth — empty means no auth (single-user default)
+token = ""
+# Enable debug endpoints (force state transitions, raw agent commands)
+debug_mode = false
+
+[logging]
+level = "debug"
+
+[timing]
+# Delay between UI actions in config dialog (ms) — lower = faster config
+ui_tick_ms = 100
+# Java agent-side delay after each Swing action (ms) — lower = faster clicks
+agent_tick_ms = 50
+# Wait after clicking Login before checking for 2FA (ms)
+post_login_delay_ms = 1000
+# Seconds of no popups before considering login complete
+popup_quiet_secs = 5
+# Max seconds to wait for popups
+popup_max_wait_secs = 30
+# Pause after selecting radio buttons on login screen (ms)
+login_radio_delay_ms = 100
