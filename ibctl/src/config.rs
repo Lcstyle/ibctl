@@ -119,6 +119,7 @@ pub struct LoggingConfig {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
 pub struct TimingConfig {
     /// Delay between UI actions in the config dialog (ms)
     pub ui_tick_ms: u64,
