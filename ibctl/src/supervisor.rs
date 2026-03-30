@@ -6,6 +6,7 @@
 //! - Constructing the full `java` command line with `-javaagent:`
 //! - Spawning, monitoring, and killing the child JVM process
 
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 
@@ -86,6 +87,12 @@ impl Supervisor {
     /// Builds the classpath, reads vmoptions, constructs the full java command
     /// with `-javaagent:`, and spawns the child process.
     pub fn launch(&mut self) -> Result<(), SupervisorError> {
+        // RC3 FIX: Kill any existing Gateway JVM for this config dir BEFORE
+        // launching. Enforces invariant: at most one JVM per trading mode.
+        // This catches orphans from install4j auto-restart, crashes, or
+        // previous ibctl instances that didn't clean up.
+        self.kill_orphan_gateways();
+
         let tws_path = Path::new(&self.config.tws_path);
         let version = self.detect_version(tws_path)?;
         let classpath = Self::build_classpath(tws_path, &version)?;
@@ -153,6 +160,11 @@ impl Supervisor {
         cmd.arg("-Dexe4j.isInstall4j=true");
         cmd.arg("-DinstallType=standalone");
 
+        // RC1 FIX: Disable Gateway's install4j auto-restart.
+        // Without this, Gateway spawns a nohup'd child on exit that ibctl
+        // doesn't track, creating orphan JVMs that fight for the same session.
+        cmd.arg("-DnoAutoRestart=true");
+
         // Main class
         cmd.arg(main_class);
 
@@ -164,6 +176,16 @@ impl Supervisor {
         // Let JVM output flow to our stdout/stderr for debugging
         cmd.stdout(Stdio::inherit());
         cmd.stderr(Stdio::inherit());
+
+        // RC2 FIX: Create a new process group so kill(-pgid) reaps all
+        // children, not just the direct child. Prevents install4j launcher
+        // grandchildren from surviving SIGTERM.
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
 
         log::info!("Launching JVM: {} {}", java_path, main_class);
         log::debug!("Classpath: {}", classpath);
@@ -199,9 +221,11 @@ impl Supervisor {
                 let pid = child.id();
                 log::info!("Sending SIGTERM to JVM (PID {})", pid);
 
-                // Send SIGTERM for graceful shutdown
+                // RC2 FIX: Kill the entire process group (negative PID).
+                // This reaps install4j launcher children and any grandchildren,
+                // not just the direct child. Prevents orphan JVMs.
                 unsafe {
-                    libc::kill(pid as i32, libc::SIGTERM);
+                    libc::kill(-(pid as i32), libc::SIGTERM);
                 }
 
                 // Wait for graceful exit (configurable via timing.jvm_shutdown_timeout_secs)
@@ -238,6 +262,52 @@ impl Supervisor {
                 Err(_) => false,      // Error checking — assume dead
             },
             None => false,
+        }
+    }
+
+    /// RC3: Kill any orphaned Gateway JVM processes that match our config dir.
+    /// Scans /proc for java processes with our -DjtsConfigDir and kills them.
+    /// This enforces the invariant: at most one JVM per trading mode.
+    fn kill_orphan_gateways(&self) {
+        let config_dir = if self.config.settings_path.is_empty() {
+            &self.config.tws_path
+        } else {
+            &self.config.settings_path
+        };
+
+        let marker = format!("-DjtsConfigDir={}", config_dir);
+        let our_child_pid = self.child.as_ref().map(|c| c.id());
+
+        // Scan /proc for java processes with our config dir
+        if let Ok(entries) = std::fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                let pid_str = entry.file_name();
+                let pid_str = pid_str.to_string_lossy();
+                let pid: i32 = match pid_str.parse() {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+
+                // Skip our own tracked child
+                if our_child_pid == Some(pid as u32) {
+                    continue;
+                }
+
+                // Read cmdline
+                let cmdline_path = format!("/proc/{}/cmdline", pid);
+                if let Ok(cmdline) = std::fs::read_to_string(&cmdline_path) {
+                    let cmdline = cmdline.replace('\0', " ");
+                    if cmdline.contains("ibgateway.GWClient") && cmdline.contains(&marker) {
+                        log::warn!(
+                            "Killing orphan Gateway JVM (PID {}) with config dir {}",
+                            pid, config_dir
+                        );
+                        unsafe {
+                            libc::kill(pid, libc::SIGKILL);
+                        }
+                    }
+                }
+            }
         }
     }
 
