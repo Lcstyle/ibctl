@@ -258,6 +258,12 @@ pub struct GatewayConfig {
     pub version: String,
     pub java_heap_mb: u32,
     pub program: GatewayProgram,
+    /// Gateway API port (live: 4001, paper: 4002)
+    pub live_api_port: u16,
+    pub paper_api_port: u16,
+    /// Socat forwarding port (live: 4003, paper: 4004)
+    pub live_socat_port: u16,
+    pub paper_socat_port: u16,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -354,6 +360,10 @@ impl Default for GatewayConfig {
             version: String::new(),
             java_heap_mb: 768,
             program: GatewayProgram::Gateway,
+            live_api_port: 4001,
+            paper_api_port: 4002,
+            live_socat_port: 4003,
+            paper_socat_port: 4004,
         }
     }
 }

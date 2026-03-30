@@ -223,8 +223,8 @@ impl StateMachine {
             Query::Logs(limit, tx) => {
                 // TODO: implement log buffer
                 let json = serde_json::json!({
-                    "logs": [],
-                    "note": "log buffer not yet implemented",
+                    "error": "not_implemented",
+                    "message": "LOGS command is not yet implemented — use container logs instead",
                     "limit": limit,
                 }).to_string();
                 let _ = tx.send(json);
@@ -856,9 +856,9 @@ impl StateMachine {
         // Read-Only API is unchecked, all settings applied.
         // ibctl owns socat directly, no race conditions possible.
         let (api_port, socat_port) = if self.config.auth.trading_mode == crate::config::TradingMode::Paper {
-            (4002, 4004)
+            (self.config.gateway.paper_api_port, self.config.gateway.paper_socat_port)
         } else {
-            (4001, 4003)
+            (self.config.gateway.live_api_port, self.config.gateway.live_socat_port)
         };
         self.start_socat(api_port, socat_port);
 
@@ -1048,6 +1048,17 @@ impl StateMachine {
             }
             // Stop, Exit, Restart are handled in the main loop
             _ => Ok(()),
+        }
+    }
+}
+
+impl Drop for StateMachine {
+    fn drop(&mut self) {
+        // Reap socat child process to prevent zombies on abnormal exit
+        if let Some(ref mut child) = self.socat_process {
+            log::debug!("Drop: killing socat (PID {})", child.id());
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 }

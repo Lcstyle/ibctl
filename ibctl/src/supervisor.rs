@@ -401,13 +401,10 @@ impl Supervisor {
             }
         }
 
-        // Fall back to PATH
-        if let Ok(output) = std::process::Command::new("which").arg("java").output() {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return Ok(path);
-                }
+        // Fall back to common PATH locations (avoids blocking subprocess)
+        for candidate in &["/usr/bin/java", "/usr/local/bin/java"] {
+            if Path::new(candidate).exists() {
+                return Ok(candidate.to_string());
             }
         }
 
