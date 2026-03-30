@@ -245,21 +245,8 @@ impl StateMachine {
             .unwrap_or(false);
 
         let is_connected = self.state == State::Connected;
-
-        // Client advisory
-        let (should_connect, should_wait, wait_reason) = match &self.state {
-            State::Init | State::Launching | State::WaitingForAgent => (false, true, Some("launching")),
-            State::WaitingForLogin | State::Authenticating => (false, true, Some("logging_in")),
-            State::WaitingFor2fa => (false, true, Some("2fa_pending")),
-            State::HandlingSessionConflict => (false, true, Some("session_conflict")),
-            State::DismissingPopups | State::ConfiguringApi => (false, true, Some("configuring")),
-            State::Connected => (true, false, None),
-            State::Restarting => (false, true, Some("restarting")),
-            State::Shutdown => (false, false, None),
-            State::Error(_) => (false, false, None),
-        };
-
-        let client_id_likely_stale = matches!(self.state, State::Restarting);
+        let (should_connect, should_wait, wait_reason, client_id_likely_stale) =
+            client_advisory(&self.state);
 
         serde_json::json!({
             "ready": is_connected && socat_running,
@@ -1072,6 +1059,24 @@ enum Interrupt {
     ColdRestart,
 }
 
+/// Compute client advisory fields from the current state.
+/// Returns (should_connect, should_wait, wait_reason, client_id_likely_stale).
+pub(crate) fn client_advisory(state: &State) -> (bool, bool, Option<&'static str>, bool) {
+    let (should_connect, should_wait, wait_reason) = match state {
+        State::Init | State::Launching | State::WaitingForAgent => (false, true, Some("launching")),
+        State::WaitingForLogin | State::Authenticating => (false, true, Some("logging_in")),
+        State::WaitingFor2fa => (false, true, Some("2fa_pending")),
+        State::HandlingSessionConflict => (false, true, Some("session_conflict")),
+        State::DismissingPopups | State::ConfiguringApi => (false, true, Some("configuring")),
+        State::Connected => (true, false, None),
+        State::Restarting => (false, true, Some("restarting")),
+        State::Shutdown => (false, false, None),
+        State::Error(_) => (false, false, None),
+    };
+    let client_id_likely_stale = matches!(state, State::Restarting);
+    (should_connect, should_wait, wait_reason, client_id_likely_stale)
+}
+
 /// Simple UTC timestamp string (avoids chrono dependency).
 fn chrono_timestamp() -> String {
     let secs = SystemTime::now()
@@ -1081,4 +1086,97 @@ fn chrono_timestamp() -> String {
     // Format as ISO-ish: just use epoch seconds for now
     // A proper implementation would format as "2026-03-29T17:05:02Z"
     format!("{}", secs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- client_advisory tests ---
+
+    #[test]
+    fn test_connected_should_connect() {
+        let (should_connect, should_wait, reason, stale) = client_advisory(&State::Connected);
+        assert!(should_connect);
+        assert!(!should_wait);
+        assert!(reason.is_none());
+        assert!(!stale);
+    }
+
+    #[test]
+    fn test_init_should_wait() {
+        let (should_connect, should_wait, reason, _) = client_advisory(&State::Init);
+        assert!(!should_connect);
+        assert!(should_wait);
+        assert_eq!(reason, Some("launching"));
+    }
+
+    #[test]
+    fn test_2fa_pending() {
+        let (should_connect, should_wait, reason, _) = client_advisory(&State::WaitingFor2fa);
+        assert!(!should_connect);
+        assert!(should_wait);
+        assert_eq!(reason, Some("2fa_pending"));
+    }
+
+    #[test]
+    fn test_restarting_stale_ids() {
+        let (_, should_wait, reason, stale) = client_advisory(&State::Restarting);
+        assert!(should_wait);
+        assert_eq!(reason, Some("restarting"));
+        assert!(stale);
+    }
+
+    #[test]
+    fn test_shutdown_no_connect_no_wait() {
+        let (should_connect, should_wait, _, _) = client_advisory(&State::Shutdown);
+        assert!(!should_connect);
+        assert!(!should_wait);
+    }
+
+    #[test]
+    fn test_error_no_connect_no_wait() {
+        let (should_connect, should_wait, _, _) = client_advisory(&State::Error("test".into()));
+        assert!(!should_connect);
+        assert!(!should_wait);
+    }
+
+    #[test]
+    fn test_configuring_api_should_wait() {
+        let (should_connect, should_wait, reason, _) = client_advisory(&State::ConfiguringApi);
+        assert!(!should_connect);
+        assert!(should_wait);
+        assert_eq!(reason, Some("configuring"));
+    }
+
+    #[test]
+    fn test_all_states_covered() {
+        // Ensure every state variant produces valid advisory
+        let states = vec![
+            State::Init, State::Launching, State::WaitingForAgent,
+            State::WaitingForLogin, State::Authenticating,
+            State::WaitingFor2fa, State::HandlingSessionConflict,
+            State::DismissingPopups, State::ConfiguringApi,
+            State::Connected, State::Restarting, State::Shutdown,
+            State::Error("test".into()),
+        ];
+        for state in &states {
+            let (sc, sw, _, _) = client_advisory(state);
+            // Connected is the only state that allows connection
+            if matches!(state, State::Connected) {
+                assert!(sc, "Connected should allow connect");
+                assert!(!sw, "Connected should not wait");
+            }
+        }
+    }
+
+    // --- State Display tests ---
+
+    #[test]
+    fn test_state_display() {
+        assert_eq!(State::Init.to_string(), "Init");
+        assert_eq!(State::Connected.to_string(), "Connected");
+        assert_eq!(State::WaitingFor2fa.to_string(), "WaitingFor2fa");
+        assert_eq!(State::Error("boom".into()).to_string(), "Error(boom)");
+    }
 }

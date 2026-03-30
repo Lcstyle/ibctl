@@ -36,6 +36,12 @@ jobs:
       - name: Run clippy
         run: cargo clippy -p ibctl -- -D warnings
 
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Audit dependencies
+        run: cargo audit
+
   java-build:
     name: Java agent build
     runs-on: ubuntu-latest

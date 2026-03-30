@@ -49,6 +49,19 @@ impl ApiConfigSettings {
     }
 }
 
+/// Checkbox labels for order precaution bypasses in the API/Precautions page.
+const PRECAUTION_LABELS: &[&str] = &[
+    "Bypass Order Precautions for API Orders",
+    "Bypass Bond warning for API Orders",
+    "Bypass negative yield to worst confirmation for API Orders",
+    "Bypass Called Bond warning for API Orders",
+    "Bypass \"same action pair trade\" warning for API orders",
+    "Bypass price-based volatility risk warning for API Orders",
+    "Bypass Redirect Order warning for Stock API Orders",
+    "Bypass No Overfill Protection precaution",
+    "Bypass Route Marketable to BBO warning for API orders",
+];
+
 /// Short pause — just enough for the Swing EDT to process the previous action.
 /// Configurable via [timing] ui_tick_ms in ibctl.toml.
 async fn tick(ms: u64) {
@@ -170,18 +183,7 @@ pub async fn apply_api_config(
         tick(tick_ms).await;
         log::info!("Setting order precaution bypasses to {}", bypass);
 
-        let labels = [
-            "Bypass Order Precautions for API Orders",
-            "Bypass Bond warning for API Orders",
-            "Bypass negative yield to worst confirmation for API Orders",
-            "Bypass Called Bond warning for API Orders",
-            "Bypass \"same action pair trade\" warning for API orders",
-            "Bypass price-based volatility risk warning for API Orders",
-            "Bypass Redirect Order warning for Stock API Orders",
-            "Bypass No Overfill Protection precaution",
-            "Bypass Route Marketable to BBO warning for API orders",
-        ];
-        for label in &labels {
+        for label in PRECAUTION_LABELS {
             let _ = client.set_checkbox(cid, label, Some(bypass)).await;
         }
         // Single sweep for confirmation dialogs
@@ -190,34 +192,25 @@ pub async fn apply_api_config(
     }
 
     // --- Lock and Exit ---
-    if let Some(ref restart_time) = settings.auto_restart_time {
+    if settings.auto_restart_time.is_some() || settings.auto_logoff_time.is_some() {
         client.select_tree_node(cid, "Lock and Exit").await.ok();
         tick(tick_ms).await;
 
-        let parts: Vec<&str> = restart_time.split_whitespace().collect();
-        let time_val = parts.first().copied().unwrap_or(restart_time);
-        let am_pm = parts.get(1).copied().unwrap_or("PM");
-
-        log::info!("Setting Auto Restart: {} {}", time_val, am_pm);
-        let _ = client.type_text(cid, 0, time_val).await;
-        let _ = client.click_button(cid, am_pm).await;
-        let _ = client.click_button(cid, "Auto restart").await;
-
-        // Dismiss auto-restart confirmation
-        tick(tick_ms).await;
-        dismiss_popups(client, cid).await;
-    } else if let Some(ref logoff_time) = settings.auto_logoff_time {
-        client.select_tree_node(cid, "Lock and Exit").await.ok();
-        tick(tick_ms).await;
-
-        let parts: Vec<&str> = logoff_time.split_whitespace().collect();
-        let time_val = parts.first().copied().unwrap_or(logoff_time);
-        let am_pm = parts.get(1).copied().unwrap_or("PM");
-
-        log::info!("Setting Auto Logoff: {} {}", time_val, am_pm);
-        let _ = client.type_text(cid, 0, time_val).await;
-        let _ = client.click_button(cid, am_pm).await;
-        let _ = client.click_button(cid, "Auto logoff").await;
+        if let Some(ref restart_time) = settings.auto_restart_time {
+            let (time_val, am_pm) = parse_time_with_ampm(restart_time);
+            log::info!("Setting Auto Restart: {} {}", time_val, am_pm);
+            let _ = client.type_text(cid, 0, time_val).await;
+            let _ = client.click_button(cid, am_pm).await;
+            let _ = client.click_button(cid, "Auto restart").await;
+            tick(tick_ms).await;
+            dismiss_popups(client, cid).await;
+        } else if let Some(ref logoff_time) = settings.auto_logoff_time {
+            let (time_val, am_pm) = parse_time_with_ampm(logoff_time);
+            log::info!("Setting Auto Logoff: {} {}", time_val, am_pm);
+            let _ = client.type_text(cid, 0, time_val).await;
+            let _ = client.click_button(cid, am_pm).await;
+            let _ = client.click_button(cid, "Auto logoff").await;
+        }
     }
 
     // --- Save and close ---
@@ -246,4 +239,97 @@ pub async fn apply_api_config(
 
     log::info!("API configuration applied successfully");
     Ok(())
+}
+
+/// Parse a time string like "11:30 PM" or "09:00" into (time, am_pm).
+/// Defaults to "PM" if no AM/PM suffix is provided.
+pub(crate) fn parse_time_with_ampm(input: &str) -> (&str, &str) {
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    let time_val = parts.first().copied().unwrap_or(input);
+    let am_pm = parts.get(1).copied().unwrap_or("PM");
+    (time_val, am_pm)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- ApiConfigSettings tests ---
+
+    #[test]
+    fn test_has_settings_empty() {
+        let s = ApiConfigSettings {
+            master_client_id: None,
+            read_only_api: None,
+            bypass_order_precautions: None,
+            allow_blind_trading: None,
+            auto_restart_time: None,
+            auto_logoff_time: None,
+        };
+        assert!(!s.has_settings());
+    }
+
+    #[test]
+    fn test_has_settings_with_master_id() {
+        let s = ApiConfigSettings {
+            master_client_id: Some("0".to_string()),
+            read_only_api: None,
+            bypass_order_precautions: None,
+            allow_blind_trading: None,
+            auto_restart_time: None,
+            auto_logoff_time: None,
+        };
+        assert!(s.has_settings());
+    }
+
+    #[test]
+    fn test_has_settings_with_read_only() {
+        let s = ApiConfigSettings {
+            master_client_id: None,
+            read_only_api: Some(false),
+            bypass_order_precautions: None,
+            allow_blind_trading: None,
+            auto_restart_time: None,
+            auto_logoff_time: None,
+        };
+        assert!(s.has_settings());
+    }
+
+    #[test]
+    fn test_has_settings_with_bypass() {
+        let s = ApiConfigSettings {
+            master_client_id: None,
+            read_only_api: None,
+            bypass_order_precautions: Some(true),
+            allow_blind_trading: None,
+            auto_restart_time: None,
+            auto_logoff_time: None,
+        };
+        assert!(s.has_settings());
+    }
+
+    // --- parse_time_with_ampm tests ---
+
+    #[test]
+    fn test_parse_time_with_ampm_full() {
+        assert_eq!(parse_time_with_ampm("11:30 PM"), ("11:30", "PM"));
+        assert_eq!(parse_time_with_ampm("09:00 AM"), ("09:00", "AM"));
+    }
+
+    #[test]
+    fn test_parse_time_without_ampm_defaults_pm() {
+        assert_eq!(parse_time_with_ampm("11:30"), ("11:30", "PM"));
+    }
+
+    #[test]
+    fn test_parse_time_lowercase() {
+        assert_eq!(parse_time_with_ampm("3:45 pm"), ("3:45", "pm"));
+    }
+
+    // --- PRECAUTION_LABELS constant test ---
+
+    #[test]
+    fn test_precaution_labels_count() {
+        assert_eq!(PRECAUTION_LABELS.len(), 9);
+    }
 }
