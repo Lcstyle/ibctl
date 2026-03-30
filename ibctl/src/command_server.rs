@@ -64,13 +64,13 @@ impl std::fmt::Debug for Query {
 }
 
 /// Parsed input from a TCP command line — either an action or a query.
-enum ParsedCommand {
+pub(crate) enum ParsedCommand {
     Action(Command),
     Query(QueryType),
 }
 
 /// Query type without the response channel (used during parsing).
-enum QueryType {
+pub(crate) enum QueryType {
     Status,
     State,
     Config,
@@ -80,7 +80,7 @@ enum QueryType {
 
 /// Parse a command string (case-insensitive) matching IBC's wire protocol,
 /// extended with JSON query commands for the dashboard.
-fn parse_command(input: &str) -> Option<ParsedCommand> {
+pub(crate) fn parse_command(input: &str) -> Option<ParsedCommand> {
     let trimmed = input.trim();
     let upper = trimmed.to_uppercase();
     let parts: Vec<&str> = upper.split_whitespace().collect();
@@ -251,9 +251,9 @@ async fn handle_connection(
 
 /// Check whether a client IP is in the allow-list.
 ///
-/// Supports both exact IP match and wildcard entries.
+/// Supports exact IP match, CIDR notation (e.g. "172.0.0.0/8"), and wildcard ("*").
 /// An empty allow-list rejects all connections.
-fn is_allowed(addr: &IpAddr, control_from: &[String]) -> bool {
+pub(crate) fn is_allowed(addr: &IpAddr, control_from: &[String]) -> bool {
     if control_from.is_empty() {
         return false;
     }
@@ -267,6 +267,16 @@ fn is_allowed(addr: &IpAddr, control_from: &[String]) -> bool {
         if allowed == addr_str {
             return true;
         }
+        // CIDR notation: "network/prefix"
+        if let Some((network_str, prefix_str)) = allowed.split_once('/') {
+            if let (Ok(network), Ok(prefix_len)) =
+                (network_str.parse::<IpAddr>(), prefix_str.parse::<u32>())
+            {
+                if cidr_contains(&network, prefix_len, addr) {
+                    return true;
+                }
+            }
+        }
         // Handle loopback equivalence: if allowed is 127.0.0.1, also accept ::1
         if allowed == "127.0.0.1" && addr_str == "::1" {
             return true;
@@ -277,4 +287,205 @@ fn is_allowed(addr: &IpAddr, control_from: &[String]) -> bool {
     }
 
     false
+}
+
+/// Check if `addr` falls within the CIDR block defined by `network`/`prefix_len`.
+fn cidr_contains(network: &IpAddr, prefix_len: u32, addr: &IpAddr) -> bool {
+    match (network, addr) {
+        (IpAddr::V4(net), IpAddr::V4(ip)) => {
+            if prefix_len > 32 {
+                return false;
+            }
+            if prefix_len == 0 {
+                return true;
+            }
+            let mask = u32::MAX.checked_shl(32 - prefix_len).unwrap_or(0);
+            (u32::from(*net) & mask) == (u32::from(*ip) & mask)
+        }
+        (IpAddr::V6(net), IpAddr::V6(ip)) => {
+            if prefix_len > 128 {
+                return false;
+            }
+            if prefix_len == 0 {
+                return true;
+            }
+            let mask = u128::MAX.checked_shl(128 - prefix_len).unwrap_or(0);
+            (u128::from(*net) & mask) == (u128::from(*ip) & mask)
+        }
+        _ => false, // v4 network vs v6 addr or vice versa
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::IpAddr;
+
+    // --- is_allowed tests ---
+
+    #[test]
+    fn test_empty_allowlist_rejects_all() {
+        let addr: IpAddr = "192.168.1.1".parse().unwrap();
+        assert!(!is_allowed(&addr, &[]));
+    }
+
+    #[test]
+    fn test_wildcard_allows_all() {
+        let addr: IpAddr = "10.0.0.1".parse().unwrap();
+        assert!(is_allowed(&addr, &["*".to_string()]));
+    }
+
+    #[test]
+    fn test_exact_match() {
+        let addr: IpAddr = "192.168.1.100".parse().unwrap();
+        assert!(is_allowed(&addr, &["192.168.1.100".to_string()]));
+    }
+
+    #[test]
+    fn test_exact_match_rejects_different_ip() {
+        let addr: IpAddr = "192.168.1.101".parse().unwrap();
+        assert!(!is_allowed(&addr, &["192.168.1.100".to_string()]));
+    }
+
+    #[test]
+    fn test_loopback_ipv4_allows_ipv6() {
+        let addr: IpAddr = "::1".parse().unwrap();
+        assert!(is_allowed(&addr, &["127.0.0.1".to_string()]));
+    }
+
+    #[test]
+    fn test_loopback_ipv6_allows_ipv4() {
+        let addr: IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(is_allowed(&addr, &["::1".to_string()]));
+    }
+
+    #[test]
+    fn test_multiple_allowed_ips() {
+        let addr: IpAddr = "10.0.0.5".parse().unwrap();
+        assert!(is_allowed(&addr, &[
+            "192.168.1.1".to_string(),
+            "10.0.0.5".to_string(),
+        ]));
+    }
+
+    // CIDR tests — these FAIL with current implementation (the known bug)
+    #[test]
+    fn test_cidr_slash_8_matches_subnet() {
+        let addr: IpAddr = "172.17.0.2".parse().unwrap();
+        assert!(is_allowed(&addr, &["172.0.0.0/8".to_string()]));
+    }
+
+    #[test]
+    fn test_cidr_slash_16_matches_subnet() {
+        let addr: IpAddr = "192.168.1.50".parse().unwrap();
+        assert!(is_allowed(&addr, &["192.168.0.0/16".to_string()]));
+    }
+
+    #[test]
+    fn test_cidr_slash_24_matches_subnet() {
+        let addr: IpAddr = "10.0.1.99".parse().unwrap();
+        assert!(is_allowed(&addr, &["10.0.1.0/24".to_string()]));
+    }
+
+    #[test]
+    fn test_cidr_slash_24_rejects_outside_subnet() {
+        let addr: IpAddr = "10.0.2.1".parse().unwrap();
+        assert!(!is_allowed(&addr, &["10.0.1.0/24".to_string()]));
+    }
+
+    #[test]
+    fn test_cidr_slash_32_is_exact_match() {
+        let addr: IpAddr = "10.0.0.1".parse().unwrap();
+        assert!(is_allowed(&addr, &["10.0.0.1/32".to_string()]));
+    }
+
+    #[test]
+    fn test_mixed_exact_and_cidr() {
+        let addr: IpAddr = "172.18.0.3".parse().unwrap();
+        assert!(is_allowed(&addr, &[
+            "127.0.0.1".to_string(),
+            "172.0.0.0/8".to_string(),
+        ]));
+    }
+
+    // --- parse_command tests ---
+
+    #[test]
+    fn test_parse_stop() {
+        match parse_command("STOP") {
+            Some(ParsedCommand::Action(Command::Stop)) => {}
+            _ => panic!("Expected Action(Stop)"),
+        }
+    }
+
+    #[test]
+    fn test_parse_restart() {
+        match parse_command("restart") {
+            Some(ParsedCommand::Action(Command::Restart)) => {}
+            _ => panic!("Expected Action(Restart)"),
+        }
+    }
+
+    #[test]
+    fn test_parse_case_insensitive() {
+        match parse_command("ReConnectData") {
+            Some(ParsedCommand::Action(Command::ReconnectData)) => {}
+            _ => panic!("Expected Action(ReconnectData)"),
+        }
+    }
+
+    #[test]
+    fn test_parse_with_whitespace() {
+        match parse_command("  STOP  \n") {
+            Some(ParsedCommand::Action(Command::Stop)) => {}
+            _ => panic!("Expected Action(Stop)"),
+        }
+    }
+
+    #[test]
+    fn test_parse_unknown_returns_none() {
+        assert!(parse_command("INVALID").is_none());
+        assert!(parse_command("").is_none());
+    }
+
+    #[test]
+    fn test_parse_status_query() {
+        match parse_command("STATUS") {
+            Some(ParsedCommand::Query(QueryType::Status)) => {}
+            _ => panic!("Expected Query(Status)"),
+        }
+    }
+
+    #[test]
+    fn test_parse_logs_with_limit() {
+        match parse_command("LOGS 50") {
+            Some(ParsedCommand::Query(QueryType::Logs(50))) => {}
+            _ => panic!("Expected Query(Logs(50))"),
+        }
+    }
+
+    #[test]
+    fn test_parse_logs_default_limit() {
+        match parse_command("LOGS") {
+            Some(ParsedCommand::Query(QueryType::Logs(100))) => {}
+            _ => panic!("Expected Query(Logs(100))"),
+        }
+    }
+
+    #[test]
+    fn test_parse_all_query_types() {
+        assert!(matches!(parse_command("STATE"), Some(ParsedCommand::Query(QueryType::State))));
+        assert!(matches!(parse_command("CONFIG"), Some(ParsedCommand::Query(QueryType::Config))));
+        assert!(matches!(parse_command("WINDOWS"), Some(ParsedCommand::Query(QueryType::Windows))));
+    }
+
+    #[test]
+    fn test_parse_all_action_types() {
+        assert!(matches!(parse_command("STOP"), Some(ParsedCommand::Action(Command::Stop))));
+        assert!(matches!(parse_command("RESTART"), Some(ParsedCommand::Action(Command::Restart))));
+        assert!(matches!(parse_command("RECONNECTDATA"), Some(ParsedCommand::Action(Command::ReconnectData))));
+        assert!(matches!(parse_command("RECONNECTACCOUNT"), Some(ParsedCommand::Action(Command::ReconnectAccount))));
+        assert!(matches!(parse_command("ENABLEAPI"), Some(ParsedCommand::Action(Command::EnableApi))));
+        assert!(matches!(parse_command("EXIT"), Some(ParsedCommand::Action(Command::Exit))));
+    }
 }

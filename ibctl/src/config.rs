@@ -5,10 +5,136 @@
 //!
 //! Docker secrets (_FILE suffix) supported for sensitive values.
 
+use std::fmt;
 use std::path::Path;
 
 use serde::Deserialize;
 use thiserror::Error;
+
+// --- Typed enums for config fields ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TradingMode {
+    Live,
+    Paper,
+    Both,
+}
+
+impl fmt::Display for TradingMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Live => write!(f, "live"),
+            Self::Paper => write!(f, "paper"),
+            Self::Both => write!(f, "both"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TotpProvider {
+    Oathtool,
+    Builtin,
+}
+
+impl fmt::Display for TotpProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Oathtool => write!(f, "oathtool"),
+            Self::Builtin => write!(f, "builtin"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TwoFaTimeoutAction {
+    Restart,
+    Exit,
+}
+
+impl fmt::Display for TwoFaTimeoutAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Restart => write!(f, "restart"),
+            Self::Exit => write!(f, "exit"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GatewayProgram {
+    Gateway,
+    Tws,
+}
+
+impl fmt::Display for GatewayProgram {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Gateway => write!(f, "gateway"),
+            Self::Tws => write!(f, "tws"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionAction {
+    Primary,
+    Secondary,
+    #[serde(rename = "primaryoverride")]
+    PrimaryOverride,
+}
+
+impl fmt::Display for SessionAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Primary => write!(f, "primary"),
+            Self::Secondary => write!(f, "secondary"),
+            Self::PrimaryOverride => write!(f, "primaryoverride"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AcceptIncoming {
+    Accept,
+    Reject,
+    Manual,
+}
+
+impl fmt::Display for AcceptIncoming {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Accept => write!(f, "accept"),
+            Self::Reject => write!(f, "reject"),
+            Self::Manual => write!(f, "manual"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Debug => write!(f, "debug"),
+            Self::Info => write!(f, "info"),
+            Self::Warn => write!(f, "warn"),
+            Self::Error => write!(f, "error"),
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -50,8 +176,7 @@ pub struct AuthConfig {
     /// Password is env-only (TWS_PASSWORD / TWS_PASSWORD_FILE). Never in config file.
     #[serde(skip)]
     pub password: String,
-    /// "live", "paper", or "both"
-    pub trading_mode: String,
+    pub trading_mode: TradingMode,
     pub paper: PaperAuthConfig,
 }
 
@@ -69,10 +194,8 @@ pub struct PaperAuthConfig {
 pub struct TwoFaConfig {
     /// Name of the env var holding the TOTP secret (default: "TWOFACTOR_CODE")
     pub secret_env: String,
-    /// "oathtool" or "builtin"
-    pub provider: String,
-    /// "restart" or "exit"
-    pub timeout_action: String,
+    pub provider: TotpProvider,
+    pub timeout_action: TwoFaTimeoutAction,
     pub timeout_seconds: u64,
 }
 
@@ -83,17 +206,14 @@ pub struct GatewayConfig {
     pub settings_path: String,
     pub version: String,
     pub java_heap_mb: u32,
-    /// "gateway" or "tws"
-    pub program: String,
+    pub program: GatewayProgram,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct SessionConfig {
-    /// "primary", "secondary", or "primaryoverride"
-    pub action: String,
-    /// "accept", "reject", or "manual"
-    pub accept_incoming: String,
+    pub action: SessionAction,
+    pub accept_incoming: AcceptIncoming,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -114,8 +234,7 @@ pub struct AgentConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct LoggingConfig {
-    /// "debug", "info", "warn", or "error"
-    pub level: String,
+    pub level: LogLevel,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -174,7 +293,7 @@ impl Default for AuthConfig {
         Self {
             username: String::new(),
             password: String::new(),
-            trading_mode: "live".to_string(),
+            trading_mode: TradingMode::Live,
             paper: PaperAuthConfig::default(),
         }
     }
@@ -193,8 +312,8 @@ impl Default for TwoFaConfig {
     fn default() -> Self {
         Self {
             secret_env: "TWOFACTOR_CODE".to_string(),
-            provider: "oathtool".to_string(),
-            timeout_action: "restart".to_string(),
+            provider: TotpProvider::Oathtool,
+            timeout_action: TwoFaTimeoutAction::Restart,
             timeout_seconds: 180,
         }
     }
@@ -207,7 +326,7 @@ impl Default for GatewayConfig {
             settings_path: String::new(),
             version: String::new(),
             java_heap_mb: 768,
-            program: "gateway".to_string(),
+            program: GatewayProgram::Gateway,
         }
     }
 }
@@ -215,8 +334,8 @@ impl Default for GatewayConfig {
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
-            action: "primary".to_string(),
-            accept_incoming: "accept".to_string(),
+            action: SessionAction::Primary,
+            accept_incoming: AcceptIncoming::Accept,
         }
     }
 }
@@ -243,7 +362,7 @@ impl Default for AgentConfig {
 impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
-            level: "info".to_string(),
+            level: LogLevel::Info,
         }
     }
 }
@@ -300,7 +419,12 @@ impl Config {
             self.auth.password = v;
         }
         if let Some(v) = env_or_file("TRADING_MODE") {
-            self.auth.trading_mode = v;
+            match v.to_lowercase().as_str() {
+                "live" => self.auth.trading_mode = TradingMode::Live,
+                "paper" => self.auth.trading_mode = TradingMode::Paper,
+                "both" => self.auth.trading_mode = TradingMode::Both,
+                other => log::warn!("Unknown TRADING_MODE '{}', keeping default", other),
+            }
         }
 
         // Paper auth
@@ -313,10 +437,18 @@ impl Config {
 
         // 2FA
         if let Some(v) = std::env::var("TOTP_PROVIDER").ok() {
-            self.twofa.provider = v;
+            match v.to_lowercase().as_str() {
+                "oathtool" => self.twofa.provider = TotpProvider::Oathtool,
+                "builtin" => self.twofa.provider = TotpProvider::Builtin,
+                other => log::warn!("Unknown TOTP_PROVIDER '{}', keeping default", other),
+            }
         }
         if let Some(v) = std::env::var("TWOFA_TIMEOUT_ACTION").ok() {
-            self.twofa.timeout_action = v;
+            match v.to_lowercase().as_str() {
+                "restart" => self.twofa.timeout_action = TwoFaTimeoutAction::Restart,
+                "exit" => self.twofa.timeout_action = TwoFaTimeoutAction::Exit,
+                other => log::warn!("Unknown TWOFA_TIMEOUT_ACTION '{}', keeping default", other),
+            }
         }
         if let Some(v) = std::env::var("TWOFA_EXIT_INTERVAL").ok().and_then(|s| s.parse().ok()) {
             self.twofa.timeout_seconds = v;
@@ -336,15 +468,29 @@ impl Config {
             self.gateway.java_heap_mb = v;
         }
         if let Some(v) = std::env::var("GATEWAY_OR_TWS").ok() {
-            self.gateway.program = v;
+            match v.to_lowercase().as_str() {
+                "gateway" => self.gateway.program = GatewayProgram::Gateway,
+                "tws" => self.gateway.program = GatewayProgram::Tws,
+                other => log::warn!("Unknown GATEWAY_OR_TWS '{}', keeping default", other),
+            }
         }
 
         // Session
         if let Some(v) = std::env::var("IBCTL_SESSION_ACTION").ok() {
-            self.session.action = v;
+            match v.to_lowercase().as_str() {
+                "primary" => self.session.action = SessionAction::Primary,
+                "secondary" => self.session.action = SessionAction::Secondary,
+                "primaryoverride" => self.session.action = SessionAction::PrimaryOverride,
+                other => log::warn!("Unknown IBCTL_SESSION_ACTION '{}', keeping default", other),
+            }
         }
         if let Some(v) = std::env::var("IBCTL_ACCEPT_INCOMING").ok() {
-            self.session.accept_incoming = v;
+            match v.to_lowercase().as_str() {
+                "accept" => self.session.accept_incoming = AcceptIncoming::Accept,
+                "reject" => self.session.accept_incoming = AcceptIncoming::Reject,
+                "manual" => self.session.accept_incoming = AcceptIncoming::Manual,
+                other => log::warn!("Unknown IBCTL_ACCEPT_INCOMING '{}', keeping default", other),
+            }
         }
 
         // Command server
@@ -366,7 +512,13 @@ impl Config {
 
         // Logging
         if let Some(v) = std::env::var("IBCTL_LOG_LEVEL").ok() {
-            self.logging.level = v;
+            match v.to_lowercase().as_str() {
+                "debug" => self.logging.level = LogLevel::Debug,
+                "info" => self.logging.level = LogLevel::Info,
+                "warn" | "warning" => self.logging.level = LogLevel::Warn,
+                "error" => self.logging.level = LogLevel::Error,
+                other => log::warn!("Unknown IBCTL_LOG_LEVEL '{}', keeping default", other),
+            }
         }
     }
 
@@ -382,22 +534,14 @@ impl Config {
                 "TWS_PASSWORD or TWS_PASSWORD_FILE env var".to_string(),
             ));
         }
-        if self.auth.trading_mode == "both" || self.auth.trading_mode == "paper" {
-            if self.auth.paper.username.is_empty() && self.auth.trading_mode == "both" {
+        if matches!(self.auth.trading_mode, TradingMode::Both | TradingMode::Paper) {
+            if self.auth.paper.username.is_empty() && self.auth.trading_mode == TradingMode::Both {
                 log::warn!("trading_mode=both but no paper username set; will use main credentials");
             }
         }
         Ok(())
     }
 
-    /// Returns the effective settings path (falls back to tws_path if empty).
-    pub fn effective_settings_path(&self) -> &str {
-        if self.gateway.settings_path.is_empty() {
-            &self.gateway.tws_path
-        } else {
-            &self.gateway.settings_path
-        }
-    }
 }
 
 /// Read an environment variable, with Docker secrets `_FILE` support.
@@ -418,4 +562,171 @@ pub fn env_or_file(var: &str) -> Option<String> {
 
     // Fall back to direct env var
     std::env::var(var).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Enum deserialization tests ---
+
+    #[test]
+    fn test_trading_mode_deserialize() {
+        assert_eq!(
+            toml::from_str::<AuthConfig>("trading_mode = \"live\"").unwrap().trading_mode,
+            TradingMode::Live
+        );
+        assert_eq!(
+            toml::from_str::<AuthConfig>("trading_mode = \"paper\"").unwrap().trading_mode,
+            TradingMode::Paper
+        );
+        assert_eq!(
+            toml::from_str::<AuthConfig>("trading_mode = \"both\"").unwrap().trading_mode,
+            TradingMode::Both
+        );
+    }
+
+    #[test]
+    fn test_totp_provider_deserialize() {
+        assert_eq!(
+            toml::from_str::<TwoFaConfig>("provider = \"oathtool\"").unwrap().provider,
+            TotpProvider::Oathtool
+        );
+        assert_eq!(
+            toml::from_str::<TwoFaConfig>("provider = \"builtin\"").unwrap().provider,
+            TotpProvider::Builtin
+        );
+    }
+
+    #[test]
+    fn test_session_action_deserialize() {
+        assert_eq!(
+            toml::from_str::<SessionConfig>("action = \"primary\"").unwrap().action,
+            SessionAction::Primary
+        );
+        assert_eq!(
+            toml::from_str::<SessionConfig>("action = \"secondary\"").unwrap().action,
+            SessionAction::Secondary
+        );
+        assert_eq!(
+            toml::from_str::<SessionConfig>("action = \"primaryoverride\"").unwrap().action,
+            SessionAction::PrimaryOverride
+        );
+    }
+
+    #[test]
+    fn test_gateway_program_deserialize() {
+        assert_eq!(
+            toml::from_str::<GatewayConfig>("program = \"gateway\"").unwrap().program,
+            GatewayProgram::Gateway
+        );
+        assert_eq!(
+            toml::from_str::<GatewayConfig>("program = \"tws\"").unwrap().program,
+            GatewayProgram::Tws
+        );
+    }
+
+    #[test]
+    fn test_log_level_deserialize() {
+        assert_eq!(
+            toml::from_str::<LoggingConfig>("level = \"debug\"").unwrap().level,
+            LogLevel::Debug
+        );
+        assert_eq!(
+            toml::from_str::<LoggingConfig>("level = \"error\"").unwrap().level,
+            LogLevel::Error
+        );
+    }
+
+    #[test]
+    fn test_invalid_enum_value_fails() {
+        assert!(toml::from_str::<AuthConfig>("trading_mode = \"invalid\"").is_err());
+        assert!(toml::from_str::<GatewayConfig>("program = \"something\"").is_err());
+    }
+
+    // --- Display tests (used in JSON serialization) ---
+
+    #[test]
+    fn test_enum_display_roundtrip() {
+        assert_eq!(TradingMode::Live.to_string(), "live");
+        assert_eq!(TradingMode::Paper.to_string(), "paper");
+        assert_eq!(TradingMode::Both.to_string(), "both");
+        assert_eq!(SessionAction::PrimaryOverride.to_string(), "primaryoverride");
+        assert_eq!(AcceptIncoming::Manual.to_string(), "manual");
+        assert_eq!(LogLevel::Warn.to_string(), "warn");
+    }
+
+    // --- Config defaults tests ---
+
+    #[test]
+    fn test_default_config_values() {
+        let config = Config::default();
+        assert_eq!(config.auth.trading_mode, TradingMode::Live);
+        assert_eq!(config.twofa.provider, TotpProvider::Oathtool);
+        assert_eq!(config.twofa.timeout_action, TwoFaTimeoutAction::Restart);
+        assert_eq!(config.gateway.program, GatewayProgram::Gateway);
+        assert_eq!(config.session.action, SessionAction::Primary);
+        assert_eq!(config.session.accept_incoming, AcceptIncoming::Accept);
+        assert_eq!(config.logging.level, LogLevel::Info);
+        assert_eq!(config.command_server.port, 7462);
+        assert!(config.command_server.enabled);
+    }
+
+    // --- TOML parsing tests ---
+
+    #[test]
+    fn test_parse_minimal_toml() {
+        let toml_str = r#"
+[auth]
+trading_mode = "paper"
+
+[gateway]
+program = "tws"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.auth.trading_mode, TradingMode::Paper);
+        assert_eq!(config.gateway.program, GatewayProgram::Tws);
+        // Defaults for unspecified fields
+        assert_eq!(config.twofa.provider, TotpProvider::Oathtool);
+    }
+
+    #[test]
+    fn test_unknown_toml_sections_ignored() {
+        let toml_str = r#"
+[auth]
+trading_mode = "live"
+
+[dashboard]
+enabled = true
+port = 8080
+
+[some_future_feature]
+key = "value"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.auth.trading_mode, TradingMode::Live);
+    }
+
+    // --- Validation tests ---
+
+    #[test]
+    fn test_validate_missing_username() {
+        let config = Config::default();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_missing_password() {
+        let mut config = Config::default();
+        config.auth.username = "testuser".to_string();
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_ok_with_credentials() {
+        let mut config = Config::default();
+        config.auth.username = "testuser".to_string();
+        config.auth.password = "testpass".to_string();
+        assert!(config.validate().is_ok());
+    }
 }

@@ -1,0 +1,9 @@
+target/
+.git/
+.github/
+.full-review/
+.claude/
+dashboard/
+docs/
+*.md
+!docker/*.md

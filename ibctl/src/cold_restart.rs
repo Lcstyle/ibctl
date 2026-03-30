@@ -210,8 +210,35 @@ mod tests {
     fn test_parse_cold_restart_time() {
         assert_eq!(parse_cold_restart_time("09:00"), Some((9, 0)));
         assert_eq!(parse_cold_restart_time("13:30"), Some((13, 30)));
+        assert_eq!(parse_cold_restart_time("00:00"), Some((0, 0)));
+        assert_eq!(parse_cold_restart_time("23:59"), Some((23, 59)));
         assert_eq!(parse_cold_restart_time(""), None);
         assert_eq!(parse_cold_restart_time("invalid"), None);
         assert_eq!(parse_cold_restart_time("25:00"), None);
+        assert_eq!(parse_cold_restart_time("12:60"), None);
+        assert_eq!(parse_cold_restart_time("9:00"), Some((9, 0)));
+        assert_eq!(parse_cold_restart_time("0900"), None);
+    }
+
+    #[test]
+    fn test_already_fired() {
+        let dir = std::env::temp_dir().join("ibctl_test_marker");
+        let marker = dir.join("cold_restart_marker");
+        let _ = std::fs::create_dir_all(&dir);
+
+        // No marker file — not fired
+        let _ = std::fs::remove_file(&marker);
+        assert!(!already_fired(&marker, 2026, 88));
+
+        // Write today's marker
+        std::fs::write(&marker, "2026-88").unwrap();
+        assert!(already_fired(&marker, 2026, 88));
+
+        // Different day — not fired
+        assert!(!already_fired(&marker, 2026, 89));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&marker);
+        let _ = std::fs::remove_dir(&dir);
     }
 }

@@ -7,17 +7,17 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::agent_client::{AgentClient, WindowInfo};
+use crate::config::SessionAction;
 use crate::handlers::{DialogHandler, HandlerError, HandlerResult};
 
 /// Handles the "Existing session detected" dialog based on the configured
 /// session action (primary, secondary, or primaryoverride).
 pub struct SessionConflictHandler {
-    /// "primary", "secondary", or "primaryoverride"
-    action: String,
+    action: SessionAction,
 }
 
 impl SessionConflictHandler {
-    pub fn new(action: String) -> Self {
+    pub fn new(action: SessionAction) -> Self {
         Self { action }
     }
 }
@@ -50,8 +50,8 @@ impl DialogHandler for SessionConflictHandler {
             // PRIMARY: tries "OK" -> "Continue Login" -> "Reconnect This Session"
             // SECONDARY: tries "Cancel" -> "Exit Application"
             // PRIMARYOVERRIDE: tries "OK" -> "Continue Login" -> "Reconnect This Session"
-            let button_candidates: &[&str] = match self.action.as_str() {
-                "secondary" => &["Cancel", "Exit Application"],
+            let button_candidates: &[&str] = match self.action {
+                SessionAction::Secondary => &["Cancel", "Exit Application"],
                 _ => &["OK", "Continue Login", "Reconnect This Session"],
             };
 

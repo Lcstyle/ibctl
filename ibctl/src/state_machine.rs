@@ -269,7 +269,7 @@ impl StateMachine {
         serde_json::json!({
             "ready": is_connected && socat_running,
             "state": self.state.to_string(),
-            "trading_mode": self.config.auth.trading_mode,
+            "trading_mode": self.config.auth.trading_mode.to_string(),
             "uptime_secs": uptime,
             "connected_uptime_secs": connected_uptime,
             "socat_running": socat_running,
@@ -297,7 +297,7 @@ impl StateMachine {
         serde_json::json!({
             "auth": {
                 "username": self.config.auth.username,
-                "trading_mode": self.config.auth.trading_mode,
+                "trading_mode": self.config.auth.trading_mode.to_string(),
                 "password": "********",
             },
             "gateway": {
@@ -305,11 +305,11 @@ impl StateMachine {
                 "settings_path": self.config.gateway.settings_path,
                 "version": self.config.gateway.version,
                 "java_heap_mb": self.config.gateway.java_heap_mb,
-                "program": self.config.gateway.program,
+                "program": self.config.gateway.program.to_string(),
             },
             "session": {
-                "action": self.config.session.action,
-                "accept_incoming": self.config.session.accept_incoming,
+                "action": self.config.session.action.to_string(),
+                "accept_incoming": self.config.session.accept_incoming.to_string(),
             },
             "command_server": {
                 "enabled": self.config.command_server.enabled,
@@ -458,7 +458,7 @@ impl StateMachine {
         }
 
         // Check oathtool if TOTP is configured
-        if self.config.twofa.provider == "oathtool" {
+        if self.config.twofa.provider == crate::config::TotpProvider::Oathtool {
             if let Ok(status) = std::process::Command::new("which")
                 .arg("oathtool")
                 .stdout(std::process::Stdio::null())
@@ -750,9 +750,10 @@ impl StateMachine {
                 // The "restart" action re-initiates the login sequence, giving the user
                 // another chance to approve on mobile. This can repeat indefinitely.
                 let relogin = std::env::var("RELOGIN_AFTER_TWOFA_TIMEOUT")
-                    .unwrap_or_default().to_lowercase();
+                    .map(|v| matches!(v.to_lowercase().as_str(), "yes" | "true" | "1"))
+                    .unwrap_or(false);
 
-                if relogin == "yes" || self.config.twofa.timeout_action == "restart" {
+                if relogin || self.config.twofa.timeout_action == crate::config::TwoFaTimeoutAction::Restart {
                     log::warn!(
                         "2FA timed out after {}s — restarting login sequence (will retry until approved)",
                         timeout_secs
@@ -856,7 +857,7 @@ impl StateMachine {
         // Start socat port forwarding NOW — configuration is complete,
         // Read-Only API is unchecked, all settings applied.
         // ibctl owns socat directly, no race conditions possible.
-        let (api_port, socat_port) = if self.config.auth.trading_mode == "paper" {
+        let (api_port, socat_port) = if self.config.auth.trading_mode == crate::config::TradingMode::Paper {
             (4002, 4004)
         } else {
             (4001, 4003)
@@ -935,7 +936,7 @@ impl StateMachine {
         // when the new instance tries to log in with the same account.
         if self.supervisor.is_running() {
             log::info!("Sending SIGTERM to JVM");
-            if let Err(e) = self.supervisor.kill() {
+            if let Err(e) = self.supervisor.kill().await {
                 log::error!("Failed to kill JVM: {}", e);
             }
         }
@@ -953,7 +954,7 @@ impl StateMachine {
         // Verify the old process is truly gone
         if self.supervisor.is_running() {
             log::error!("JVM still running after kill+wait — forcing SIGKILL");
-            let _ = self.supervisor.kill();
+            let _ = self.supervisor.kill().await;
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
 
@@ -975,7 +976,7 @@ impl StateMachine {
         // Kill the JVM if it's running
         if self.supervisor.is_running() {
             log::info!("Stopping JVM process");
-            if let Err(e) = self.supervisor.kill() {
+            if let Err(e) = self.supervisor.kill().await {
                 log::error!("Failed to kill JVM: {}", e);
             }
         }

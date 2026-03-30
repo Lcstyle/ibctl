@@ -11,7 +11,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 
 use thiserror::Error;
 
-use crate::config::GatewayConfig;
+use crate::config::{GatewayConfig, GatewayProgram};
 
 #[derive(Debug, Error)]
 pub enum SupervisorError {
@@ -112,9 +112,9 @@ impl Supervisor {
             .unwrap_or_default();
 
         // Build the command
-        let main_class = match self.config.program.as_str() {
-            "tws" => TWS_MAIN_CLASS,
-            _ => GATEWAY_MAIN_CLASS,
+        let main_class = match self.config.program {
+            GatewayProgram::Tws => TWS_MAIN_CLASS,
+            GatewayProgram::Gateway => GATEWAY_MAIN_CLASS,
         };
 
         let javaagent_arg = format!(
@@ -184,9 +184,9 @@ impl Supervisor {
         }
     }
 
-    /// Gracefully stop the JVM process: SIGTERM first, then SIGKILL after 5s.
-    /// PERF-01 fix: child.kill() sends SIGKILL which doesn't let JVM flush state.
-    pub fn kill(&mut self) -> Result<(), SupervisorError> {
+    /// Gracefully stop the JVM process: SIGTERM first, then SIGKILL after timeout.
+    /// Uses async sleep to avoid blocking the tokio runtime.
+    pub async fn kill(&mut self) -> Result<(), SupervisorError> {
         match self.child.as_mut() {
             Some(child) => {
                 let pid = child.id();
@@ -205,7 +205,7 @@ impl Supervisor {
                             log::info!("JVM exited gracefully after SIGTERM");
                             return Ok(());
                         }
-                        Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                        Ok(None) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
                         Err(e) => {
                             log::warn!("Error checking JVM status: {}", e);
                             break;

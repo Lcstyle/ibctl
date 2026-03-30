@@ -24,8 +24,6 @@ pub enum AgentError {
     AgentError(String),
     #[error("failed to parse agent response: {0}")]
     ParseError(#[from] serde_json::Error),
-    #[error("HTTP error: {0}")]
-    Http(String),
     #[error("timeout waiting for agent response")]
     Timeout,
 }
@@ -66,36 +64,6 @@ pub struct WindowInfo {
     pub visible: bool,
 }
 
-/// Information about a Swing component within a window.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ComponentInfo {
-    pub class_name: String,
-    pub text: Option<String>,
-    pub label: Option<String>,
-    pub enabled: bool,
-    pub visible: bool,
-    pub index: usize,
-    pub component_type: String,
-    pub x: i32,
-    pub y: i32,
-    pub width: i32,
-    pub height: i32,
-}
-
-/// Query parameters for finding a specific component in a window.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FindQuery {
-    /// Component type filter (e.g., "JButton", "JTextField")
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub component_type: Option<String>,
-    /// Text/label filter
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    /// Positional index among matching components
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub index: Option<usize>,
-}
-
 /// Client for the ibctl Java agent running inside the Gateway JVM.
 ///
 /// Communicates over HTTP+JSON on a Unix domain socket.
@@ -119,24 +87,6 @@ impl AgentClient {
     /// List all visible windows in the IB Gateway.
     pub async fn list_windows(&self) -> Result<Vec<WindowInfo>, AgentError> {
         let resp: AgentResponse<Vec<WindowInfo>> = self.get("/windows").await?;
-        self.unwrap_response(resp)
-    }
-
-    /// Get the component tree for a specific window.
-    pub async fn get_components(&self, window_id: u64) -> Result<Vec<ComponentInfo>, AgentError> {
-        let path = format!("/windows/{}/components", window_id);
-        let resp: AgentResponse<Vec<ComponentInfo>> = self.get(&path).await?;
-        self.unwrap_response(resp)
-    }
-
-    /// Find a specific component within a window using a query.
-    pub async fn find_component(
-        &self,
-        window_id: u64,
-        query: FindQuery,
-    ) -> Result<Option<ComponentInfo>, AgentError> {
-        let path = format!("/windows/{}/find", window_id);
-        let resp: AgentResponse<Option<ComponentInfo>> = self.post(&path, &query).await?;
         self.unwrap_response(resp)
     }
 

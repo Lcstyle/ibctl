@@ -7,11 +7,17 @@
 use crate::agent_client::AgentClient;
 use crate::config::Config;
 
+/// Parse an env var as a boolean: "yes", "true", "1" → true.
+fn env_bool(var: &str) -> Option<bool> {
+    std::env::var(var).ok().map(|v| {
+        matches!(v.to_lowercase().as_str(), "yes" | "true" | "1")
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct ApiConfigSettings {
     pub master_client_id: Option<String>,
     pub read_only_api: Option<bool>,
-    pub accept_incoming: String,
     pub bypass_order_precautions: Option<bool>,
     pub allow_blind_trading: Option<bool>,
     pub auto_restart_time: Option<String>,
@@ -19,23 +25,18 @@ pub struct ApiConfigSettings {
 }
 
 impl ApiConfigSettings {
-    pub fn from_config(config: &Config) -> Self {
+    pub fn from_config(_config: &Config) -> Self {
         let master_client_id = std::env::var("TWS_MASTER_CLIENT_ID").ok()
             .filter(|s| !s.is_empty());
-        let read_only_api = std::env::var("READ_ONLY_API").ok()
-            .map(|v| v.to_lowercase() == "yes" || v.to_lowercase() == "true");
-        let accept_incoming = std::env::var("TWS_ACCEPT_INCOMING")
-            .unwrap_or_else(|_| config.session.accept_incoming.clone());
-        let bypass_order_precautions = std::env::var("BYPASS_WARNING").ok()
-            .map(|v| v.to_lowercase() == "yes" || v.to_lowercase() == "true");
-        let allow_blind_trading = std::env::var("ALLOW_BLIND_TRADING").ok()
-            .map(|v| v.to_lowercase() == "yes" || v.to_lowercase() == "true");
+        let read_only_api = env_bool("READ_ONLY_API");
+        let bypass_order_precautions = env_bool("BYPASS_WARNING");
+        let allow_blind_trading = env_bool("ALLOW_BLIND_TRADING");
         let auto_restart_time = std::env::var("AUTO_RESTART_TIME").ok()
             .filter(|s| !s.is_empty());
         let auto_logoff_time = std::env::var("AUTO_LOGOFF_TIME").ok()
             .filter(|s| !s.is_empty());
         Self {
-            master_client_id, read_only_api, accept_incoming,
+            master_client_id, read_only_api,
             bypass_order_precautions, allow_blind_trading,
             auto_restart_time, auto_logoff_time,
         }

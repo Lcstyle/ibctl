@@ -8,6 +8,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::agent_client::{AgentClient, WindowInfo};
+use crate::config::TradingMode;
 use crate::handlers::{DialogHandler, HandlerError, HandlerResult};
 
 /// Handles the IB Gateway login dialog by filling username, password,
@@ -19,14 +20,14 @@ use crate::handlers::{DialogHandler, HandlerError, HandlerResult};
 pub struct LoginHandler {
     username: String,
     password: String,
-    trading_mode: String,
+    trading_mode: TradingMode,
     /// Set to true after credentials are submitted.
     /// Prevents re-matching the main gateway window post-login.
     login_submitted: AtomicBool,
 }
 
 impl LoginHandler {
-    pub fn new(username: String, password: String, trading_mode: String) -> Self {
+    pub fn new(username: String, password: String, trading_mode: TradingMode) -> Self {
         Self {
             username,
             password,
@@ -35,10 +36,6 @@ impl LoginHandler {
         }
     }
 
-    /// Reset state for re-login (e.g., after restart).
-    pub fn reset(&self) {
-        self.login_submitted.store(false, Ordering::Relaxed);
-    }
 }
 
 impl DialogHandler for LoginHandler {
@@ -89,8 +86,8 @@ impl DialogHandler for LoginHandler {
 
             // Step 2: Select trading mode — "Paper Trading" or "Live Trading"
             // Matches IBC's TradingModeManager which selects the mode
-            let mode_label = match self.trading_mode.as_str() {
-                "paper" => "Paper Trading",
+            let mode_label = match self.trading_mode {
+                TradingMode::Paper => "Paper Trading",
                 _ => "Live Trading",
             };
             match client.click_button(window.id, mode_label).await {
@@ -118,8 +115,8 @@ impl DialogHandler for LoginHandler {
 
             // Step 5: Click the login button
             // IBC tries multiple labels: "Log In", "Paper Log In"
-            let button_labels: &[&str] = match self.trading_mode.as_str() {
-                "paper" => &["Paper Log In", "Log In"],
+            let button_labels: &[&str] = match self.trading_mode {
+                TradingMode::Paper => &["Paper Log In", "Log In"],
                 _ => &["Log In", "Paper Log In"],
             };
 

@@ -6,6 +6,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::agent_client::{AgentClient, WindowInfo};
+use crate::config::TotpProvider;
 use crate::handlers::{DialogHandler, HandlerError, HandlerResult};
 use crate::totp;
 
@@ -14,15 +15,15 @@ use crate::totp;
 pub struct TotpEntryHandler {
     /// Name of the env var holding the TOTP secret
     secret_env: String,
-    /// TOTP provider name (e.g., "oathtool")
-    provider_name: String,
+    /// TOTP provider type
+    provider: TotpProvider,
 }
 
 impl TotpEntryHandler {
-    pub fn new(secret_env: String, provider_name: String) -> Self {
+    pub fn new(secret_env: String, provider: TotpProvider) -> Self {
         Self {
             secret_env,
-            provider_name,
+            provider,
         }
     }
 }
@@ -55,15 +56,20 @@ impl DialogHandler for TotpEntryHandler {
                     reason: format!("TOTP secret env var '{}' not set", self.secret_env),
                 })?;
 
-            // Create the TOTP provider and generate a code
-            let provider =
-                totp::create_provider(&self.provider_name).map_err(|e| HandlerError::Failed {
-                    handler: self.name().to_string(),
-                    reason: format!("failed to create TOTP provider: {}", e),
-                })?;
-
-            let code = provider.generate(&secret).map_err(|e| HandlerError::Failed {
-                handler: self.name().to_string(),
+            // Generate TOTP code in a blocking task to avoid blocking the runtime
+            let provider_type = self.provider;
+            let handler_name = self.name().to_string();
+            let code = tokio::task::spawn_blocking(move || {
+                let provider = totp::create_provider(provider_type);
+                provider.generate(&secret)
+            })
+            .await
+            .map_err(|e| HandlerError::Failed {
+                handler: handler_name.clone(),
+                reason: format!("TOTP task panicked: {}", e),
+            })?
+            .map_err(|e| HandlerError::Failed {
+                handler: handler_name,
                 reason: format!("failed to generate TOTP code: {}", e),
             })?;
 

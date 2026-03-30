@@ -29,8 +29,6 @@ pub enum HandlerError {
     AgentError(#[from] crate::agent_client::AgentError),
     #[error("handler '{handler}' failed: {reason}")]
     Failed { handler: String, reason: String },
-    #[error("timeout waiting for dialog response")]
-    Timeout,
 }
 
 /// Result of a dialog handler's attempt to process a window.
@@ -102,7 +100,13 @@ impl DialogHandlerRegistry {
         let password = crate::config::env_or_file("TWS_PASSWORD")
             .unwrap_or_else(|| config.auth.password.clone());
         let trading_mode = std::env::var("TRADING_MODE")
-            .unwrap_or_else(|_| config.auth.trading_mode.clone());
+            .and_then(|v| match v.to_lowercase().as_str() {
+                "live" => Ok(crate::config::TradingMode::Live),
+                "paper" => Ok(crate::config::TradingMode::Paper),
+                "both" => Ok(crate::config::TradingMode::Both),
+                _ => Err(std::env::VarError::NotPresent),
+            })
+            .unwrap_or(config.auth.trading_mode);
 
         registry.register(Box::new(login::LoginHandler::new(
             username,
@@ -111,17 +115,17 @@ impl DialogHandlerRegistry {
         )));
         registry.register(Box::new(totp_entry::TotpEntryHandler::new(
             config.twofa.secret_env.clone(),
-            config.twofa.provider.clone(),
+            config.twofa.provider,
         )));
         registry.register(Box::new(session_conflict::SessionConflictHandler::new(
-            config.session.action.clone(),
+            config.session.action,
         )));
         registry.register(Box::new(relogin::ReloginHandler));
         registry.register(Box::new(ssl_reconnect::SslReconnectHandler));
         registry.register(Box::new(tip_of_day::TipOfDayHandler));
         registry.register(Box::new(
             accept_connection::AcceptConnectionHandler::new(
-                config.session.accept_incoming.clone(),
+                config.session.accept_incoming,
             ),
         ));
         registry.register(Box::new(paper_warning::PaperWarningHandler));

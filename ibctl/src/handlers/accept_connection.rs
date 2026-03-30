@@ -7,17 +7,17 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::agent_client::{AgentClient, WindowInfo};
+use crate::config::AcceptIncoming;
 use crate::handlers::{DialogHandler, HandlerError, HandlerResult};
 
 /// Handles the "Accept incoming connection" dialog based on the
 /// configured accept_incoming setting.
 pub struct AcceptConnectionHandler {
-    /// "accept", "reject", or "manual"
-    action: String,
+    action: AcceptIncoming,
 }
 
 impl AcceptConnectionHandler {
-    pub fn new(action: String) -> Self {
+    pub fn new(action: AcceptIncoming) -> Self {
         Self { action }
     }
 }
@@ -46,15 +46,15 @@ impl DialogHandler for AcceptConnectionHandler {
                 self.action
             );
 
-            match self.action.as_str() {
-                "reject" => {
+            match self.action {
+                AcceptIncoming::Reject => {
                     client
                         .click_button(window.id, "Reject")
                         .await
                         .map_err(HandlerError::AgentError)?;
                     log::info!("Rejected incoming API connection");
                 }
-                "manual" => {
+                AcceptIncoming::Manual => {
                     log::info!("Incoming connection dialog left for manual handling");
                     return Ok(HandlerResult::NotApplicable);
                 }
