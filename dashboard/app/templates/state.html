@@ -1,81 +1,342 @@
 {% extends "base.html" %}
 {% block content %}
-<h2>State Machine</h2>
+<style>
+/* TP-7 Inspired State Machine Controller */
+.tp7 {
+    max-width: 420px;
+    margin: 0 auto;
+    background: #d4d4d8;
+    border-radius: 16px;
+    padding: 24px 20px 20px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.3);
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    position: relative;
+}
+.tp7-label {
+    position: absolute;
+    top: 12px;
+    left: 20px;
+    font-size: 11px;
+    font-weight: 700;
+    color: #71717a;
+    letter-spacing: 1px;
+}
 
-<!-- Mode selector -->
-<div style="margin-bottom: 12px; display: flex; align-items: center; gap: 12px;">
-    <select id="state-mode-select"
-            hx-get="/partials/state-history"
-            hx-trigger="change"
-            hx-target="#state-content"
-            hx-swap="innerHTML"
-            name="mode"
-            hx-include="this"
-            style="padding: 6px 12px; background: #1a1a2e; color: #e0e0e0; border: 1px solid #333; border-radius: 4px;">
+/* OLED Display */
+.tp7-oled {
+    position: absolute;
+    top: 10px;
+    right: 20px;
+    background: #000;
+    border-radius: 4px;
+    padding: 4px 10px;
+    display: flex;
+    gap: 12px;
+    align-items: center;
+}
+.tp7-oled-text {
+    font-size: 10px;
+    color: #e0e0e0;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+.tp7-oled-time {
+    font-size: 10px;
+    color: #a1a1aa;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Reel / State Disc */
+.tp7-reel {
+    width: 220px;
+    height: 220px;
+    margin: 32px auto 20px;
+    background: radial-gradient(circle at 50% 50%, #a1a1aa 0%, #d4d4d8 35%, #a1a1aa 36%, #c4c4cc 60%, #d4d4d8 100%);
+    border-radius: 50%;
+    border: 2px solid #a1a1aa;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    box-shadow: inset 0 2px 8px rgba(0,0,0,0.15);
+}
+.tp7-reel.spinning {
+    animation: spin 4s linear infinite;
+}
+@keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+.tp7-reel-center {
+    width: 60px;
+    height: 60px;
+    background: #71717a;
+    border-radius: 50%;
+    border: 3px solid #52525b;
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.3);
+}
+.tp7-state-ring {
+    position: absolute;
+    width: 160px;
+    height: 160px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+}
+.tp7-state-name {
+    font-size: 13px;
+    font-weight: 700;
+    color: #27272a;
+    text-align: center;
+    line-height: 1.2;
+}
+.tp7-state-sub {
+    font-size: 9px;
+    color: #52525b;
+    margin-top: 2px;
+}
+
+/* Mode selector - styled as side lever */
+.tp7-mode {
+    display: flex;
+    justify-content: center;
+    margin-bottom: 16px;
+    gap: 4px;
+}
+.tp7-mode-btn {
+    padding: 4px 16px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    border: none;
+    cursor: pointer;
+    transition: all 0.15s;
+    font-family: inherit;
+}
+.tp7-mode-btn:first-child { border-radius: 4px 0 0 4px; }
+.tp7-mode-btn:last-child { border-radius: 0 4px 4px 0; }
+.tp7-mode-btn.active {
+    background: #27272a;
+    color: #e0e0e0;
+}
+.tp7-mode-btn:not(.active) {
+    background: #a1a1aa;
+    color: #52525b;
+}
+
+/* Transport buttons */
+.tp7-transport {
+    display: flex;
+    gap: 6px;
+    justify-content: center;
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 2px solid #a1a1aa;
+}
+.tp7-btn {
+    width: 64px;
+    height: 48px;
+    border: none;
+    border-radius: 6px;
+    font-size: 20px;
+    cursor: pointer;
+    transition: all 0.1s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.2);
+}
+.tp7-btn:active {
+    transform: translateY(1px);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+}
+.tp7-btn-rec {
+    background: #27272a;
+    color: #ef4444;
+}
+.tp7-btn-play {
+    background: #27272a;
+    color: #e0e0e0;
+}
+.tp7-btn-stop {
+    background: #27272a;
+    color: #e0e0e0;
+}
+.tp7-btn-skip {
+    background: #27272a;
+    color: #e0e0e0;
+}
+.tp7-btn-rec .dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: #ef4444;
+}
+.tp7-btn-rec.active .dot {
+    background: #f97316;
+    animation: pulse-orange 1s ease-in-out infinite;
+}
+@keyframes pulse-orange {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+}
+
+/* Groove lines (decorative) */
+.tp7-grooves {
+    display: flex;
+    gap: 3px;
+    justify-content: center;
+    margin-top: 12px;
+}
+.tp7-groove {
+    width: 2px;
+    height: 20px;
+    background: #a1a1aa;
+    border-radius: 1px;
+}
+
+/* State selector (hidden dropdown triggered by long-press on reel) */
+.tp7-state-select {
+    display: none;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 10;
+    background: #000;
+    border-radius: 8px;
+    padding: 8px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+.tp7-state-select.visible { display: block; }
+.tp7-state-option {
+    padding: 6px 16px;
+    color: #e0e0e0;
+    font-size: 11px;
+    cursor: pointer;
+    border-radius: 4px;
+    font-family: inherit;
+}
+.tp7-state-option:hover { background: #27272a; }
+.tp7-state-option.current { color: #f97316; }
+
+/* Command result toast */
+.tp7-toast {
+    text-align: center;
+    margin-top: 8px;
+    font-size: 11px;
+    height: 16px;
+}
+
+/* Secondary controls */
+.tp7-secondary {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    margin-top: 8px;
+}
+.tp7-sec-btn {
+    padding: 3px 10px;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    background: #a1a1aa;
+    border: none;
+    border-radius: 3px;
+    color: #3f3f46;
+    cursor: pointer;
+    font-family: inherit;
+    transition: background 0.1s;
+}
+.tp7-sec-btn:hover { background: #71717a; color: #e0e0e0; }
+.tp7-sec-btn.danger:hover { background: #dc2626; color: #fff; }
+</style>
+
+<!-- TP-7 State Machine Controller -->
+<div class="tp7">
+    <div class="tp7-label">ibctl</div>
+    <div class="tp7-oled">
+        <span class="tp7-oled-text" id="oled-state">—</span>
+        <span class="tp7-oled-time" id="oled-uptime">0:00:00</span>
+    </div>
+
+    <!-- Mode toggle -->
+    <div class="tp7-mode">
         {% for m in modes %}
-        <option value="{{ m }}" {% if m == default_mode %}selected{% endif %}>{{ m | upper }}</option>
+        <button class="tp7-mode-btn {% if m == default_mode %}active{% endif %}"
+                data-mode="{{ m }}" onclick="setMode('{{ m }}')">{{ m | upper }}</button>
         {% endfor %}
-    </select>
+    </div>
+
+    <!-- Reel with state display -->
+    <div class="tp7-reel" id="state-reel" onclick="toggleStateSelect()">
+        <div class="tp7-state-ring">
+            <div class="tp7-state-name" id="reel-state">—</div>
+            <div class="tp7-state-sub" id="reel-mode">{{ default_mode }}</div>
+        </div>
+        <div class="tp7-reel-center"></div>
+
+        <!-- Hidden state selector (click reel to show) -->
+        <div class="tp7-state-select" id="state-select">
+            {% for s in ["Init","Launching","WaitingForAgent","WaitingForLogin","Authenticating","WaitingFor2fa","HandlingSessionConflict","DismissingPopups","ConfiguringApi","Connected","Restarting","Shutdown"] %}
+            <div class="tp7-state-option" onclick="forceState('{{ s }}', event)">{{ s }}</div>
+            {% endfor %}
+        </div>
+    </div>
+
+    <!-- Transport buttons -->
+    <div class="tp7-transport">
+        <button class="tp7-btn tp7-btn-rec" id="btn-pause" title="Pause" onclick="sendCmd('PAUSE')">
+            <div class="dot"></div>
+        </button>
+        <button class="tp7-btn tp7-btn-play" id="btn-resume" title="Resume" onclick="sendCmd('RESUME')">▶</button>
+        <button class="tp7-btn tp7-btn-stop" title="Stop" onclick="sendCmd('STOP', true, 'Stop instance?')">■</button>
+        <button class="tp7-btn tp7-btn-skip" title="Reset" onclick="sendCmd('RESTART', true, 'Reset Gateway?')">⏭</button>
+    </div>
+
+    <!-- Decorative grooves -->
+    <div class="tp7-grooves">
+        <div class="tp7-groove"></div>
+        <div class="tp7-groove"></div>
+        <div class="tp7-groove"></div>
+    </div>
+
+    <!-- Secondary controls -->
+    <div class="tp7-secondary">
+        <button class="tp7-sec-btn" onclick="sendCmd('RECONNECTDATA')">RECON DATA</button>
+        <button class="tp7-sec-btn" onclick="sendCmd('RECONNECTACCOUNT')">RECON ACCT</button>
+    </div>
+
+    <!-- Toast -->
+    <div class="tp7-toast" id="command-result"></div>
 </div>
 
-<!-- Direct Drive Controls -->
-<div class="card" style="margin-bottom: 16px;">
-    <div class="card-label">Direct Drive</div>
-    <div style="color: #888; font-size: 12px; margin-bottom: 10px;">
-        Pause freezes transitions — the state machine still responds to status queries but won't advance.
-        Resume returns to automatic. Reset kills the JVM and re-authenticates from scratch.
-    </div>
-    <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
-        <button class="btn btn-warning" style="font-size: 18px; padding: 6px 14px;"
-                id="btn-pause" title="Pause — freeze transitions">⏸</button>
-        <button class="btn btn-primary" style="font-size: 18px; padding: 6px 14px;"
-                id="btn-resume" title="Resume — automatic transitions">▶</button>
-        <button class="btn btn-danger" style="font-size: 18px; padding: 6px 14px;"
-                id="btn-restart" title="Reset — kill JVM and restart from Init">⏮</button>
-        <span style="color: #555; margin: 0 4px;">|</span>
-        <label style="color: #888; font-size: 12px;">Force State:</label>
-        <select id="setstate-select"
-                style="padding: 4px 8px; background: #1a1a2e; color: #e0e0e0; border: 1px solid #333; border-radius: 4px; font-size: 12px;">
-            <option value="">— select —</option>
-            <option value="Init">Init</option>
-            <option value="Launching">Launching</option>
-            <option value="WaitingForAgent">WaitingForAgent</option>
-            <option value="WaitingForLogin">WaitingForLogin</option>
-            <option value="Authenticating">Authenticating</option>
-            <option value="WaitingFor2fa">WaitingFor2fa</option>
-            <option value="HandlingSessionConflict">HandlingSessionConflict</option>
-            <option value="DismissingPopups">DismissingPopups</option>
-            <option value="ConfiguringApi">ConfiguringApi</option>
-            <option value="Connected">Connected</option>
-            <option value="Restarting">Restarting</option>
-            <option value="Shutdown">Shutdown</option>
-        </select>
-        <span style="color: #555; margin: 0 4px;">|</span>
-        <button class="btn btn-warning" style="font-size: 12px; padding: 4px 10px;"
-                id="btn-reconnect-data" title="Reconnect market data (Ctrl+F)">Reconnect Data</button>
-        <button class="btn btn-warning" style="font-size: 12px; padding: 4px 10px;"
-                id="btn-reconnect-acct" title="Reconnect account (Ctrl+R)">Reconnect Account</button>
-        <button class="btn btn-danger" style="font-size: 12px; padding: 4px 10px;"
-                id="btn-stop" title="Stop this ibctl instance">Stop</button>
-    </div>
-    <div id="command-result" style="margin-top: 8px; display: none;" class="card-detail"></div>
-</div>
-
-<!-- State + Transition History (auto-polling) -->
+<!-- Transition History -->
 <div id="state-content"
      hx-get="/partials/state-history?mode={{ default_mode }}"
      hx-trigger="load, every 3s"
-     hx-swap="innerHTML">
+     hx-swap="innerHTML"
+     style="margin-top: 24px;">
     <div class="loading">Loading state history...</div>
 </div>
 
 <script>
-// Get current mode from dropdown
-function getMode() {
-    return document.getElementById('state-mode-select').value;
+var currentMode = '{{ default_mode }}';
+
+function getMode() { return currentMode; }
+
+function setMode(m) {
+    currentMode = m;
+    document.querySelectorAll('.tp7-mode-btn').forEach(function(b) {
+        b.classList.toggle('active', b.dataset.mode === m);
+    });
+    document.getElementById('reel-mode').textContent = m;
+    // Trigger history refresh
+    htmx.ajax('GET', '/partials/state-history?mode=' + m, {target: '#state-content', swap: 'innerHTML'});
 }
 
-// Send command to the selected instance
 function sendCmd(command, needsConfirm, confirmMsg) {
     if (needsConfirm && !confirm(confirmMsg)) return;
     htmx.ajax('POST', '/api/v1/command', {
@@ -84,29 +345,55 @@ function sendCmd(command, needsConfirm, confirmMsg) {
     });
 }
 
-// Transport buttons
-document.getElementById('btn-pause').addEventListener('click', function() { sendCmd('PAUSE'); });
-document.getElementById('btn-resume').addEventListener('click', function() { sendCmd('RESUME'); });
-document.getElementById('btn-restart').addEventListener('click', function() {
-    sendCmd('RESTART', true, 'Reset ' + getMode().toUpperCase() + ' Gateway? Kills JVM and re-authenticates.');
-});
-document.getElementById('btn-reconnect-data').addEventListener('click', function() { sendCmd('RECONNECTDATA'); });
-document.getElementById('btn-reconnect-acct').addEventListener('click', function() { sendCmd('RECONNECTACCOUNT'); });
-document.getElementById('btn-stop').addEventListener('click', function() {
-    sendCmd('STOP', true, 'Stop ' + getMode().toUpperCase() + ' instance? This shuts down the daemon.');
+function toggleStateSelect() {
+    document.getElementById('state-select').classList.toggle('visible');
+}
+
+function forceState(state, evt) {
+    evt.stopPropagation();
+    document.getElementById('state-select').classList.remove('visible');
+    if (!confirm('Force ' + getMode().toUpperCase() + ' → ' + state + '?\nDirect Drive — no validation.')) return;
+    sendCmd('SETSTATE ' + state);
+}
+
+// Close state selector on outside click
+document.addEventListener('click', function(e) {
+    if (!e.target.closest('.tp7-reel')) {
+        document.getElementById('state-select').classList.remove('visible');
+    }
 });
 
-// SETSTATE dropdown
-document.getElementById('setstate-select').addEventListener('change', function() {
-    var state = this.value;
-    if (!state) return;
-    if (!confirm('Force ' + getMode().toUpperCase() + ' to ' + state + '? No validation — Direct Drive.')) {
-        this.value = '';
-        return;
+// Poll status to update reel display
+async function updateReel() {
+    try {
+        var resp = await fetch('/api/v1/status');
+        var data = await resp.json();
+        var state = data.state || '—';
+        var uptime = data.uptime_secs || 0;
+        var h = Math.floor(uptime / 3600);
+        var m = Math.floor((uptime % 3600) / 60);
+        var s = uptime % 60;
+
+        document.getElementById('oled-state').textContent = state;
+        document.getElementById('oled-uptime').textContent =
+            h + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+        document.getElementById('reel-state').textContent = state;
+
+        // Spin reel when running (not paused, not shutdown)
+        var reel = document.getElementById('state-reel');
+        var isActive = state !== 'Shutdown' && state !== 'Init' && !state.startsWith('Error');
+        reel.classList.toggle('spinning', isActive);
+
+        // Pause button indicator
+        var pauseBtn = document.getElementById('btn-pause');
+        // If state isn't advancing, show orange pulse
+    } catch(e) {
+        document.getElementById('oled-state').textContent = 'OFFLINE';
+        document.getElementById('oled-uptime').textContent = '—:——:——';
     }
-    sendCmd('SETSTATE ' + state);
-    this.value = '';
-});
+}
+setInterval(updateReel, 3000);
+updateReel();
 
 // Auto-poll includes current mode
 document.addEventListener('htmx:configRequest', function(evt) {
@@ -115,18 +402,16 @@ document.addEventListener('htmx:configRequest', function(evt) {
     }
 });
 
-// Format command results
+// Format command results as toast
 document.body.addEventListener('htmx:afterSwap', function(evt) {
     if (evt.detail.target.id === 'command-result') {
-        evt.detail.target.style.display = 'block';
         try {
             var data = JSON.parse(evt.detail.target.textContent);
             var ok = data.ok;
-            var mode = data.mode ? ' (' + data.mode.toUpperCase() + ')' : '';
             evt.detail.target.innerHTML =
-                '<span class="' + (ok ? 'status-connected' : 'status-error') + '">' +
-                (ok ? '✓ ' + data.command + mode : '✗ ' + data.error + mode) + '</span>';
-            setTimeout(function() { evt.detail.target.style.display = 'none'; }, 3000);
+                '<span style="color:' + (ok ? '#4ade80' : '#ef4444') + '">' +
+                (ok ? '✓ ' + data.command : '✗ ' + data.error) + '</span>';
+            setTimeout(function() { evt.detail.target.innerHTML = ''; }, 3000);
         } catch(e) {}
     }
 });
