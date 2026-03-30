@@ -5,13 +5,33 @@ services:
       dockerfile: Dockerfile
     container_name: ibctl-gateway
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
-      - DISPLAY=:1
+      DISPLAY: ":1"
+      TWS_USERID: ${TWS_USERID}
+      TWS_PASSWORD: ${TWS_PASSWORD}
+      TWS_USERID_PAPER: ${TWS_USERID_PAPER:-}
+      TWS_PASSWORD_PAPER: ${TWS_PASSWORD_PAPER:-}
+      TRADING_MODE: ${TRADING_MODE:-live}
+      TWOFA_DEVICE: ${TWOFA_DEVICE:-}
+      TWOFA_TIMEOUT_ACTION: ${TWOFA_TIMEOUT_ACTION:-restart}
+      TWOFA_EXIT_INTERVAL: ${TWOFA_EXIT_INTERVAL:-120}
+      RELOGIN_AFTER_TWOFA_TIMEOUT: ${RELOGIN_AFTER_TWOFA_TIMEOUT:-yes}
+      TWS_ACCEPT_INCOMING: ${TWS_ACCEPT_INCOMING:-accept}
+      TWS_MASTER_CLIENT_ID: ${TWS_MASTER_CLIENT_ID:-}
+      READ_ONLY_API: ${READ_ONLY_API:-no}
+      BYPASS_WARNING: ${BYPASS_WARNING:-yes}
+      ALLOW_BLIND_TRADING: ${ALLOW_BLIND_TRADING:-no}
+      AUTO_RESTART_TIME: ${AUTO_RESTART_TIME:-}
+      TWS_COLD_RESTART: ${TWS_COLD_RESTART:-}
+      JAVA_HEAP_SIZE: ${JAVA_HEAP_SIZE:-768}
+      TZ: ${TZ:-America/New_York}
+      VNC_SERVER_PASSWORD: ${VNC_SERVER_PASSWORD:-}
+      RUST_LOG: ${RUST_LOG:-ibctl=info}
+      IBCTL_DASHBOARD_PORT: ${IBCTL_DASHBOARD_PORT:-8080}
     ports:
       - "127.0.0.1:4001:4003"
       - "127.0.0.1:4002:4004"
       - "127.0.0.1:5900:5900"
+      - "127.0.0.1:6080:6080"
       - "127.0.0.1:7462:7462"
     tty: true
