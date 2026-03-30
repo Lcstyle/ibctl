@@ -40,20 +40,6 @@ if [ -n "${VNC_SERVER_PASSWORD:-}" ]; then
         -passwd "$VNC_SERVER_PASSWORD" &
 fi
 
-# Start websockify for noVNC (websocket proxy to VNC)
-if [ -n "${VNC_SERVER_PASSWORD:-}" ]; then
-    NOVNC_PORT="${IBCTL_NOVNC_PORT:-6080}"
-    echo "Starting websockify on port ${NOVNC_PORT} -> VNC :5900"
-    websockify --daemon ${NOVNC_PORT} localhost:5900
-fi
-
-# Start dashboard (FastAPI) — runs independently, connects to ibctl via TCP :7462
-DASHBOARD_PORT="${IBCTL_DASHBOARD_PORT:-8080}"
-echo "Starting dashboard on port ${DASHBOARD_PORT}"
-cd /opt/ibctl/dashboard && .venv/bin/python -m uvicorn app.main:app \
-    --host 0.0.0.0 --port "${DASHBOARD_PORT}" --log-level warning &
-DASHBOARD_PID=$!
-
 # Create jts.ini helper — ensures UseSSL=true and API-only mode
 create_jts_ini() {
     local config_dir="$1"
@@ -99,10 +85,6 @@ JTSEOF
 PIDS=()
 cleanup() {
     echo "Shutting down..."
-    # Stop dashboard
-    if [ -n "${DASHBOARD_PID:-}" ]; then
-        kill -TERM "$DASHBOARD_PID" 2>/dev/null || true
-    fi
     # Stop ibctl instances
     for pid in "${PIDS[@]}"; do
         kill -TERM "$pid" 2>/dev/null || true

@@ -121,12 +121,11 @@ ENV HOME=/home/ibgateway \
 COPY --from=setup /usr/local/ /usr/local/
 COPY --from=setup /root/Jts /home/ibgateway/Jts
 
-# Install runtime packages (same as gnzsnz, minus IBC deps) + Python for dashboard
+# Install runtime packages (same as gnzsnz, minus IBC deps)
 RUN apt-get update -y \
     && apt-get upgrade -y \
     && apt-get install --no-install-recommends --yes \
         gettext-base socat xvfb x11vnc sshpass openssh-client sudo telnet \
-        python3 python3-pip python3-venv websockify \
     && apt-get clean && rm -rf /var/lib/apt/lists/* \
     # Remove default ubuntu user if present
     && if id ubuntu 2>/dev/null; then userdel -rf ubuntu; fi \
@@ -150,15 +149,6 @@ RUN if [ -f /tmp/prebuilt/ibctl ]; then \
         && cp /tmp/source/ibctl /opt/ibctl/ibctl \
         && cp /tmp/source/ibctl-agent.jar /opt/ibctl/ibctl-agent.jar; \
     fi && rm -rf /tmp/prebuilt /tmp/source
-
-# Install dashboard Python dependencies in a venv
-COPY dashboard/pyproject.toml /opt/ibctl/dashboard/pyproject.toml
-RUN python3 -m venv /opt/ibctl/dashboard/.venv \
-    && /opt/ibctl/dashboard/.venv/bin/pip install --no-cache-dir \
-        fastapi uvicorn jinja2 sse-starlette
-
-# Copy dashboard source
-COPY dashboard/app /opt/ibctl/dashboard/app
 
 # Copy ibctl config and entrypoint
 COPY docker/entrypoint.sh /opt/ibctl/entrypoint.sh
