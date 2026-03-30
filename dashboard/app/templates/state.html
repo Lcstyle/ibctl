@@ -1,203 +1,282 @@
 {% extends "base.html" %}
 {% block content %}
 <style>
-/* TP-7 Inspired State Machine Controller */
+/* TP-7 Pencil Sketch / Blueprint style with TP-7 color hints */
 .tp7 {
-    max-width: 420px;
+    max-width: 400px;
     margin: 0 auto;
-    background: #d4d4d8;
-    border-radius: 16px;
-    padding: 24px 20px 20px;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.3);
-    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    background: transparent;
+    border: 1.5px solid #52525b;
+    border-radius: 14px;
+    padding: 22px 18px 18px;
     position: relative;
+    /* Subtle sketch texture */
+    background-image:
+        radial-gradient(circle at 20% 80%, rgba(249,115,22,0.03) 0%, transparent 50%),
+        radial-gradient(circle at 80% 20%, rgba(249,115,22,0.02) 0%, transparent 40%);
 }
+/* Corner screws */
+.tp7::before, .tp7::after {
+    content: '⊕';
+    position: absolute;
+    font-size: 8px;
+    color: #52525b;
+}
+.tp7::before { top: 8px; right: 8px; }
+.tp7::after { bottom: 8px; left: 8px; }
+
 .tp7-label {
     position: absolute;
-    top: 12px;
-    left: 20px;
-    font-size: 11px;
-    font-weight: 700;
+    top: 10px;
+    left: 18px;
+    font-size: 10px;
+    font-weight: 300;
     color: #71717a;
-    letter-spacing: 1px;
+    letter-spacing: 3px;
+    font-family: 'Helvetica Neue', 'Arial', sans-serif;
 }
 
-/* OLED Display */
+/* OLED Display — black inset with warm white text */
 .tp7-oled {
     position: absolute;
-    top: 10px;
-    right: 20px;
-    background: #000;
-    border-radius: 4px;
-    padding: 4px 10px;
+    top: 8px;
+    right: 18px;
+    background: #0a0a0a;
+    border: 1px solid #27272a;
+    border-radius: 3px;
+    padding: 3px 10px;
     display: flex;
-    gap: 12px;
+    gap: 10px;
     align-items: center;
+    box-shadow: inset 0 1px 3px rgba(0,0,0,0.5);
 }
 .tp7-oled-text {
-    font-size: 10px;
-    color: #e0e0e0;
-    font-weight: 600;
+    font-size: 9px;
+    color: #d4d4d8;
+    font-weight: 500;
     letter-spacing: 0.5px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
 }
 .tp7-oled-time {
-    font-size: 10px;
-    color: #a1a1aa;
+    font-size: 9px;
+    color: #71717a;
     font-variant-numeric: tabular-nums;
+    font-family: 'SF Mono', 'Fira Code', monospace;
 }
 
-/* Reel / State Disc */
+/* Reel — thin line drawing style */
+.tp7-reel-wrap {
+    display: flex;
+    justify-content: center;
+    margin: 36px 0 16px;
+}
 .tp7-reel {
-    width: 220px;
-    height: 220px;
-    margin: 32px auto 20px;
-    background: radial-gradient(circle at 50% 50%, #a1a1aa 0%, #d4d4d8 35%, #a1a1aa 36%, #c4c4cc 60%, #d4d4d8 100%);
+    width: 200px;
+    height: 200px;
     border-radius: 50%;
-    border: 2px solid #a1a1aa;
+    border: 1.5px solid #52525b;
+    position: relative;
     display: flex;
     align-items: center;
     justify-content: center;
-    position: relative;
-    box-shadow: inset 0 2px 8px rgba(0,0,0,0.15);
+    cursor: pointer;
+    /* Concentric rings — pencil sketch feel */
+    background:
+        radial-gradient(circle, transparent 28px, #3f3f4610 29px, transparent 30px),
+        radial-gradient(circle, transparent 55px, #3f3f4610 56px, transparent 57px),
+        radial-gradient(circle, transparent 78px, #3f3f4608 79px, transparent 80px);
 }
 .tp7-reel.spinning {
-    animation: spin 4s linear infinite;
+    animation: spin 6s linear infinite;
 }
-@keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
+.tp7-reel.spinning .tp7-state-ring {
+    animation: counter-spin 6s linear infinite;
 }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes counter-spin { to { transform: rotate(-360deg); } }
+
+/* Center hub */
 .tp7-reel-center {
-    width: 60px;
-    height: 60px;
-    background: #71717a;
+    width: 24px;
+    height: 24px;
     border-radius: 50%;
-    border: 3px solid #52525b;
-    box-shadow: inset 0 2px 4px rgba(0,0,0,0.3);
-}
-.tp7-state-ring {
+    border: 1.5px solid #52525b;
     position: absolute;
-    width: 160px;
-    height: 160px;
+    background: transparent;
+}
+/* Dot in center */
+.tp7-reel-center::after {
+    content: '';
+    width: 4px;
+    height: 4px;
     border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-direction: column;
-}
-.tp7-state-name {
-    font-size: 13px;
-    font-weight: 700;
-    color: #27272a;
-    text-align: center;
-    line-height: 1.2;
-}
-.tp7-state-sub {
-    font-size: 9px;
-    color: #52525b;
-    margin-top: 2px;
+    background: #f97316;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
 }
 
-/* Mode selector - styled as side lever */
+.tp7-state-ring {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+.tp7-state-name {
+    font-size: 12px;
+    font-weight: 400;
+    color: #d4d4d8;
+    text-align: center;
+    letter-spacing: 0.5px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+}
+.tp7-state-sub {
+    font-size: 8px;
+    color: #f97316;
+    margin-top: 3px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    font-weight: 500;
+}
+
+/* Mode toggle — minimal line buttons */
 .tp7-mode {
     display: flex;
     justify-content: center;
-    margin-bottom: 16px;
-    gap: 4px;
+    margin-bottom: 12px;
+    gap: 0;
 }
 .tp7-mode-btn {
-    padding: 4px 16px;
-    font-size: 10px;
-    font-weight: 700;
-    letter-spacing: 1px;
-    border: none;
+    padding: 3px 18px;
+    font-size: 9px;
+    font-weight: 400;
+    letter-spacing: 2px;
+    border: 1px solid #3f3f46;
     cursor: pointer;
-    transition: all 0.15s;
-    font-family: inherit;
+    font-family: 'Helvetica Neue', 'Arial', sans-serif;
+    transition: all 0.2s;
+    background: transparent;
 }
-.tp7-mode-btn:first-child { border-radius: 4px 0 0 4px; }
-.tp7-mode-btn:last-child { border-radius: 0 4px 4px 0; }
+.tp7-mode-btn:first-child { border-radius: 3px 0 0 3px; }
+.tp7-mode-btn:last-child { border-radius: 0 3px 3px 0; border-left: none; }
 .tp7-mode-btn.active {
-    background: #27272a;
-    color: #e0e0e0;
+    background: transparent;
+    color: #f97316;
+    border-color: #f97316;
 }
 .tp7-mode-btn:not(.active) {
-    background: #a1a1aa;
     color: #52525b;
 }
 
-/* Transport buttons */
+/* Transport — dark recessed buttons with line icons */
 .tp7-transport {
     display: flex;
-    gap: 6px;
+    gap: 4px;
     justify-content: center;
-    margin-top: 16px;
-    padding-top: 16px;
-    border-top: 2px solid #a1a1aa;
+    margin-top: 18px;
+    padding: 14px 0 0;
+    border-top: 1px solid #27272a;
 }
 .tp7-btn {
-    width: 64px;
-    height: 48px;
-    border: none;
-    border-radius: 6px;
-    font-size: 20px;
+    width: 60px;
+    height: 40px;
+    border: 1px solid #3f3f46;
+    border-radius: 4px;
+    background: #18181b;
+    font-size: 16px;
     cursor: pointer;
-    transition: all 0.1s;
     display: flex;
     align-items: center;
     justify-content: center;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.2);
+    transition: all 0.1s;
+    color: #71717a;
 }
-.tp7-btn:active {
-    transform: translateY(1px);
-    box-shadow: 0 1px 2px rgba(0,0,0,0.2);
-}
-.tp7-btn-rec {
-    background: #27272a;
-    color: #ef4444;
-}
-.tp7-btn-play {
-    background: #27272a;
-    color: #e0e0e0;
-}
-.tp7-btn-stop {
-    background: #27272a;
-    color: #e0e0e0;
-}
-.tp7-btn-skip {
-    background: #27272a;
-    color: #e0e0e0;
-}
+.tp7-btn:hover { border-color: #71717a; color: #d4d4d8; }
+.tp7-btn:active { transform: translateY(1px); background: #0a0a0a; }
+
+/* Record button — orange dot */
 .tp7-btn-rec .dot {
-    width: 14px;
-    height: 14px;
+    width: 10px;
+    height: 10px;
     border-radius: 50%;
-    background: #ef4444;
+    border: 1.5px solid #f97316;
+    background: transparent;
+    transition: background 0.2s;
 }
+.tp7-btn-rec:hover .dot { background: #f97316; }
 .tp7-btn-rec.active .dot {
     background: #f97316;
-    animation: pulse-orange 1s ease-in-out infinite;
+    animation: pulse-rec 1.2s ease-in-out infinite;
 }
-@keyframes pulse-orange {
+@keyframes pulse-rec {
     0%, 100% { opacity: 1; }
-    50% { opacity: 0.4; }
+    50% { opacity: 0.3; }
 }
 
-/* Groove lines (decorative) */
+/* Play — outline triangle */
+.tp7-btn-play { font-size: 14px; }
+.tp7-btn-play:hover { color: #4ade80; border-color: #4ade80; }
+
+/* Stop — small square */
+.tp7-btn-stop::after {
+    content: '';
+    width: 10px;
+    height: 10px;
+    border: 1.5px solid #71717a;
+}
+.tp7-btn-stop:hover::after { border-color: #ef4444; }
+
+/* Skip */
+.tp7-btn-skip { font-size: 12px; }
+.tp7-btn-skip:hover { color: #fbbf24; border-color: #fbbf24; }
+
+/* Groove lines */
 .tp7-grooves {
     display: flex;
-    gap: 3px;
+    gap: 4px;
     justify-content: center;
-    margin-top: 12px;
+    margin-top: 10px;
 }
 .tp7-groove {
-    width: 2px;
-    height: 20px;
-    background: #a1a1aa;
-    border-radius: 1px;
+    width: 1px;
+    height: 16px;
+    background: #27272a;
 }
 
-/* State selector (hidden dropdown triggered by long-press on reel) */
+/* Secondary controls — whisper-quiet */
+.tp7-secondary {
+    display: flex;
+    gap: 6px;
+    justify-content: center;
+    margin-top: 8px;
+}
+.tp7-sec-btn {
+    padding: 2px 8px;
+    font-size: 8px;
+    font-weight: 400;
+    letter-spacing: 1px;
+    background: transparent;
+    border: 1px solid #27272a;
+    border-radius: 2px;
+    color: #52525b;
+    cursor: pointer;
+    font-family: 'Helvetica Neue', 'Arial', sans-serif;
+    transition: all 0.15s;
+}
+.tp7-sec-btn:hover { border-color: #71717a; color: #a1a1aa; }
+
+/* Toast */
+.tp7-toast {
+    text-align: center;
+    margin-top: 6px;
+    font-size: 10px;
+    height: 14px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+/* State selector overlay */
 .tp7-state-select {
     display: none;
     position: absolute;
@@ -205,56 +284,27 @@
     left: 50%;
     transform: translate(-50%, -50%);
     z-index: 10;
-    background: #000;
-    border-radius: 8px;
-    padding: 8px;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    background: #0a0a0a;
+    border: 1px solid #f97316;
+    border-radius: 6px;
+    padding: 6px;
+    box-shadow: 0 4px 24px rgba(249,115,22,0.15);
+    max-height: 180px;
+    overflow-y: auto;
 }
 .tp7-state-select.visible { display: block; }
 .tp7-state-option {
-    padding: 6px 16px;
-    color: #e0e0e0;
-    font-size: 11px;
+    padding: 4px 14px;
+    color: #a1a1aa;
+    font-size: 10px;
     cursor: pointer;
-    border-radius: 4px;
-    font-family: inherit;
-}
-.tp7-state-option:hover { background: #27272a; }
-.tp7-state-option.current { color: #f97316; }
-
-/* Command result toast */
-.tp7-toast {
-    text-align: center;
-    margin-top: 8px;
-    font-size: 11px;
-    height: 16px;
-}
-
-/* Secondary controls */
-.tp7-secondary {
-    display: flex;
-    gap: 8px;
-    justify-content: center;
-    margin-top: 8px;
-}
-.tp7-sec-btn {
-    padding: 3px 10px;
-    font-size: 9px;
-    font-weight: 600;
-    letter-spacing: 0.5px;
-    background: #a1a1aa;
-    border: none;
     border-radius: 3px;
-    color: #3f3f46;
-    cursor: pointer;
-    font-family: inherit;
-    transition: background 0.1s;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    letter-spacing: 0.3px;
 }
-.tp7-sec-btn:hover { background: #71717a; color: #e0e0e0; }
-.tp7-sec-btn.danger:hover { background: #dc2626; color: #fff; }
+.tp7-state-option:hover { background: #18181b; color: #f97316; }
 </style>
 
-<!-- TP-7 State Machine Controller -->
 <div class="tp7">
     <div class="tp7-label">ibctl</div>
     <div class="tp7-oled">
@@ -262,7 +312,6 @@
         <span class="tp7-oled-time" id="oled-uptime">0:00:00</span>
     </div>
 
-    <!-- Mode toggle -->
     <div class="tp7-mode">
         {% for m in modes %}
         <button class="tp7-mode-btn {% if m == default_mode %}active{% endif %}"
@@ -270,100 +319,75 @@
         {% endfor %}
     </div>
 
-    <!-- Reel with state display -->
-    <div class="tp7-reel" id="state-reel" onclick="toggleStateSelect()">
-        <div class="tp7-state-ring">
-            <div class="tp7-state-name" id="reel-state">—</div>
-            <div class="tp7-state-sub" id="reel-mode">{{ default_mode }}</div>
-        </div>
-        <div class="tp7-reel-center"></div>
-
-        <!-- Hidden state selector (click reel to show) -->
-        <div class="tp7-state-select" id="state-select">
-            {% for s in ["Init","Launching","WaitingForAgent","WaitingForLogin","Authenticating","WaitingFor2fa","HandlingSessionConflict","DismissingPopups","ConfiguringApi","Connected","Restarting","Shutdown"] %}
-            <div class="tp7-state-option" onclick="forceState('{{ s }}', event)">{{ s }}</div>
-            {% endfor %}
+    <div class="tp7-reel-wrap">
+        <div class="tp7-reel" id="state-reel" onclick="toggleStateSelect()">
+            <div class="tp7-state-ring">
+                <div class="tp7-state-name" id="reel-state">—</div>
+                <div class="tp7-state-sub" id="reel-mode">{{ default_mode }}</div>
+            </div>
+            <div class="tp7-reel-center"></div>
+            <div class="tp7-state-select" id="state-select">
+                {% for s in ["Init","Launching","WaitingForAgent","WaitingForLogin","Authenticating","WaitingFor2fa","HandlingSessionConflict","DismissingPopups","ConfiguringApi","Connected","Restarting","Shutdown"] %}
+                <div class="tp7-state-option" onclick="forceState('{{ s }}', event)">{{ s }}</div>
+                {% endfor %}
+            </div>
         </div>
     </div>
 
-    <!-- Transport buttons -->
     <div class="tp7-transport">
-        <button class="tp7-btn tp7-btn-rec" id="btn-pause" title="Pause" onclick="sendCmd('PAUSE')">
-            <div class="dot"></div>
-        </button>
-        <button class="tp7-btn tp7-btn-play" id="btn-resume" title="Resume" onclick="sendCmd('RESUME')">▶</button>
-        <button class="tp7-btn tp7-btn-stop" title="Stop" onclick="sendCmd('STOP', true, 'Stop instance?')">■</button>
+        <button class="tp7-btn tp7-btn-rec" id="btn-pause" title="Pause" onclick="sendCmd('PAUSE')"><div class="dot"></div></button>
+        <button class="tp7-btn tp7-btn-play" id="btn-resume" title="Resume" onclick="sendCmd('RESUME')">▷</button>
+        <button class="tp7-btn tp7-btn-stop" title="Stop" onclick="sendCmd('STOP', true, 'Stop instance?')"></button>
         <button class="tp7-btn tp7-btn-skip" title="Reset" onclick="sendCmd('RESTART', true, 'Reset Gateway?')">⏭</button>
     </div>
 
-    <!-- Decorative grooves -->
     <div class="tp7-grooves">
         <div class="tp7-groove"></div>
         <div class="tp7-groove"></div>
         <div class="tp7-groove"></div>
     </div>
 
-    <!-- Secondary controls -->
     <div class="tp7-secondary">
         <button class="tp7-sec-btn" onclick="sendCmd('RECONNECTDATA')">RECON DATA</button>
         <button class="tp7-sec-btn" onclick="sendCmd('RECONNECTACCOUNT')">RECON ACCT</button>
     </div>
 
-    <!-- Toast -->
     <div class="tp7-toast" id="command-result"></div>
 </div>
 
-<!-- Transition History -->
 <div id="state-content"
      hx-get="/partials/state-history?mode={{ default_mode }}"
      hx-trigger="load, every 3s"
      hx-swap="innerHTML"
      style="margin-top: 24px;">
-    <div class="loading">Loading state history...</div>
+    <div class="loading">Loading...</div>
 </div>
 
 <script>
 var currentMode = '{{ default_mode }}';
-
 function getMode() { return currentMode; }
-
 function setMode(m) {
     currentMode = m;
     document.querySelectorAll('.tp7-mode-btn').forEach(function(b) {
         b.classList.toggle('active', b.dataset.mode === m);
     });
     document.getElementById('reel-mode').textContent = m;
-    // Trigger history refresh
     htmx.ajax('GET', '/partials/state-history?mode=' + m, {target: '#state-content', swap: 'innerHTML'});
 }
-
 function sendCmd(command, needsConfirm, confirmMsg) {
     if (needsConfirm && !confirm(confirmMsg)) return;
-    htmx.ajax('POST', '/api/v1/command', {
-        target: '#command-result',
-        values: {command: command, mode: getMode()}
-    });
+    htmx.ajax('POST', '/api/v1/command', {target: '#command-result', values: {command: command, mode: getMode()}});
 }
-
-function toggleStateSelect() {
-    document.getElementById('state-select').classList.toggle('visible');
-}
-
+function toggleStateSelect() { document.getElementById('state-select').classList.toggle('visible'); }
 function forceState(state, evt) {
     evt.stopPropagation();
     document.getElementById('state-select').classList.remove('visible');
-    if (!confirm('Force ' + getMode().toUpperCase() + ' → ' + state + '?\nDirect Drive — no validation.')) return;
+    if (!confirm('Force ' + getMode().toUpperCase() + ' → ' + state + '?')) return;
     sendCmd('SETSTATE ' + state);
 }
-
-// Close state selector on outside click
 document.addEventListener('click', function(e) {
-    if (!e.target.closest('.tp7-reel')) {
-        document.getElementById('state-select').classList.remove('visible');
-    }
+    if (!e.target.closest('.tp7-reel')) document.getElementById('state-select').classList.remove('visible');
 });
-
-// Poll status to update reel display
 async function updateReel() {
     try {
         var resp = await fetch('/api/v1/status');
@@ -373,20 +397,12 @@ async function updateReel() {
         var h = Math.floor(uptime / 3600);
         var m = Math.floor((uptime % 3600) / 60);
         var s = uptime % 60;
-
         document.getElementById('oled-state').textContent = state;
-        document.getElementById('oled-uptime').textContent =
-            h + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+        document.getElementById('oled-uptime').textContent = h + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
         document.getElementById('reel-state').textContent = state;
-
-        // Spin reel when running (not paused, not shutdown)
         var reel = document.getElementById('state-reel');
-        var isActive = state !== 'Shutdown' && state !== 'Init' && !state.startsWith('Error');
+        var isActive = state !== 'Shutdown' && !state.startsWith('Error');
         reel.classList.toggle('spinning', isActive);
-
-        // Pause button indicator
-        var pauseBtn = document.getElementById('btn-pause');
-        // If state isn't advancing, show orange pulse
     } catch(e) {
         document.getElementById('oled-state').textContent = 'OFFLINE';
         document.getElementById('oled-uptime').textContent = '—:——:——';
@@ -394,23 +410,15 @@ async function updateReel() {
 }
 setInterval(updateReel, 3000);
 updateReel();
-
-// Auto-poll includes current mode
 document.addEventListener('htmx:configRequest', function(evt) {
-    if (evt.detail.elt.id === 'state-content') {
-        evt.detail.path = '/partials/state-history?mode=' + getMode();
-    }
+    if (evt.detail.elt.id === 'state-content') evt.detail.path = '/partials/state-history?mode=' + getMode();
 });
-
-// Format command results as toast
 document.body.addEventListener('htmx:afterSwap', function(evt) {
     if (evt.detail.target.id === 'command-result') {
         try {
             var data = JSON.parse(evt.detail.target.textContent);
-            var ok = data.ok;
-            evt.detail.target.innerHTML =
-                '<span style="color:' + (ok ? '#4ade80' : '#ef4444') + '">' +
-                (ok ? '✓ ' + data.command : '✗ ' + data.error) + '</span>';
+            evt.detail.target.innerHTML = '<span style="color:' + (data.ok ? '#4ade80' : '#ef4444') + '">' +
+                (data.ok ? '✓ ' + data.command : '✗ ' + data.error) + '</span>';
             setTimeout(function() { evt.detail.target.innerHTML = ''; }, 3000);
         } catch(e) {}
     }
