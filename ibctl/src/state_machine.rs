@@ -76,7 +76,7 @@ impl std::fmt::Display for State {
 }
 
 /// Runtime statistics collected by the state machine.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct Stats {
     pub restarts_today: u32,
     pub relogins_today: u32,
@@ -85,24 +85,20 @@ pub struct Stats {
     pub config_apply_duration_secs: Option<f64>,
 }
 
-impl Default for Stats {
-    fn default() -> Self {
-        Self {
-            restarts_today: 0,
-            relogins_today: 0,
-            dialogs_dismissed: 0,
-            last_2fa_duration_secs: None,
-            config_apply_duration_secs: None,
-        }
-    }
-}
-
 /// A recorded state transition.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Transition {
     pub timestamp: String,
     pub from: String,
     pub to: String,
+}
+
+/// Bundled mpsc receivers for the state machine's inbound channels.
+pub struct Channels {
+    pub signals: mpsc::Receiver<Signal>,
+    pub commands: mpsc::Receiver<Command>,
+    pub queries: mpsc::Receiver<Query>,
+    pub cold_restart: mpsc::Receiver<ColdRestartSignal>,
 }
 
 /// The main state machine that orchestrates the IB Gateway lifecycle.
@@ -117,6 +113,7 @@ pub struct StateMachine {
     query_rx: mpsc::Receiver<Query>,
     cold_restart_rx: mpsc::Receiver<ColdRestartSignal>,
     socat_process: Option<std::process::Child>,
+    config_retries: u32,
     // Dashboard state tracking
     start_time: Instant,
     connected_since: Option<Instant>,
@@ -130,10 +127,7 @@ impl StateMachine {
         agent_client: AgentClient,
         supervisor: Supervisor,
         handler_registry: DialogHandlerRegistry,
-        signal_rx: mpsc::Receiver<Signal>,
-        command_rx: mpsc::Receiver<Command>,
-        query_rx: mpsc::Receiver<Query>,
-        cold_restart_rx: mpsc::Receiver<ColdRestartSignal>,
+        channels: Channels,
     ) -> Self {
         Self {
             state: State::Init,
@@ -141,11 +135,12 @@ impl StateMachine {
             agent_client,
             supervisor,
             handler_registry,
-            signal_rx,
-            command_rx,
-            query_rx,
-            cold_restart_rx,
+            signal_rx: channels.signals,
+            command_rx: channels.commands,
+            query_rx: channels.queries,
+            cold_restart_rx: channels.cold_restart,
             socat_process: None,
+            config_retries: 0,
             start_time: Instant::now(),
             connected_since: None,
             transition_history: VecDeque::with_capacity(100),
@@ -832,21 +827,37 @@ impl StateMachine {
     }
 
     async fn do_configure_api(&mut self) -> Result<State, StateMachineError> {
-        log::info!("Applying post-login API configuration");
+        const MAX_CONFIG_RETRIES: u32 = 10;
+
+        self.config_retries += 1;
+        log::info!(
+            "Applying post-login API configuration (attempt {}/{})",
+            self.config_retries, MAX_CONFIG_RETRIES
+        );
 
         let settings = crate::handlers::api_config::ApiConfigSettings::from_config(&self.config);
 
         match crate::handlers::api_config::apply_api_config(&self.agent_client, &settings, self.config.timing.ui_tick_ms).await {
             Ok(()) => {
                 log::info!("API configuration complete");
+                self.config_retries = 0;
                 Ok(State::Connected)
             }
             Err(e) => {
-                log::error!("API configuration FAILED: {} — will retry", e);
-                // Wait before retrying to let any lingering dialogs/menus close
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                // Stay in ConfiguringApi — the state machine loop will call us again
-                Ok(State::ConfiguringApi)
+                if self.config_retries >= MAX_CONFIG_RETRIES {
+                    log::error!(
+                        "API configuration failed {} times — restarting Gateway: {}",
+                        MAX_CONFIG_RETRIES, e
+                    );
+                    self.config_retries = 0;
+                    Ok(State::Restarting)
+                } else {
+                    log::error!("API configuration FAILED: {} — will retry ({}/{})", e, self.config_retries, MAX_CONFIG_RETRIES);
+                    // Wait before retrying to let any lingering dialogs/menus close
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    // Stay in ConfiguringApi — the state machine loop will call us again
+                    Ok(State::ConfiguringApi)
+                }
             }
         }
     }
@@ -941,8 +952,8 @@ impl StateMachine {
             }
         }
 
-        // Block until the child process is fully reaped
-        match self.supervisor.wait() {
+        // Wait until the child process is fully reaped
+        match self.supervisor.wait().await {
             Ok(status) => log::info!("JVM exited with status: {}", status),
             Err(e) => log::warn!("JVM wait failed: {} (may already be dead)", e),
         }

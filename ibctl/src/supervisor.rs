@@ -177,9 +177,16 @@ impl Supervisor {
     }
 
     /// Wait for the JVM process to exit and return its exit status.
-    pub fn wait(&mut self) -> Result<ExitStatus, SupervisorError> {
+    /// Uses async polling to avoid blocking the tokio runtime.
+    pub async fn wait(&mut self) -> Result<ExitStatus, SupervisorError> {
         match self.child.as_mut() {
-            Some(child) => Ok(child.wait()?),
+            Some(child) => loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => return Ok(status),
+                    Ok(None) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+                    Err(e) => return Err(SupervisorError::SpawnFailed(e)),
+                }
+            },
             None => Err(SupervisorError::NotRunning),
         }
     }
@@ -261,7 +268,7 @@ impl Supervisor {
         for entry in std::fs::read_dir(&jars_dir)? {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "jar") {
+            if path.extension().is_some_and(|ext| ext == "jar") {
                 jars.push(path.display().to_string());
             }
         }

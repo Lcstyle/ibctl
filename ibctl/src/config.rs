@@ -116,10 +116,11 @@ impl fmt::Display for AcceptIncoming {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
     Debug,
+    #[default]
     Info,
     Warn,
     Error,
@@ -180,7 +181,7 @@ pub struct AuthConfig {
     pub paper: PaperAuthConfig,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct PaperAuthConfig {
     pub username: String,
@@ -231,7 +232,7 @@ pub struct AgentConfig {
     pub socket_path: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct LoggingConfig {
     pub level: LogLevel,
@@ -299,14 +300,6 @@ impl Default for AuthConfig {
     }
 }
 
-impl Default for PaperAuthConfig {
-    fn default() -> Self {
-        Self {
-            username: String::new(),
-            password: String::new(),
-        }
-    }
-}
 
 impl Default for TwoFaConfig {
     fn default() -> Self {
@@ -359,13 +352,6 @@ impl Default for AgentConfig {
     }
 }
 
-impl Default for LoggingConfig {
-    fn default() -> Self {
-        Self {
-            level: LogLevel::Info,
-        }
-    }
-}
 
 impl Config {
     /// Load configuration with layered precedence:
@@ -436,14 +422,14 @@ impl Config {
         }
 
         // 2FA
-        if let Some(v) = std::env::var("TOTP_PROVIDER").ok() {
+        if let Ok(v) = std::env::var("TOTP_PROVIDER") {
             match v.to_lowercase().as_str() {
                 "oathtool" => self.twofa.provider = TotpProvider::Oathtool,
                 "builtin" => self.twofa.provider = TotpProvider::Builtin,
                 other => log::warn!("Unknown TOTP_PROVIDER '{}', keeping default", other),
             }
         }
-        if let Some(v) = std::env::var("TWOFA_TIMEOUT_ACTION").ok() {
+        if let Ok(v) = std::env::var("TWOFA_TIMEOUT_ACTION") {
             match v.to_lowercase().as_str() {
                 "restart" => self.twofa.timeout_action = TwoFaTimeoutAction::Restart,
                 "exit" => self.twofa.timeout_action = TwoFaTimeoutAction::Exit,
@@ -455,19 +441,19 @@ impl Config {
         }
 
         // Gateway
-        if let Some(v) = std::env::var("TWS_PATH").ok() {
+        if let Ok(v) = std::env::var("TWS_PATH") {
             self.gateway.tws_path = v;
         }
-        if let Some(v) = std::env::var("TWS_SETTINGS_PATH").ok() {
+        if let Ok(v) = std::env::var("TWS_SETTINGS_PATH") {
             self.gateway.settings_path = v;
         }
-        if let Some(v) = std::env::var("TWS_MAJOR_VRSN").ok() {
+        if let Ok(v) = std::env::var("TWS_MAJOR_VRSN") {
             self.gateway.version = v;
         }
         if let Some(v) = std::env::var("JAVA_HEAP_SIZE").ok().and_then(|s| s.parse().ok()) {
             self.gateway.java_heap_mb = v;
         }
-        if let Some(v) = std::env::var("GATEWAY_OR_TWS").ok() {
+        if let Ok(v) = std::env::var("GATEWAY_OR_TWS") {
             match v.to_lowercase().as_str() {
                 "gateway" => self.gateway.program = GatewayProgram::Gateway,
                 "tws" => self.gateway.program = GatewayProgram::Tws,
@@ -476,7 +462,7 @@ impl Config {
         }
 
         // Session
-        if let Some(v) = std::env::var("IBCTL_SESSION_ACTION").ok() {
+        if let Ok(v) = std::env::var("IBCTL_SESSION_ACTION") {
             match v.to_lowercase().as_str() {
                 "primary" => self.session.action = SessionAction::Primary,
                 "secondary" => self.session.action = SessionAction::Secondary,
@@ -484,7 +470,7 @@ impl Config {
                 other => log::warn!("Unknown IBCTL_SESSION_ACTION '{}', keeping default", other),
             }
         }
-        if let Some(v) = std::env::var("IBCTL_ACCEPT_INCOMING").ok() {
+        if let Ok(v) = std::env::var("IBCTL_ACCEPT_INCOMING") {
             match v.to_lowercase().as_str() {
                 "accept" => self.session.accept_incoming = AcceptIncoming::Accept,
                 "reject" => self.session.accept_incoming = AcceptIncoming::Reject,
@@ -500,18 +486,18 @@ impl Config {
         if let Some(v) = std::env::var("IBCTL_COMMAND_PORT").ok().and_then(|s| s.parse().ok()) {
             self.command_server.port = v;
         }
-        if let Some(v) = std::env::var("IBCTL_CONTROL_FROM").ok() {
+        if let Ok(v) = std::env::var("IBCTL_CONTROL_FROM") {
             self.command_server.control_from =
                 v.split(',').map(|s| s.trim().to_string()).collect();
         }
 
         // Agent
-        if let Some(v) = std::env::var("IBCTL_AGENT_SOCKET").ok() {
+        if let Ok(v) = std::env::var("IBCTL_AGENT_SOCKET") {
             self.agent.socket_path = v;
         }
 
         // Logging
-        if let Some(v) = std::env::var("IBCTL_LOG_LEVEL").ok() {
+        if let Ok(v) = std::env::var("IBCTL_LOG_LEVEL") {
             match v.to_lowercase().as_str() {
                 "debug" => self.logging.level = LogLevel::Debug,
                 "info" => self.logging.level = LogLevel::Info,
@@ -534,10 +520,11 @@ impl Config {
                 "TWS_PASSWORD or TWS_PASSWORD_FILE env var".to_string(),
             ));
         }
-        if matches!(self.auth.trading_mode, TradingMode::Both | TradingMode::Paper) {
-            if self.auth.paper.username.is_empty() && self.auth.trading_mode == TradingMode::Both {
-                log::warn!("trading_mode=both but no paper username set; will use main credentials");
-            }
+        if matches!(self.auth.trading_mode, TradingMode::Both | TradingMode::Paper)
+            && self.auth.paper.username.is_empty()
+            && self.auth.trading_mode == TradingMode::Both
+        {
+            log::warn!("trading_mode=both but no paper username set; will use main credentials");
         }
         Ok(())
     }

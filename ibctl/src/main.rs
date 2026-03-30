@@ -122,15 +122,18 @@ async fn async_main(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // Create and run the state machine
+    let channels = state_machine::Channels {
+        signals: signal_rx,
+        commands: command_rx,
+        queries: query_rx,
+        cold_restart: cold_restart_rx,
+    };
     let mut state_machine = state_machine::StateMachine::new(
         config,
         agent_client,
         supervisor,
         handler_registry,
-        signal_rx,
-        command_rx,
-        query_rx,
-        cold_restart_rx,
+        channels,
     );
 
     state_machine.run().await?;
@@ -139,6 +142,7 @@ async fn async_main(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Parse the `--config <path>` CLI argument.
+#[allow(clippy::never_loop)]
 fn parse_config_arg(args: &[String]) -> Option<String> {
     let mut iter = args.iter().skip(1); // Skip binary name
     while let Some(arg) = iter.next() {

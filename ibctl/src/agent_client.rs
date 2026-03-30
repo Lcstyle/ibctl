@@ -21,7 +21,7 @@ pub enum AgentError {
     #[error("agent request failed: {0}")]
     RequestFailed(String),
     #[error("agent returned error: {0}")]
-    AgentError(String),
+    Agent(String),
     #[error("failed to parse agent response: {0}")]
     ParseError(#[from] serde_json::Error),
     #[error("timeout waiting for agent response")]
@@ -297,9 +297,9 @@ impl AgentClient {
     fn unwrap_response<T>(&self, resp: AgentResponse<T>) -> Result<T, AgentError> {
         if resp.ok {
             resp.data
-                .ok_or_else(|| AgentError::AgentError("response ok but no data".to_string()))
+                .ok_or_else(|| AgentError::Agent("response ok but no data".to_string()))
         } else {
-            Err(AgentError::AgentError(
+            Err(AgentError::Agent(
                 resp.error.unwrap_or_else(|| "unknown agent error".to_string()),
             ))
         }

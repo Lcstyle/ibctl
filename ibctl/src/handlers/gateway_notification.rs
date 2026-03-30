@@ -46,19 +46,13 @@ impl DialogHandler for GatewayNotificationHandler {
             log::info!("Dismissing Gateway notification dialog (id={})", window.id);
 
             // Try Close first, then OK
-            match client.click_button(window.id, "Close").await {
-                Ok(true) => {
-                    log::info!("Gateway notification dismissed via 'Close'");
-                    return Ok(HandlerResult::Handled);
-                }
-                _ => {}
+            if let Ok(true) = client.click_button(window.id, "Close").await {
+                log::info!("Gateway notification dismissed via 'Close'");
+                return Ok(HandlerResult::Handled);
             }
-            match client.click_button(window.id, "OK").await {
-                Ok(true) => {
-                    log::info!("Gateway notification dismissed via 'OK'");
-                    return Ok(HandlerResult::Handled);
-                }
-                _ => {}
+            if let Ok(true) = client.click_button(window.id, "OK").await {
+                log::info!("Gateway notification dismissed via 'OK'");
+                return Ok(HandlerResult::Handled);
             }
 
             log::debug!("No Close/OK button found in Gateway notification");
