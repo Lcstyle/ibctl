@@ -66,13 +66,10 @@ class InstanceRegistry:
         """Fetch status for one instance, translating errors to InstanceStatus."""
         client = self._clients[mode]
         try:
-            status_data = await client._query("STATUS")
-            state_data = await client._query("STATE")
-            return InstanceStatus(
-                mode=mode,
-                status=status_data,
-                state_data=state_data,
-            )
+            status = await client.send_command("STATUS")
+            import json
+            status_data = json.loads(status) if status else {}
+            return InstanceStatus(mode=mode, status=status_data)
         except Exception as e:
             logger.debug("Instance %s unreachable: %s", mode, e)
             return InstanceStatus(mode=mode, error=str(e))
