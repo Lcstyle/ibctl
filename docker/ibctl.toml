@@ -24,6 +24,7 @@ accept_incoming = "accept"
 [command_server]
 enabled = true
 port = 7462
+paper_port = 7463
 bind_address = "0.0.0.0"
 control_from = ["127.0.0.1", "172.0.0.0/8"]
 
