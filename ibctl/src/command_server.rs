@@ -8,6 +8,9 @@
 
 use std::net::{IpAddr, SocketAddr};
 
+/// Maximum concurrent TCP connections to the command server.
+const MAX_CONCURRENT_CONNECTIONS: usize = 10;
+
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
@@ -133,9 +136,20 @@ impl CommandServer {
 
         log::info!("Command server listening on {}", addr);
 
+        // Limit concurrent connections to prevent resource exhaustion
+        let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+
         loop {
             match listener.accept().await {
                 Ok((stream, peer_addr)) => {
+                    let permit = match semaphore.clone().try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            log::warn!("Connection limit reached, rejecting {}", peer_addr);
+                            drop(stream);
+                            continue;
+                        }
+                    };
                     let control_from = self.config.control_from.clone();
                     let cmd_tx = command_tx.clone();
                     let qry_tx = query_tx.clone();
@@ -145,6 +159,7 @@ impl CommandServer {
                         {
                             log::error!("Error handling connection from {}: {}", peer_addr, e);
                         }
+                        drop(permit); // release slot
                     });
                 }
                 Err(e) => {
