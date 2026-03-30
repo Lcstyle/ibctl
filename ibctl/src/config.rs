@@ -248,6 +248,15 @@ pub struct TwoFaConfig {
     pub provider: TotpProvider,
     pub timeout_action: TwoFaTimeoutAction,
     pub timeout_seconds: u64,
+    /// 2FA device name for device selection dialog (empty = skip)
+    #[serde(default)]
+    pub device: String,
+    /// Whether to relogin after 2FA timeout (overrides timeout_action=restart)
+    #[serde(default)]
+    pub relogin_after_timeout: bool,
+    /// Whether a TOTP secret is available (resolved at load time)
+    #[serde(skip)]
+    pub has_secret: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -271,6 +280,9 @@ pub struct GatewayConfig {
 pub struct SessionConfig {
     pub action: SessionAction,
     pub accept_incoming: AcceptIncoming,
+    /// Cold restart time in "HH:MM" 24h format (e.g., "09:00"). Empty = disabled.
+    #[serde(default)]
+    pub cold_restart_time: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -348,6 +360,9 @@ impl Default for TwoFaConfig {
             provider: TotpProvider::Oathtool,
             timeout_action: TwoFaTimeoutAction::Restart,
             timeout_seconds: 180,
+            device: String::new(),
+            relogin_after_timeout: false,
+            has_secret: false,
         }
     }
 }
@@ -373,6 +388,7 @@ impl Default for SessionConfig {
         Self {
             action: SessionAction::Primary,
             accept_incoming: AcceptIncoming::Accept,
+            cold_restart_time: String::new(),
         }
     }
 }
@@ -483,6 +499,17 @@ impl Config {
         if let Some(v) = std::env::var("TWOFA_EXIT_INTERVAL").ok().and_then(|s| s.parse().ok()) {
             self.twofa.timeout_seconds = v;
         }
+        if let Ok(v) = std::env::var("TWOFA_DEVICE") {
+            self.twofa.device = v;
+        }
+        if let Ok(v) = std::env::var("RELOGIN_AFTER_TWOFA_TIMEOUT") {
+            self.twofa.relogin_after_timeout =
+                matches!(v.to_lowercase().as_str(), "yes" | "true" | "1");
+        }
+        // Resolve whether a TOTP secret is available
+        self.twofa.has_secret = env_or_file(&self.twofa.secret_env)
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
 
         // Gateway
         if let Ok(v) = std::env::var("TWS_PATH") {
@@ -521,6 +548,9 @@ impl Config {
                 "manual" => self.session.accept_incoming = AcceptIncoming::Manual,
                 other => log::warn!("Unknown IBCTL_ACCEPT_INCOMING '{}', keeping default", other),
             }
+        }
+        if let Ok(v) = std::env::var("TWS_COLD_RESTART") {
+            self.session.cold_restart_time = v;
         }
 
         // Command server

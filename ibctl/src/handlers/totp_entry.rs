@@ -5,6 +5,8 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use secrecy::{ExposeSecret, SecretString};
+
 use crate::agent_client::{AgentClient, WindowInfo};
 use crate::config::TotpProvider;
 use crate::handlers::{DialogHandler, HandlerError, HandlerResult};
@@ -49,19 +51,20 @@ impl DialogHandler for TotpEntryHandler {
         Box::pin(async move {
             log::info!("Handling 2FA dialog '{}'", window.title);
 
-            // Read the TOTP secret from the configured env var
-            let secret =
+            // Read the TOTP secret from the configured env var (wrapped in SecretString)
+            let secret = SecretString::from(
                 std::env::var(&self.secret_env).map_err(|_| HandlerError::Failed {
                     handler: self.name().to_string(),
                     reason: format!("TOTP secret env var '{}' not set", self.secret_env),
-                })?;
+                })?
+            );
 
             // Generate TOTP code in a blocking task to avoid blocking the runtime
             let provider_type = self.provider;
             let handler_name = self.name().to_string();
             let code = tokio::task::spawn_blocking(move || {
                 let provider = totp::create_provider(provider_type)?;
-                provider.generate(&secret)
+                provider.generate(secret.expose_secret())
             })
             .await
             .map_err(|e| HandlerError::Failed {

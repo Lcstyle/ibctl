@@ -39,8 +39,20 @@ fn main() -> ExitCode {
     }
     std::env::set_var("IBCTL_AGENT_TICK_MS", config.timing.agent_tick_ms.to_string());
 
-    // Initialize logging
-    env_logger::init();
+    // Initialize logging — JSON Lines format for structured log aggregation
+    env_logger::Builder::from_default_env()
+        .format(|buf, record| {
+            use std::io::Write;
+            writeln!(
+                buf,
+                r#"{{"ts":"{}","level":"{}","target":"{}","msg":{}}}"#,
+                buf.timestamp_millis(),
+                record.level(),
+                record.target(),
+                serde_json::to_string(&format!("{}", record.args())).unwrap_or_default(),
+            )
+        })
+        .init();
 
     log::info!("ibctl v{} starting", env!("CARGO_PKG_VERSION"));
 
@@ -115,7 +127,7 @@ async fn async_main(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     // and so does ibctl. The timer fires on Sunday at the configured time, kills
     // the JVM, and the state machine relaunches with full re-auth.
     let (cold_restart_tx, cold_restart_rx) = tokio::sync::mpsc::channel(1);
-    let cold_restart_time = std::env::var("TWS_COLD_RESTART").unwrap_or_default();
+    let cold_restart_time = config.session.cold_restart_time.clone();
     let _cold_restart_handle = cold_restart::spawn_cold_restart_scheduler(
         cold_restart_time,
         cold_restart_tx,

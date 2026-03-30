@@ -248,9 +248,7 @@ impl StateMachine {
     }
 
     async fn do_wait_for_2fa(&mut self) -> Result<State, StateMachineError> {
-        let has_totp = crate::config::env_or_file("TWOFACTOR_CODE")
-            .map(|s| !s.is_empty())
-            .unwrap_or(false);
+        let has_totp = self.config.twofa.has_secret;
 
         let timeout_secs = self.config.twofa.timeout_seconds;
         let max_wait = std::time::Duration::from_secs(timeout_secs);
@@ -290,8 +288,7 @@ impl StateMachine {
                         }
 
                         if !device_selected {
-                            let twofa_device = std::env::var("TWOFA_DEVICE")
-                                .unwrap_or_default();
+                            let twofa_device = &self.config.twofa.device;
                             if !twofa_device.is_empty() {
                                 log::info!("Selecting 2FA device: {}", twofa_device);
                                 match self.agent_client.select_list_item(win.id, &twofa_device).await {
@@ -357,11 +354,9 @@ impl StateMachine {
             }
 
             if start.elapsed() > max_wait {
-                let relogin = std::env::var("RELOGIN_AFTER_TWOFA_TIMEOUT")
-                    .map(|v| matches!(v.to_lowercase().as_str(), "yes" | "true" | "1"))
-                    .unwrap_or(false);
-
-                if relogin || self.config.twofa.timeout_action == crate::config::TwoFaTimeoutAction::Restart {
+                if self.config.twofa.relogin_after_timeout
+                    || self.config.twofa.timeout_action == crate::config::TwoFaTimeoutAction::Restart
+                {
                     log::warn!(
                         "2FA timed out after {}s — restarting login sequence (will retry until approved)",
                         timeout_secs
@@ -485,6 +480,15 @@ impl StateMachine {
             if !self.supervisor.is_running() {
                 log::warn!("JVM process exited unexpectedly");
                 return Ok(State::Restarting);
+            }
+
+            // Check socat health — restart if it died
+            let socat_alive = self.socat_process.as_mut()
+                .map(|c| c.try_wait().ok().flatten().is_none())
+                .unwrap_or(false);
+            if !socat_alive {
+                log::warn!("Socat process died — restarting port forwarding");
+                self.start_socat(api_port, socat_port);
             }
 
             if let Ok(windows) = self.agent_client.list_windows().await {
