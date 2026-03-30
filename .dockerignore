@@ -3,7 +3,7 @@ target/
 .github/
 .full-review/
 .claude/
-dashboard/
+dashboard/tests/
 docs/
 *.md
 !docker/*.md
