@@ -54,6 +54,12 @@ async def controls_page(request: Request):
     return RedirectResponse(url="/state")
 
 
+@router.get("/ib-status", response_class=HTMLResponse)
+async def ib_status_page(request: Request):
+    templates = request.app.state.templates
+    return templates.TemplateResponse(request, "ib_status.html", {"active_tab": "ib-status"})
+
+
 @router.get("/vnc", response_class=HTMLResponse)
 async def vnc_page(request: Request):
     templates = request.app.state.templates
@@ -126,12 +132,18 @@ async def state_history_partial(request: Request, mode: str | None = None):
 
 @router.get("/partials/config", response_class=HTMLResponse)
 async def config_partial(request: Request):
-    client = request.app.state.ibctl_client
+    registry = request.app.state.instance_registry
     templates = request.app.state.templates
 
     try:
-        config = await client.config()
-    except DashboardError as e:
+        # Use cached config (5 min TTL) — config doesn't change at runtime
+        config_data = await registry.cached_config(registry.primary_mode())
+        if config_data is None:
+            client = registry.get_client(registry.primary_mode())
+            config = await client.config()
+            config_data = asdict(config)
+        config = type('Config', (), {'__getattr__': lambda s, k: config_data.get(k, {})})()
+    except (DashboardError, Exception) as e:
         return templates.TemplateResponse(request, "partials/config_content.html", {
             "error": e.message, "config": {}, "env_vars": {},
         })
@@ -163,4 +175,70 @@ async def logs_partial(request: Request, level: str | None = None):
 
     return templates.TemplateResponse(request, "partials/logs_content.html", {
         "logs": logs,
+    })
+
+
+@router.get("/partials/ib-status", response_class=HTMLResponse)
+async def ib_status_partial(request: Request):
+    registry = request.app.state.instance_registry
+    templates = request.app.state.templates
+
+    # Get IB status from the scraper
+    monitor = getattr(request.app.state, 'ib_status_monitor', None)
+    scraper_status = None
+    scraper_info = {
+        "running": False, "url": "", "region": "NA", "interval": 300,
+        "last_pushed_status": "unknown", "last_fetch_error": None,
+        "internet_ok": True, "ib_reachable": True,
+    }
+
+    if monitor:
+        scraper_info["running"] = monitor._task is not None and not monitor._task.done()
+        scraper_info["url"] = monitor._scraper.config.url
+        scraper_info["region"] = monitor._scraper.config.region
+        scraper_info["interval"] = monitor._interval
+        scraper_info["last_pushed_status"] = monitor._last_pushed_status
+
+        # Get last scraped status
+        if monitor._scraper._last_status:
+            scraper_status = monitor._scraper._last_status
+            scraper_info["last_fetch_error"] = scraper_status.fetch_error
+            scraper_info["internet_ok"] = scraper_status.status.value != "no_internet"
+            scraper_info["ib_reachable"] = scraper_status.status.value != "unknown"
+
+    # Build IB status dict for template
+    ib_data = {
+        "status": scraper_info["last_pushed_status"],
+        "reason": "",
+        "alerts": [],
+        "daily_resets": [],
+        "weekend_resets": [],
+    }
+
+    if scraper_status:
+        ib_data["status"] = scraper_status.status.value
+        ib_data["alerts"] = [
+            {"severity": a.severity.value, "message": a.message, "is_blocking": a.is_blocking()}
+            for a in scraper_status.alerts
+        ]
+        ib_data["daily_resets"] = [
+            {"region": w.region, "start_time": w.start_time.strftime("%H:%M"), "end_time": w.end_time.strftime("%H:%M"), "timezone": w.timezone}
+            for w in scraper_status.daily_resets
+        ]
+        ib_data["weekend_resets"] = [
+            {"region": w.region, "start_time": w.start_time.strftime("%H:%M"), "end_time": w.end_time.strftime("%H:%M"), "timezone": w.timezone}
+            for w in scraper_status.weekend_resets
+        ]
+
+    # Get per-instance ib_system from ibctl
+    instances = await registry.all_status()
+    instances_data = [
+        {"mode": i.mode, "status": i.status, "error": i.error}
+        for i in instances
+    ]
+
+    return templates.TemplateResponse(request, "partials/ib_status_content.html", {
+        "ib_status": ib_data,
+        "scraper_info": scraper_info,
+        "instances": instances_data,
     })

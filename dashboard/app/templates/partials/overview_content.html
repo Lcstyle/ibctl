@@ -1,3 +1,26 @@
+<!-- IB System Status Banner -->
+{% set ib = (instances[0].get('status', {}) if instances else {}).get('ib_system', {}) %}
+{% if ib and ib.get('status') and ib.get('status') != 'available' %}
+<div class="card" style="margin-bottom: 12px; border-left: 3px solid {% if ib.get('available') %}#4ade80{% elif ib.get('status') == 'no_internet' %}#ef4444{% else %}#fbbf24{% endif %};">
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div>
+            <span style="font-size: 11px; color: #71717a; letter-spacing: 1px; text-transform: uppercase;">IB System</span>
+            <span style="margin-left: 8px; font-size: 13px; font-weight: 600; color: {% if ib.get('status') == 'maintenance' %}#fbbf24{% elif ib.get('status') == 'outage' %}#ef4444{% elif ib.get('status') == 'no_internet' %}#ef4444{% else %}#a1a1aa{% endif %};">
+                {{ ib.get('status', 'unknown') | upper }}
+            </span>
+        </div>
+        {% if ib.get('expires_in_secs') %}
+        <span style="font-size: 11px; color: #71717a; font-family: 'SF Mono', monospace;">
+            TTL: {{ (ib.get('expires_in_secs', 0) // 60) }}m {{ (ib.get('expires_in_secs', 0) % 60) }}s
+        </span>
+        {% endif %}
+    </div>
+    {% if ib.get('reason') %}
+    <div style="margin-top: 4px; font-size: 12px; color: #a1a1aa;">{{ ib.get('reason') }}</div>
+    {% endif %}
+</div>
+{% endif %}
+
 <div style="display: flex; gap: 16px; flex-wrap: wrap;">
 {% for inst in instances %}
 {% set s = inst.get('status', {}) %}

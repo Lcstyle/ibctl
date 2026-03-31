@@ -4,14 +4,17 @@ Manages connections to one or more ibctl command servers (live, paper, or both).
 Queries all instances concurrently and translates connection failures into
 InstanceStatus(error=...) rather than propagating exceptions.
 
-Follows dependency inversion: composes IbctlClientProtocol instances,
-so tests can inject FakeIbctlClient without TCP.
+Includes a TTL cache for STATUS and CONFIG responses to reduce TCP round-trips.
+STATUS is cached for 2s (matches HTMX poll interval), CONFIG is cached for 60s
+(doesn't change at runtime).
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import time
 from typing import Callable
 
 from app.domain.instance import InstanceEndpoint, InstanceStatus
@@ -20,8 +23,25 @@ from app.ibctl_client import IbctlClientProtocol, TcpIbctlClient
 logger = logging.getLogger("dashboard.registry")
 
 
+class _CachedResponse:
+    """Simple TTL cache entry."""
+    __slots__ = ("data", "expires")
+
+    def __init__(self, data: dict | str, ttl: float):
+        self.data = data
+        self.expires = time.monotonic() + ttl
+
+    @property
+    def valid(self) -> bool:
+        return time.monotonic() < self.expires
+
+
 class InstanceRegistry:
-    """Manages connections to multiple ibctl instances."""
+    """Manages connections to multiple ibctl instances with response caching."""
+
+    # Cache TTLs in seconds
+    STATUS_TTL = 10.0   # Quick navigation between pages hits cache
+    CONFIG_TTL = 300.0  # Config doesn't change at runtime (5 min)
 
     def __init__(
         self,
@@ -30,6 +50,7 @@ class InstanceRegistry:
     ):
         self._clients: dict[str, IbctlClientProtocol] = {}
         self._endpoints: dict[str, InstanceEndpoint] = {}
+        self._cache: dict[str, _CachedResponse] = {}
 
         for ep in endpoints:
             self._endpoints[ep.mode] = ep
@@ -37,10 +58,7 @@ class InstanceRegistry:
             logger.info("Registered %s instance at %s:%d", ep.mode, ep.host, ep.port)
 
     async def all_status(self) -> list[InstanceStatus]:
-        """Query all instances concurrently, return status for each.
-
-        Never raises — unreachable instances get InstanceStatus(error=...).
-        """
+        """Query all instances concurrently, return status for each."""
         tasks = [self._fetch_status(mode) for mode in self._clients]
         return await asyncio.gather(*tasks)
 
@@ -49,6 +67,37 @@ class InstanceRegistry:
         if mode not in self._clients:
             return InstanceStatus(mode=mode, error=f"Unknown instance: {mode}")
         return await self._fetch_status(mode)
+
+    async def cached_command(self, mode: str, command: str, ttl: float) -> dict | None:
+        """Send a command with TTL caching. Returns parsed JSON or None."""
+        cache_key = f"{mode}:{command}"
+        cached = self._cache.get(cache_key)
+        if cached and cached.valid:
+            return cached.data
+
+        client = self._clients.get(mode)
+        if not client:
+            return None
+
+        try:
+            raw = await client.send_command(command)
+            data = json.loads(raw) if raw else {}
+            self._cache[cache_key] = _CachedResponse(data, ttl)
+            return data
+        except Exception as e:
+            logger.debug("Cache miss for %s:%s — %s", mode, command, e)
+            return None
+
+    async def cached_config(self, mode: str) -> dict | None:
+        """Get CONFIG with 60s TTL cache."""
+        return await self.cached_command(mode, "CONFIG", self.CONFIG_TTL)
+
+    def invalidate(self, mode: str | None = None):
+        """Clear cache for a mode or all modes."""
+        if mode:
+            self._cache = {k: v for k, v in self._cache.items() if not k.startswith(f"{mode}:")}
+        else:
+            self._cache.clear()
 
     def get_client(self, mode: str) -> IbctlClientProtocol:
         """Get the raw client for a specific instance (for sending commands)."""
@@ -63,16 +112,20 @@ class InstanceRegistry:
         return self.modes()[0]
 
     async def _fetch_status(self, mode: str) -> InstanceStatus:
-        """Fetch status for one instance, translating errors to InstanceStatus."""
+        """Fetch status with 2s TTL cache, translating errors to InstanceStatus."""
+        cache_key = f"{mode}:STATUS"
+        cached = self._cache.get(cache_key)
+        if cached and cached.valid:
+            return InstanceStatus(mode=mode, status=cached.data)
+
         client = self._clients[mode]
         try:
-            status = await client.send_command("STATUS")
-            import json
-            status_data = json.loads(status) if status else {}
+            raw = await client.send_command("STATUS")
+            status_data = json.loads(raw) if raw else {}
+            self._cache[cache_key] = _CachedResponse(status_data, self.STATUS_TTL)
             return InstanceStatus(mode=mode, status=status_data)
         except Exception as e:
             logger.debug("Instance %s unreachable: %s", mode, e)
-            # Friendly error messages
             err = str(e)
             if "Connection refused" in err or "ConnectionRefusedError" in err:
                 err = "Starting up — waiting for ibctl daemon"

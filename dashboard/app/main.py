@@ -35,7 +35,17 @@ async def lifespan(app: FastAPI):
         "Dashboard starting on port %d (instances: %s)",
         settings.port, modes,
     )
+
+    # Start IB System Status monitor
+    from app.services.ib_status_monitor import create_monitor
+    monitor = create_monitor(app.state.instance_registry)
+    app.state.ib_status_monitor = monitor
+    await monitor.start()
+
     yield
+
+    # Stop IB System Status monitor
+    await monitor.stop()
     logger.info("Dashboard shutting down")
 
 

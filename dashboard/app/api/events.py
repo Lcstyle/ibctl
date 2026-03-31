@@ -1,16 +1,18 @@
-"""Server-Sent Events endpoint for real-time updates."""
+"""Server-Sent Events endpoint for real-time multi-instance updates.
+
+Polls all ibctl instances every 2 seconds internally. Only pushes events
+to the browser when state changes are detected. The browser uses these
+to update the UI instantly without waiting for the HTMX poll interval.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-from dataclasses import asdict
 
 from fastapi import APIRouter, Request
 from sse_starlette.sse import EventSourceResponse
-
-from app.domain.errors import DashboardError
 
 logger = logging.getLogger("dashboard.api.events")
 router = APIRouter()
@@ -18,41 +20,68 @@ router = APIRouter()
 
 @router.get("/api/v1/events")
 async def events(request: Request):
-    """SSE stream of status updates. Polls ibctl every 2 seconds."""
+    """SSE stream — pushes state changes and periodic status for all instances."""
 
     async def event_generator():
-        client = request.app.state.ibctl_client
-        last_state = None
+        registry = request.app.state.instance_registry
+        last_states: dict[str, str] = {}
+        last_ready: dict[str, bool] = {}
 
         while True:
             if await request.is_disconnected():
                 break
 
             try:
-                status = await client.status()
-                current_state = status.state
+                instances = await registry.all_status()
 
-                # Always send status update
+                for inst in instances:
+                    mode = inst.mode
+                    status = inst.status or {}
+                    current_state = status.get("state", "unreachable")
+                    current_ready = status.get("ready", False)
+                    prev_state = last_states.get(mode)
+                    prev_ready = last_ready.get(mode)
+
+                    # State change — push immediately
+                    if prev_state is not None and current_state != prev_state:
+                        yield {
+                            "event": "state_change",
+                            "data": json.dumps({
+                                "mode": mode,
+                                "from": prev_state,
+                                "to": current_state,
+                                "ready": current_ready,
+                            }),
+                        }
+
+                    # Ready change (connected/disconnected) — push
+                    if prev_ready is not None and current_ready != prev_ready:
+                        yield {
+                            "event": "ready_change",
+                            "data": json.dumps({
+                                "mode": mode,
+                                "ready": current_ready,
+                                "state": current_state,
+                            }),
+                        }
+
+                    last_states[mode] = current_state
+                    last_ready[mode] = current_ready
+
+                # Periodic heartbeat with full status (every poll)
                 yield {
                     "event": "status",
-                    "data": json.dumps(asdict(status)),
+                    "data": json.dumps([
+                        {"mode": i.mode, "status": i.status, "error": i.error}
+                        for i in instances
+                    ]),
                 }
 
-                # Send state_change event if state changed
-                if last_state is not None and current_state != last_state:
-                    yield {
-                        "event": "state_change",
-                        "data": json.dumps({
-                            "from": last_state,
-                            "to": current_state,
-                        }),
-                    }
-
-                last_state = current_state
-            except DashboardError:
+            except Exception as e:
+                logger.debug("SSE poll error: %s", e)
                 yield {
                     "event": "error",
-                    "data": json.dumps({"error": "ibctl unreachable"}),
+                    "data": json.dumps({"error": str(e)}),
                 }
 
             await asyncio.sleep(2)

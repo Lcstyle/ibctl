@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ibctl Dashboard</title>
-    <link rel="stylesheet" href="/static/style.css?v=21">
+    <link rel="stylesheet" href="/static/style.css?v=22">
     <script src="/static/htmx.min.js"></script>
 </head>
 <body>
@@ -14,11 +14,83 @@
             <a href="/state" class="tab {% if active_tab == 'state' %}active{% endif %}">State</a>
             <a href="/config" class="tab {% if active_tab == 'config' %}active{% endif %}">Config</a>
             <a href="/logs" class="tab {% if active_tab == 'logs' %}active{% endif %}">Logs</a>
+            <a href="/ib-status" class="tab {% if active_tab == 'ib-status' %}active{% endif %}">IB Status</a>
             <a href="/vnc" class="tab {% if active_tab == 'vnc' %}active{% endif %}">VNC</a>
+            <span style="flex: 1;"></span>
+            <span style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: #52525b;">
+                <span>⟳</span>
+                <select id="refresh-rate" style="background: transparent; border: 1px solid #27272a; border-radius: 3px; color: #71717a; font-size: 11px; padding: 2px 4px; cursor: pointer;">
+                    <option value="3">3s</option>
+                    <option value="5">5s</option>
+                    <option value="15">15s</option>
+                    <option value="30">30s</option>
+                    <option value="60" selected>1m</option>
+                    <option value="300">5m</option>
+                </select>
+            </span>
         </nav>
     </header>
     <main>
         {% block content %}{% endblock %}
     </main>
+    <script>
+    // SSE — real-time updates from server, triggers HTMX refresh on state changes
+    (function() {
+        var evtSource = null;
+        function connectSSE() {
+            if (evtSource) evtSource.close();
+            evtSource = new EventSource('/api/v1/events');
+
+            evtSource.addEventListener('state_change', function(e) {
+                var d = JSON.parse(e.data);
+                console.log('State change:', d.mode, d.from, '→', d.to);
+                // Trigger refresh of all HTMX-polled elements immediately
+                document.querySelectorAll('[hx-trigger]').forEach(function(el) {
+                    if (el.getAttribute('hx-get')) htmx.trigger(el, 'load');
+                });
+            });
+
+            evtSource.addEventListener('ready_change', function(e) {
+                var d = JSON.parse(e.data);
+                console.log('Ready change:', d.mode, d.ready ? 'READY' : 'NOT READY');
+                document.querySelectorAll('[hx-trigger]').forEach(function(el) {
+                    if (el.getAttribute('hx-get')) htmx.trigger(el, 'load');
+                });
+            });
+
+            evtSource.onerror = function() {
+                // Reconnect after 5s on error
+                setTimeout(connectSSE, 5000);
+            };
+        }
+        connectSSE();
+    })();
+
+    // Global refresh rate — HTMX elements with hx-trigger="every Xs" are rewritten dynamically
+    (function() {
+        var sel = document.getElementById('refresh-rate');
+        var saved = localStorage.getItem('ibctl-refresh-rate');
+        if (saved) sel.value = saved;
+
+        function applyRate() {
+            var rate = sel.value;
+            localStorage.setItem('ibctl-refresh-rate', rate);
+            // Update all HTMX polling elements
+            document.querySelectorAll('[hx-trigger]').forEach(function(el) {
+                var trigger = el.getAttribute('hx-trigger');
+                if (trigger && trigger.includes('every')) {
+                    var newTrigger = trigger.replace(/every\s+\d+s/, 'every ' + rate + 's');
+                    el.setAttribute('hx-trigger', newTrigger);
+                    // Re-process so HTMX picks up the new interval
+                    htmx.process(el);
+                }
+            });
+        }
+
+        sel.addEventListener('change', applyRate);
+        // Apply saved rate on page load (after HTMX processes initial triggers)
+        setTimeout(applyRate, 100);
+    })();
+    </script>
 </body>
 </html>
