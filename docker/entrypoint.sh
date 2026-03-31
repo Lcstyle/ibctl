@@ -179,7 +179,7 @@ PAPER_USER="${TWS_USERID_PAPER:-$TWS_USERID}"
 PAPER_PASS="${TWS_PASSWORD_PAPER:-$TWS_PASSWORD}"
 
 # Read paper command server port from ibctl.toml (default 7463)
-PAPER_CMD_PORT=$(grep -E '^\s*paper_port\s*=' /opt/ibctl/ibctl.toml | head -1 | sed 's/.*=\s*//' | tr -d ' ' || echo "7463")
+PAPER_CMD_PORT=$(grep -E '^\s*paper_port\s*=' /opt/ibctl/ibctl.toml | head -1 | sed 's/.*=\s*//;s/#.*//' | tr -d ' ' || echo "7463")
 [ -z "$PAPER_CMD_PORT" ] && PAPER_CMD_PORT=7463
 
 echo "Starting paper instance (command server port: $PAPER_CMD_PORT)..."
