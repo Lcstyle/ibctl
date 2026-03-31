@@ -1,224 +1,185 @@
 {% set ib_enabled = ib_status is defined and ib_status is not none %}
 
-<div class="overview-layout">
-
-<!-- Main accordion column -->
-<div class="overview-main">
-
-    <!-- IB Status accordion — expanded by default, only if IB status feature is enabled -->
-    {% if ib_enabled %}
-    {% set ib = ib_status %}
-    {% set scraper = scraper_info %}
-    <div class="accordion-card" data-accordion="ib-status" data-default-open="true">
-        <div class="accordion-header" onclick="toggleAccordion(this)">
-            <div class="accordion-title">
-                <span class="accordion-label">IB STATUS</span>
-                <span class="ib-dot {% if ib.status == 'available' %}ib-dot-ok{% elif ib.status == 'maintenance' or ib.status == 'scheduled' %}ib-dot-warn{% else %}ib-dot-err{% endif %}"></span>
-                <span class="accordion-status" style="color: {% if ib.status == 'available' %}#4ade80{% elif ib.status == 'maintenance' %}#fbbf24{% else %}#ef4444{% endif %};">
-                    {{ ib.status | upper }}
-                </span>
-                {% if ib.reason %}
-                <span class="accordion-detail">{{ ib.reason[:60] }}</span>
-                {% endif %}
-            </div>
-            <span class="accordion-chevron">&#9660;</span>
+<!-- IB Status accordion — expanded by default, only if IB status feature is enabled -->
+{% if ib_enabled %}
+{% set ib = ib_status %}
+{% set scraper = scraper_info %}
+<div class="accordion-card" data-accordion="ib-status" data-default-open="true">
+    <div class="accordion-header" onclick="toggleAccordion(this)">
+        <div class="accordion-title">
+            <span class="accordion-label">IB STATUS</span>
+            <span class="ib-dot {% if ib.status == 'available' %}ib-dot-ok{% elif ib.status == 'maintenance' or ib.status == 'scheduled' %}ib-dot-warn{% else %}ib-dot-err{% endif %}"></span>
+            <span class="accordion-status" style="color: {% if ib.status == 'available' %}#4ade80{% elif ib.status == 'maintenance' %}#fbbf24{% else %}#ef4444{% endif %};">
+                {{ ib.status | upper }}
+            </span>
+            {% if ib.reason %}
+            <span class="accordion-detail">{{ ib.reason[:60] }}</span>
+            {% endif %}
         </div>
-        <div class="accordion-body">
-            <div style="display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-start;">
-                <!-- Left: status + alerts -->
-                <div style="flex: 1; min-width: 260px;">
-                    <!-- Per-instance IB status -->
-                    {% for inst in instances %}
-                    {% set inst_ib = (inst.get('status', {}) or {}).get('ib_system', {}) %}
-                    <div class="ib-instance-row">
-                        <span class="instance-badge-sm {% if inst.get('mode') == 'live' %}badge-live{% else %}badge-paper{% endif %}">{{ inst.get('mode', '?') | upper }}</span>
-                        <span style="color: {% if inst_ib.get('available') %}#4ade80{% else %}#fbbf24{% endif %}; font-weight: 600; font-size: 12px;">
-                            {{ inst_ib.get('status', 'unknown') }}
-                        </span>
-                        {% if inst_ib.get('expires_in_secs') is not none %}
-                        <span class="mono-dim">TTL {{ (inst_ib.get('expires_in_secs', 0) // 60) }}m {{ (inst_ib.get('expires_in_secs', 0) % 60) }}s</span>
-                        {% endif %}
+        <span class="accordion-chevron">&#9660;</span>
+    </div>
+    <div class="accordion-body">
+        <div style="display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-start;">
+            <!-- Left: status + alerts -->
+            <div style="flex: 1; min-width: 260px;">
+                {% for inst in instances %}
+                {% set inst_ib = (inst.get('status', {}) or {}).get('ib_system', {}) %}
+                <div class="ib-instance-row">
+                    <span class="instance-badge-sm {% if inst.get('mode') == 'live' %}badge-live{% else %}badge-paper{% endif %}">{{ inst.get('mode', '?') | upper }}</span>
+                    <span style="color: {% if inst_ib.get('available') %}#4ade80{% else %}#fbbf24{% endif %}; font-weight: 600; font-size: 12px;">
+                        {{ inst_ib.get('status', 'unknown') }}
+                    </span>
+                    {% if inst_ib.get('expires_in_secs') is not none %}
+                    <span class="mono-dim">TTL {{ (inst_ib.get('expires_in_secs', 0) // 60) }}m {{ (inst_ib.get('expires_in_secs', 0) % 60) }}s</span>
+                    {% endif %}
+                </div>
+                {% endfor %}
+                {% if ib.alerts %}
+                <div style="margin-top: 8px;">
+                    <div class="card-label" style="margin-bottom: 4px;">Alerts ({{ ib.alerts | length }})</div>
+                    {% for alert in ib.alerts[:5] %}
+                    <div class="ib-alert-row">
+                        <span class="alert-sev alert-sev-{{ alert.severity }}">{{ alert.severity | upper }}</span>
+                        <span style="color: #a1a1aa;">{{ alert.message[:120] }}</span>
+                        {% if alert.is_blocking %}<span class="alert-blocking">BLOCKING</span>{% endif %}
                     </div>
                     {% endfor %}
-
-                    <!-- Alerts -->
-                    {% if ib.alerts %}
-                    <div style="margin-top: 8px;">
-                        <div class="card-label" style="margin-bottom: 4px;">Alerts ({{ ib.alerts | length }})</div>
-                        {% for alert in ib.alerts[:5] %}
-                        <div class="ib-alert-row">
-                            <span class="alert-sev alert-sev-{{ alert.severity }}">{{ alert.severity | upper }}</span>
-                            <span style="color: #a1a1aa;">{{ alert.message[:120] }}</span>
-                            {% if alert.is_blocking %}<span class="alert-blocking">BLOCKING</span>{% endif %}
-                        </div>
-                        {% endfor %}
-                    </div>
-                    {% else %}
-                    <div style="margin-top: 6px; color: #555; font-size: 11px;">No active alerts</div>
-                    {% endif %}
                 </div>
-
-                <!-- Right: scraper + connectivity -->
-                <div style="flex: 1; min-width: 220px;">
-                    <div class="config-grid" style="font-size: 12px;">
-                        <div class="config-item"><span class="config-key">Scraper</span><span class="config-val" style="color: {% if scraper.running %}#4ade80{% else %}#ef4444{% endif %};">{{ 'Running' if scraper.running else 'Stopped' }}</span></div>
-                        <div class="config-item"><span class="config-key">Region</span><span class="config-val">{{ scraper.region }}</span></div>
-                        <div class="config-item"><span class="config-key">Interval</span><span class="config-val">{{ (scraper.interval // 60) }}m</span></div>
-                        <div class="config-item"><span class="config-key">Last Push</span><span class="config-val">{{ scraper.last_pushed_status }}</span></div>
-                    </div>
-                    <div style="display: flex; gap: 10px; margin-top: 8px; align-items: center;">
-                        <span class="ib-dot {% if scraper.internet_ok %}ib-dot-ok{% else %}ib-dot-err{% endif %}"></span>
-                        <span style="font-size: 11px; color: #888;">Internet</span>
-                        <span class="ib-dot {% if scraper.ib_reachable %}ib-dot-ok{% else %}ib-dot-err{% endif %}"></span>
-                        <span style="font-size: 11px; color: #888;">IB Page</span>
-                    </div>
-                    {% if scraper.last_fetch_error %}
-                    <div style="margin-top: 6px; font-size: 11px; color: #ef4444;">{{ scraper.last_fetch_error }}</div>
-                    {% endif %}
-                </div>
-            </div>
-        </div>
-    </div>
-    {% endif %}
-
-    <!-- Instance accordion cards -->
-    {% for inst in instances %}
-    {% set s = inst.get('status', {}) or {} %}
-    {% set advisory = s.get('client_advisory', {}) or {} %}
-    {% set stats = s.get('stats', {}) or {} %}
-    {% set jvm = s.get('jvm', {}) or {} %}
-    {% set socat = s.get('socat', {}) or {} %}
-    {% set clients = s.get('clients', {}) or {} %}
-    {% set mode = inst.get('mode', 'unknown') %}
-
-    <div class="accordion-card" data-accordion="{{ mode }}">
-        <div class="accordion-header" onclick="toggleAccordion(this)">
-            <div class="accordion-title">
-                <span class="instance-badge-sm {% if mode == 'live' %}badge-live{% else %}badge-paper{% endif %}">{{ mode | upper }}</span>
-                {% if inst.get('error') %}
-                <span class="health-pill health-error">Unreachable</span>
-                {% elif s.get('ready') %}
-                <span class="health-pill health-ok">Connected</span>
-                {% elif advisory.get('should_wait') %}
-                <span class="health-pill health-warning">{{ advisory.get('wait_reason', 'waiting') | title }}</span>
                 {% else %}
-                <span class="health-pill health-error">{{ s.get('state', 'Unknown') }}</span>
+                <div style="margin-top: 6px; color: #555; font-size: 11px;">No active alerts</div>
                 {% endif %}
-                <span class="accordion-detail">
-                    {% set u = s.get('connected_uptime_secs') or s.get('uptime_secs') %}
-                    {% if u is not none and u %}
-                    {% if u > 3600 %}{{ (u // 3600) }}h {{ ((u % 3600) // 60) }}m{% elif u > 60 %}{{ (u // 60) }}m{% else %}{{ u }}s{% endif %}
-                    {% endif %}
-                    {% if clients.get('count') %} · {{ clients.get('count') }} clients{% endif %}
-                </span>
             </div>
-            <span class="accordion-chevron">&#9660;</span>
+            <!-- Right: scraper + connectivity -->
+            <div style="flex: 1; min-width: 220px;">
+                <div class="config-grid" style="font-size: 12px;">
+                    <div class="config-item"><span class="config-key">Scraper</span><span class="config-val" style="color: {% if scraper.running %}#4ade80{% else %}#ef4444{% endif %};">{{ 'Running' if scraper.running else 'Stopped' }}</span></div>
+                    <div class="config-item"><span class="config-key">Region</span><span class="config-val">{{ scraper.region }}</span></div>
+                    <div class="config-item"><span class="config-key">Interval</span><span class="config-val">{{ (scraper.interval // 60) }}m</span></div>
+                    <div class="config-item"><span class="config-key">Last Push</span><span class="config-val">{{ scraper.last_pushed_status }}</span></div>
+                </div>
+                <div style="display: flex; gap: 10px; margin-top: 8px; align-items: center;">
+                    <span class="ib-dot {% if scraper.internet_ok %}ib-dot-ok{% else %}ib-dot-err{% endif %}"></span>
+                    <span style="font-size: 11px; color: #888;">Internet</span>
+                    <span class="ib-dot {% if scraper.ib_reachable %}ib-dot-ok{% else %}ib-dot-err{% endif %}"></span>
+                    <span style="font-size: 11px; color: #888;">IB Page</span>
+                </div>
+                {% if scraper.last_fetch_error %}
+                <div style="margin-top: 6px; font-size: 11px; color: #ef4444;">{{ scraper.last_fetch_error }}</div>
+                {% endif %}
+            </div>
         </div>
-        <div class="accordion-body">
+    </div>
+</div>
+{% endif %}
+
+<!-- Instance accordion cards -->
+{% for inst in instances %}
+{% set s = inst.get('status', {}) or {} %}
+{% set advisory = s.get('client_advisory', {}) or {} %}
+{% set stats = s.get('stats', {}) or {} %}
+{% set jvm = s.get('jvm', {}) or {} %}
+{% set socat = s.get('socat', {}) or {} %}
+{% set clients = s.get('clients', {}) or {} %}
+{% set mode = inst.get('mode', 'unknown') %}
+
+<div class="accordion-card" data-accordion="{{ mode }}">
+    <div class="accordion-header" onclick="toggleAccordion(this)">
+        <div class="accordion-title">
+            <span class="instance-badge-sm {% if mode == 'live' %}badge-live{% else %}badge-paper{% endif %}">{{ mode | upper }}</span>
             {% if inst.get('error') %}
-            <div style="color: #ef4444; font-size: 13px;">{{ inst.get('error') }}</div>
+            <span class="health-pill health-error">Unreachable</span>
+            {% elif s.get('ready') %}
+            <span class="health-pill health-ok">Connected</span>
+            {% elif advisory.get('should_wait') %}
+            <span class="health-pill health-warning">{{ advisory.get('wait_reason', 'waiting') | title }}</span>
             {% else %}
-            <div class="inner-cards">
-                <div class="inner-card">
-                    <div class="inner-label">State</div>
-                    <div class="inner-val {% if s.get('state') == 'Connected' %}status-connected{% elif 'Error' in (s.get('state', '') | string) %}status-error{% else %}status-warning{% endif %}">
-                        {{ s.get('state', 'Unknown') }}
-                    </div>
-                </div>
-                <div class="inner-card">
-                    <div class="inner-label">Uptime</div>
-                    <div class="inner-val">
-                        {% set u = s.get('connected_uptime_secs') or s.get('uptime_secs', 0) %}
-                        {% if u is not none %}
-                        {% if u > 3600 %}{{ (u // 3600) }}h {{ ((u % 3600) // 60) }}m
-                        {% elif u > 60 %}{{ (u // 60) }}m {{ (u % 60) }}s
-                        {% else %}{{ u }}s{% endif %}
-                        {% else %}—{% endif %}
-                    </div>
-                </div>
-                <div class="inner-card">
-                    <div class="inner-label">Clients</div>
-                    <div class="inner-val">{{ clients.get('count', 0) }}</div>
-                </div>
-                <div class="inner-card">
-                    <div class="inner-label">JVM</div>
-                    <div class="inner-val" style="font-size: 13px;">
-                        <span class="{% if jvm.get('alive') %}status-connected{% else %}status-error{% endif %}">{{ 'Running' if jvm.get('alive') else 'Stopped' }}</span>
-                        {% if jvm.get('pid') %}<span style="color: #888;"> · PID {{ jvm.get('pid') }}</span>{% endif %}
-                    </div>
-                </div>
-                <div class="inner-card">
-                    <div class="inner-label">Socat</div>
-                    <div class="inner-val" style="font-size: 13px;">
-                        <span class="{% if socat.get('running') %}status-connected{% else %}status-error{% endif %}">{{ 'Active' if socat.get('running') else 'Inactive' }}</span>
-                        {% if socat.get('pid') %}<span style="color: #888;"> · PID {{ socat.get('pid') }}</span>{% endif %}
-                    </div>
-                </div>
-                <div class="inner-card">
-                    <div class="inner-label">Advisory</div>
-                    <div class="inner-val" style="font-size: 13px;">
-                        <span class="{% if advisory.get('should_connect') %}status-connected{% else %}status-error{% endif %}">
-                            {{ 'Connect OK' if advisory.get('should_connect') else 'Do Not Connect' }}
-                        </span>
-                    </div>
-                </div>
-            </div>
-            {% if clients.get('ids') %}
-            <div style="font-size: 11px; color: #888; margin-top: 4px; font-family: 'SF Mono', monospace;">
-                {{ clients.get('ids', []) | join(' · ') }}
-            </div>
+            <span class="health-pill health-error">{{ s.get('state', 'Unknown') }}</span>
             {% endif %}
-            {% if stats.get('dialogs_dismissed', 0) > 0 or stats.get('restarts_today', 0) > 0 %}
-            <div style="font-size: 11px; color: #555; margin-top: 4px;">
-                {{ stats.get('dialogs_dismissed', 0) }} dialogs dismissed · {{ stats.get('restarts_today', 0) }} restarts today
-            </div>
-            {% endif %}
-            {% endif %}
+            <span class="accordion-detail">
+                {% set u = s.get('connected_uptime_secs') or s.get('uptime_secs') %}
+                {% if u is not none and u %}
+                {% if u > 3600 %}{{ (u // 3600) }}h {{ ((u % 3600) // 60) }}m{% elif u > 60 %}{{ (u // 60) }}m{% else %}{{ u }}s{% endif %}
+                {% endif %}
+                {% if clients.get('count') %} · {{ clients.get('count') }} clients{% endif %}
+            </span>
         </div>
+        <span class="accordion-chevron">&#9660;</span>
     </div>
-    {% endfor %}
+    <div class="accordion-body">
+        {% if inst.get('error') %}
+        <div style="color: #ef4444; font-size: 13px;">{{ inst.get('error') }}</div>
+        {% else %}
+        <!-- Stat cards row -->
+        <div class="inner-cards">
+            <div class="inner-card">
+                <div class="inner-label">State</div>
+                <div class="inner-val {% if s.get('state') == 'Connected' %}status-connected{% elif 'Error' in (s.get('state', '') | string) %}status-error{% else %}status-warning{% endif %}">
+                    {{ s.get('state', 'Unknown') }}
+                </div>
+            </div>
+            <div class="inner-card">
+                <div class="inner-label">Uptime</div>
+                <div class="inner-val">
+                    {% set u = s.get('connected_uptime_secs') or s.get('uptime_secs', 0) %}
+                    {% if u is not none %}
+                    {% if u > 3600 %}{{ (u // 3600) }}h {{ ((u % 3600) // 60) }}m
+                    {% elif u > 60 %}{{ (u // 60) }}m {{ (u % 60) }}s
+                    {% else %}{{ u }}s{% endif %}
+                    {% else %}—{% endif %}
+                </div>
+            </div>
+            <div class="inner-card" {% if clients.get('ids') %}title="{{ clients.get('ids', []) | join(' · ') }}"{% endif %}>
+                <div class="inner-label">Clients</div>
+                <div class="inner-val">{{ clients.get('count', 0) }}</div>
+            </div>
+            <div class="inner-card">
+                <div class="inner-label">JVM</div>
+                <div class="inner-val" style="font-size: 13px;">
+                    <span class="{% if jvm.get('alive') %}status-connected{% else %}status-error{% endif %}">{{ 'Running' if jvm.get('alive') else 'Stopped' }}</span>
+                    {% if jvm.get('pid') %}<span style="color: #888;"> · PID {{ jvm.get('pid') }}</span>{% endif %}
+                </div>
+            </div>
+            <div class="inner-card">
+                <div class="inner-label">Socat</div>
+                <div class="inner-val" style="font-size: 13px;">
+                    <span class="{% if socat.get('running') %}status-connected{% else %}status-error{% endif %}">{{ 'Active' if socat.get('running') else 'Inactive' }}</span>
+                    {% if socat.get('pid') %}<span style="color: #888;"> · PID {{ socat.get('pid') }}</span>{% endif %}
+                </div>
+            </div>
+            <div class="inner-card">
+                <div class="inner-label">Advisory</div>
+                <div class="inner-val" style="font-size: 13px;">
+                    <span class="{% if advisory.get('should_connect') %}status-connected{% else %}status-error{% endif %}">
+                        {{ 'Connect OK' if advisory.get('should_connect') else 'Do Not Connect' }}
+                    </span>
+                </div>
+            </div>
+        </div>
 
-</div>
+        {% if stats.get('dialogs_dismissed', 0) > 0 or stats.get('restarts_today', 0) > 0 %}
+        <div style="font-size: 11px; color: #555; margin-top: 2px; margin-bottom: 6px;">
+            {{ stats.get('dialogs_dismissed', 0) }} dialogs dismissed · {{ stats.get('restarts_today', 0) }} restarts today
+        </div>
+        {% endif %}
 
-<!-- Sidebar controls -->
-<div class="overview-sidebar">
-    <div class="sidebar-section">
-        <div class="sidebar-label">Target</div>
-        <select id="ctrl-target" class="sidebar-select">
-            {% for inst in instances %}
-            <option value="{{ inst.get('mode', 'live') }}">{{ inst.get('mode', 'live') | upper }}</option>
-            {% endfor %}
-        </select>
+        <!-- Controls bar -->
+        <div class="controls-bar">
+            <button class="ctrl-btn" onclick="sendCmd('RECONNECTDATA','{{ mode }}')"
+                    title="Reconnect market data feeds. Sends Ctrl+F to the Gateway, forcing it to re-establish data subscriptions.">Reconnect Data</button>
+            <button class="ctrl-btn" onclick="sendCmd('RECONNECTACCOUNT','{{ mode }}')"
+                    title="Reconnect account data. Sends Ctrl+R to the Gateway, refreshing positions, orders, and account values.">Reconnect Account</button>
+            <button class="ctrl-btn" onclick="sendCmd('RESTARTSOCAT','{{ mode }}')"
+                    title="Restart the socat port forwarder. Kills and re-launches the TCP proxy that bridges the API port to the container interface.">Restart Socat</button>
+            <button class="ctrl-btn ctrl-btn-danger" onclick="if(confirm('Restart {{ mode | upper }} Gateway?'))sendCmd('RESTART','{{ mode }}')"
+                    title="Restart the Gateway JVM. Kills the process and triggers a full re-authentication cycle including 2FA.">Restart</button>
+            <span id="cmd-result-{{ mode }}" class="ctrl-result"></span>
+        </div>
+        {% endif %}
     </div>
-    <div class="sidebar-section">
-        <div class="sidebar-label">Data</div>
-        <button class="sidebar-btn" onclick="sendCmd('RECONNECTDATA')"
-                title="Reconnect market data feeds. Sends Ctrl+F to the Gateway, forcing it to re-establish data subscriptions.">Reconnect Data</button>
-        <button class="sidebar-btn" onclick="sendCmd('RECONNECTACCOUNT')"
-                title="Reconnect account data. Sends Ctrl+R to the Gateway, refreshing positions, orders, and account values.">Reconnect Account</button>
-    </div>
-    <div class="sidebar-section">
-        <div class="sidebar-label">Service</div>
-        <button class="sidebar-btn" onclick="sendCmd('RESTARTSOCAT')"
-                title="Restart the socat port forwarder. Kills and re-launches the TCP proxy that bridges the API port to the container interface.">Restart Socat</button>
-        <button class="sidebar-btn sidebar-btn-danger" onclick="if(confirm('Restart '+getTarget()+' Gateway?'))sendCmd('RESTART')"
-                title="Restart the Gateway JVM. Kills the process and triggers a full re-authentication cycle including 2FA.">Restart</button>
-    </div>
-    <div id="sidebar-cmd-result" class="sidebar-result"></div>
 </div>
-
-</div>
+{% endfor %}
 
 <style>
-/* Accordion layout */
-.overview-layout { display: flex; gap: 16px; }
-.overview-main { flex: 1; min-width: 0; }
-.overview-sidebar {
-    width: 170px; flex-shrink: 0;
-    background: #0d1b3e; border: 1px solid #16213e; border-radius: 8px;
-    padding: 12px; position: sticky; top: 20px; align-self: flex-start;
-}
-
 /* Accordion cards */
 .accordion-card {
     background: #0d1b3e; border: 1px solid #16213e; border-radius: 8px;
@@ -253,9 +214,32 @@
     display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
     gap: 6px; margin-bottom: 6px;
 }
-.inner-card { background: #0f3460; padding: 8px 10px; border-radius: 5px; }
+.inner-card {
+    background: #0f3460; padding: 8px 10px; border-radius: 5px;
+    cursor: default;
+}
+.inner-card[title] { cursor: help; }
 .inner-label { font-size: 10px; color: #888; text-transform: uppercase; letter-spacing: 0.4px; }
 .inner-val { font-size: 15px; font-weight: 700; margin-top: 2px; }
+
+/* Controls bar — full-width strip below stat cards */
+.controls-bar {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    padding: 8px 10px;
+    background: #0a1630;
+    border-radius: 5px;
+    border: 1px solid #16213e;
+}
+.ctrl-btn {
+    padding: 5px 12px; font-size: 11px;
+    background: transparent; border: 1px solid #3f3f46; border-radius: 3px;
+    color: #a1a1aa; cursor: pointer;
+    font-family: 'SF Mono', monospace; transition: all 0.15s;
+    white-space: nowrap;
+}
+.ctrl-btn:hover { border-color: #71717a; color: #e0e0e0; }
+.ctrl-btn-danger:hover { border-color: #ef4444; color: #ef4444; }
+.ctrl-result { font-size: 10px; margin-left: auto; }
 
 /* IB Status specific */
 .ib-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
@@ -278,30 +262,13 @@
 .alert-blocking { color: #ef4444; font-size: 9px; margin-left: 4px; font-weight: 700; }
 .mono-dim { font-family: 'SF Mono', monospace; font-size: 11px; color: #555; }
 
-/* Sidebar */
-.sidebar-section { margin-bottom: 14px; }
-.sidebar-label { font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
-.sidebar-select {
-    width: 100%; padding: 5px 8px; font-size: 11px;
-    background: #0f3460; border: 1px solid #3f3f46; border-radius: 3px;
-    color: #93c5fd; font-family: 'SF Mono', monospace;
-}
-.sidebar-btn {
-    display: block; width: 100%; padding: 6px 10px; font-size: 11px; margin-bottom: 4px;
-    background: transparent; border: 1px solid #3f3f46; border-radius: 3px;
-    color: #a1a1aa; cursor: pointer; text-align: left;
-    font-family: 'SF Mono', monospace; transition: all 0.15s;
-}
-.sidebar-btn:hover { border-color: #71717a; color: #e0e0e0; }
-.sidebar-btn-danger:hover { border-color: #ef4444; color: #ef4444; }
-.sidebar-result { font-size: 10px; margin-top: 4px; min-height: 16px; }
-
-/* Health pills (reused from global style) */
+/* Health pills */
 .health-pill { font-size: 11px; padding: 2px 8px; border-radius: 12px; font-weight: 600; }
 
 @media (max-width: 768px) {
-    .overview-layout { flex-direction: column; }
-    .overview-sidebar { width: 100%; position: static; }
+    .inner-cards { grid-template-columns: repeat(3, 1fr); }
+    .controls-bar { gap: 4px; }
+    .ctrl-btn { padding: 4px 8px; font-size: 10px; }
 }
 </style>
 
@@ -310,11 +277,9 @@
 function toggleAccordion(header) {
     var card = header.parentElement;
     var wasOpen = card.classList.contains('open');
-    // Close all
     document.querySelectorAll('.accordion-card').forEach(function(c) {
         c.classList.remove('open');
     });
-    // Toggle clicked
     if (!wasOpen) card.classList.add('open');
 }
 
@@ -325,15 +290,9 @@ function toggleAccordion(header) {
     });
 })();
 
-// Sidebar controls
-function getTarget() {
-    var sel = document.getElementById('ctrl-target');
-    return sel ? sel.value : 'live';
-}
-
-function sendCmd(command) {
-    var mode = getTarget();
-    var result = document.getElementById('sidebar-cmd-result');
+// Controls
+function sendCmd(command, mode) {
+    var result = document.getElementById('cmd-result-' + mode);
     fetch('/api/v1/command', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
