@@ -1,0 +1,157 @@
+{% set ib = ib_status %}
+{% set scraper = scraper_info %}
+
+<div style="display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start;">
+
+<!-- Left: Live Status -->
+<div style="flex: 1; min-width: 320px;">
+
+    <!-- Overall Status -->
+    <div class="card" style="margin-bottom: 12px;">
+        <div class="card-label">System Status</div>
+        <div style="display: flex; align-items: center; gap: 12px; margin-top: 8px;">
+            <div style="width: 14px; height: 14px; border-radius: 50%; background: {% if ib.status == 'available' %}#4ade80{% elif ib.status == 'maintenance' %}#fbbf24{% elif ib.status == 'outage' or ib.status == 'no_internet' %}#ef4444{% else %}#71717a{% endif %}; box-shadow: 0 0 8px {% if ib.status == 'available' %}rgba(74,222,128,0.4){% elif ib.status == 'maintenance' %}rgba(251,191,36,0.4){% else %}rgba(239,68,68,0.4){% endif %};"></div>
+            <span style="font-size: 18px; font-weight: 600; color: {% if ib.status == 'available' %}#4ade80{% elif ib.status == 'maintenance' %}#fbbf24{% elif ib.status == 'outage' or ib.status == 'no_internet' %}#ef4444{% else %}#a1a1aa{% endif %};">
+                {{ ib.status | upper }}
+            </span>
+        </div>
+        {% if ib.reason %}
+        <div style="margin-top: 6px; font-size: 13px; color: #a1a1aa;">{{ ib.reason }}</div>
+        {% endif %}
+    </div>
+
+    <!-- Per-Instance ibctl Status -->
+    {% for inst in instances %}
+    <div class="card" style="margin-bottom: 8px;">
+        <div class="card-label">
+            <span style="color: {% if inst.mode == 'live' %}#4ade80{% else %}#fbbf24{% endif %}; font-weight: 700;">{{ inst.mode | upper }}</span>
+            <span style="color: #71717a;"> ibctl IB Status</span>
+        </div>
+        {% set inst_ib = (inst.status or {}).get('ib_system', {}) %}
+        <div style="display: flex; gap: 16px; margin-top: 6px; flex-wrap: wrap; font-size: 12px;">
+            <div>
+                <span style="color: #71717a;">Status:</span>
+                <span style="color: {% if inst_ib.get('available') %}#4ade80{% else %}#fbbf24{% endif %}; font-weight: 600;">
+                    {{ inst_ib.get('status', 'unknown') }}
+                </span>
+            </div>
+            {% if inst_ib.get('reason') %}
+            <div><span style="color: #71717a;">Reason:</span> <span style="color: #a1a1aa;">{{ inst_ib.get('reason') }}</span></div>
+            {% endif %}
+            {% if inst_ib.get('expires_in_secs') is not none %}
+            <div><span style="color: #71717a;">TTL:</span> <span style="font-family: 'SF Mono', monospace; color: #a1a1aa;">{{ (inst_ib.get('expires_in_secs', 0) // 60) }}m {{ (inst_ib.get('expires_in_secs', 0) % 60) }}s</span></div>
+            {% endif %}
+        </div>
+    </div>
+    {% endfor %}
+
+    <!-- Alerts -->
+    <div class="card" style="margin-bottom: 8px;">
+        <div class="card-label">Active Alerts ({{ ib.alerts | length }})</div>
+        {% if ib.alerts %}
+        <div style="margin-top: 6px;">
+            {% for alert in ib.alerts %}
+            <div style="padding: 4px 0; font-size: 12px; border-bottom: 1px solid #1a1a2e;">
+                <span style="color: {% if alert.severity == 'critical' %}#ef4444{% elif alert.severity == 'warning' %}#fbbf24{% elif alert.severity == 'scheduled' %}#60a5fa{% else %}#71717a{% endif %}; font-weight: 600; font-size: 10px; letter-spacing: 0.5px;">
+                    {{ alert.severity | upper }}
+                </span>
+                <span style="color: #a1a1aa; margin-left: 8px;">{{ alert.message[:150] }}</span>
+                {% if alert.is_blocking %}
+                <span style="color: #ef4444; font-size: 10px; margin-left: 4px;">⬤ BLOCKING</span>
+                {% endif %}
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div style="margin-top: 6px; color: #555; font-size: 12px;">No active alerts</div>
+        {% endif %}
+    </div>
+
+</div>
+
+<!-- Right: Scraper Config + Maintenance Windows -->
+<div style="flex: 1; min-width: 320px;">
+
+    <!-- Scraper Status -->
+    <div class="card" style="margin-bottom: 12px;">
+        <div class="card-label">Scraper</div>
+        <div class="config-grid" style="margin-top: 8px;">
+            <div class="config-item"><span class="config-key">Status</span><span class="config-val" style="color: {% if scraper.running %}#4ade80{% else %}#ef4444{% endif %};">{{ 'Running' if scraper.running else 'Stopped' }}</span></div>
+            <div class="config-item"><span class="config-key">URL</span><span class="config-val" style="font-size: 10px;">{{ scraper.url }}</span></div>
+            <div class="config-item"><span class="config-key">Region</span><span class="config-val">{{ scraper.region }}</span></div>
+            <div class="config-item"><span class="config-key">Check Interval</span><span class="config-val">{{ scraper.interval }}s ({{ (scraper.interval // 60) }}m)</span></div>
+            <div class="config-item"><span class="config-key">Last Push</span><span class="config-val">{{ scraper.last_pushed_status }}</span></div>
+            {% if scraper.last_fetch_error %}
+            <div class="config-item"><span class="config-key">Last Error</span><span class="config-val" style="color: #ef4444;">{{ scraper.last_fetch_error }}</span></div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Daily Reset Windows -->
+    <div class="card" style="margin-bottom: 8px;">
+        <div class="card-label">Daily Maintenance Windows</div>
+        {% if ib.daily_resets %}
+        <table style="width: 100%; margin-top: 6px; font-size: 12px; border-collapse: collapse;">
+            <thead>
+                <tr>
+                    <th style="text-align: left; color: #52525b; font-size: 10px; padding: 3px 6px; border-bottom: 1px solid #27272a;">Region</th>
+                    <th style="text-align: left; color: #52525b; font-size: 10px; padding: 3px 6px; border-bottom: 1px solid #27272a;">Window</th>
+                    <th style="text-align: left; color: #52525b; font-size: 10px; padding: 3px 6px; border-bottom: 1px solid #27272a;">TZ</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for w in ib.daily_resets %}
+                <tr>
+                    <td style="padding: 3px 6px; color: #a1a1aa;">{{ w.region }}</td>
+                    <td style="padding: 3px 6px; color: #a1a1aa; font-family: 'SF Mono', monospace;">{{ w.start_time }} – {{ w.end_time }}</td>
+                    <td style="padding: 3px 6px; color: #71717a;">{{ w.timezone }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div style="margin-top: 6px; color: #555; font-size: 12px;">No daily resets detected</div>
+        {% endif %}
+    </div>
+
+    <!-- Weekend Reset Windows -->
+    <div class="card" style="margin-bottom: 8px;">
+        <div class="card-label">Weekend Maintenance Windows</div>
+        {% if ib.weekend_resets %}
+        <table style="width: 100%; margin-top: 6px; font-size: 12px; border-collapse: collapse;">
+            <thead>
+                <tr>
+                    <th style="text-align: left; color: #52525b; font-size: 10px; padding: 3px 6px; border-bottom: 1px solid #27272a;">Region</th>
+                    <th style="text-align: left; color: #52525b; font-size: 10px; padding: 3px 6px; border-bottom: 1px solid #27272a;">Window</th>
+                    <th style="text-align: left; color: #52525b; font-size: 10px; padding: 3px 6px; border-bottom: 1px solid #27272a;">TZ</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for w in ib.weekend_resets %}
+                <tr>
+                    <td style="padding: 3px 6px; color: #a1a1aa;">{{ w.region }}</td>
+                    <td style="padding: 3px 6px; color: #a1a1aa; font-family: 'SF Mono', monospace;">{{ w.start_time }} – {{ w.end_time }}</td>
+                    <td style="padding: 3px 6px; color: #71717a;">{{ w.timezone }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div style="margin-top: 6px; color: #555; font-size: 12px;">No weekend resets detected</div>
+        {% endif %}
+    </div>
+
+    <!-- Internet Connectivity -->
+    <div class="card">
+        <div class="card-label">Connectivity</div>
+        <div style="display: flex; gap: 12px; margin-top: 6px; align-items: center;">
+            <div style="width: 10px; height: 10px; border-radius: 50%; background: {% if scraper.internet_ok %}#4ade80{% else %}#ef4444{% endif %};"></div>
+            <span style="font-size: 12px; color: #a1a1aa;">Internet: {{ 'OK' if scraper.internet_ok else 'DOWN' }}</span>
+            <div style="width: 10px; height: 10px; border-radius: 50%; background: {% if scraper.ib_reachable %}#4ade80{% else %}#ef4444{% endif %};"></div>
+            <span style="font-size: 12px; color: #a1a1aa;">IB Page: {{ 'Reachable' if scraper.ib_reachable else 'Unreachable' }}</span>
+        </div>
+    </div>
+
+</div>
+
+</div>

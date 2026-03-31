@@ -39,6 +39,17 @@ token = ""
 # Enable debug endpoints (force state transitions, raw agent commands)
 debug_mode = false
 
+[ib_system_status]
+# TTL for pushed status — if no update within this period, assume available (fail-open)
+ttl_seconds = 600
+enabled = true
+# Scraper settings (read by dashboard daemon)
+# check_interval = 300  # seconds between scrapes (default 5 min)
+# url = "https://www.interactivebrokers.com/en/software/systemStatus.php"
+# region = "NA"  # NA, EU, or APAC
+# backend_hosts = "cdc1-hb1.ibllc.com,cdc1-hb2.ibllc.com"
+# fallback_host = "interactivebrokers.com"
+
 [logging]
 level = "info"
 

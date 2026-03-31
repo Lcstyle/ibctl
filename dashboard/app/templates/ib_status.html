@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>IB System Status</h2>
+<div id="ib-status-content"
+     hx-get="/partials/ib-status"
+     hx-trigger="load, every 60s"
+     hx-swap="innerHTML">
+    <div class="loading">Checking IB system status...</div>
+</div>
+{% endblock %}
