@@ -56,12 +56,17 @@ if [ -n "${VNC_SERVER_PASSWORD:-}" ]; then
     websockify --daemon ${NOVNC_PORT} localhost:5900
 fi
 
-# Start dashboard (FastAPI) — runs independently, connects to ibctl via TCP :7462
-DASHBOARD_PORT="${IBCTL_DASHBOARD_PORT:-8080}"
-echo "Starting dashboard on port ${DASHBOARD_PORT}"
-cd /opt/ibctl/dashboard && .venv/bin/python -m uvicorn app.main:app \
-    --host 0.0.0.0 --port "${DASHBOARD_PORT}" --log-level warning &
-DASHBOARD_PID=$!
+# Start dashboard (FastAPI) — optional, disabled by default
+# Set IBCTL_DASHBOARD_ENABLED=true to enable
+if [ "${IBCTL_DASHBOARD_ENABLED:-false}" = "true" ]; then
+    DASHBOARD_PORT="${IBCTL_DASHBOARD_PORT:-8080}"
+    echo "Starting dashboard on port ${DASHBOARD_PORT}"
+    cd /opt/ibctl/dashboard && .venv/bin/python -m uvicorn app.main:app \
+        --host 0.0.0.0 --port "${DASHBOARD_PORT}" --log-level warning &
+    DASHBOARD_PID=$!
+else
+    echo "Dashboard disabled (set IBCTL_DASHBOARD_ENABLED=true to enable)"
+fi
 
 # Create jts.ini helper — ensures UseSSL=true and API-only mode
 create_jts_ini() {
