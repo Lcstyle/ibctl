@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ibctl Dashboard</title>
-    <link rel="stylesheet" href="/static/style.css?v=22">
+    <link rel="stylesheet" href="/static/style.css?v=23">
     <script src="/static/htmx.min.js"></script>
 </head>
 <body>
@@ -14,7 +14,6 @@
             <a href="/state" class="tab {% if active_tab == 'state' %}active{% endif %}">State</a>
             <a href="/config" class="tab {% if active_tab == 'config' %}active{% endif %}">Config</a>
             <a href="/logs" class="tab {% if active_tab == 'logs' %}active{% endif %}">Logs</a>
-            <a href="/ib-status" class="tab {% if active_tab == 'ib-status' %}active{% endif %}">IB Status</a>
             <a href="/vnc" class="tab {% if active_tab == 'vnc' %}active{% endif %}">VNC</a>
             <span style="flex: 1;"></span>
             <span style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: #52525b;">

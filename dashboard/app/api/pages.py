@@ -90,8 +90,45 @@ async def overview_partial(request: Request):
         for inst in instances
     ]
 
+    # IB Status data (if scraper is enabled)
+    ib_data = None
+    scraper_info = None
+    monitor = getattr(request.app.state, 'ib_status_monitor', None)
+
+    if monitor:
+        scraper_info = {
+            "running": monitor._task is not None and not monitor._task.done(),
+            "url": monitor._scraper.config.url,
+            "region": monitor._scraper.config.region,
+            "interval": monitor._interval,
+            "last_pushed_status": monitor._last_pushed_status,
+            "last_fetch_error": None,
+            "internet_ok": True,
+            "ib_reachable": True,
+        }
+
+        ib_data = {
+            "status": scraper_info["last_pushed_status"],
+            "reason": "",
+            "alerts": [],
+        }
+
+        if monitor._scraper._last_status:
+            scraper_status = monitor._scraper._last_status
+            scraper_info["last_fetch_error"] = scraper_status.fetch_error
+            scraper_info["internet_ok"] = scraper_status.status.value != "no_internet"
+            scraper_info["ib_reachable"] = scraper_status.status.value != "unknown"
+            ib_data["status"] = scraper_status.status.value
+            ib_data["reason"] = ""
+            ib_data["alerts"] = [
+                {"severity": a.severity.value, "message": a.message, "is_blocking": a.is_blocking()}
+                for a in scraper_status.alerts
+            ]
+
     return templates.TemplateResponse(request, "partials/overview_content.html", {
         "instances": instances_data,
+        "ib_status": ib_data,
+        "scraper_info": scraper_info,
     })
 
 

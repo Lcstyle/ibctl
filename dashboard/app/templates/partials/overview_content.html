@@ -1,188 +1,357 @@
-<!-- IB System Status Banner -->
-{% set ib = (instances[0].get('status', {}) if instances else {}).get('ib_system', {}) %}
-{% if ib and ib.get('status') and ib.get('status') != 'available' %}
-<div class="card" style="margin-bottom: 12px; border-left: 3px solid {% if ib.get('available') %}#4ade80{% elif ib.get('status') == 'no_internet' %}#ef4444{% else %}#fbbf24{% endif %};">
-    <div style="display: flex; justify-content: space-between; align-items: center;">
-        <div>
-            <span style="font-size: 11px; color: #71717a; letter-spacing: 1px; text-transform: uppercase;">IB System</span>
-            <span style="margin-left: 8px; font-size: 13px; font-weight: 600; color: {% if ib.get('status') == 'maintenance' %}#fbbf24{% elif ib.get('status') == 'outage' %}#ef4444{% elif ib.get('status') == 'no_internet' %}#ef4444{% else %}#a1a1aa{% endif %};">
-                {{ ib.get('status', 'unknown') | upper }}
-            </span>
+{% set ib_enabled = ib_status is defined and ib_status is not none %}
+
+<div class="overview-layout">
+
+<!-- Main accordion column -->
+<div class="overview-main">
+
+    <!-- IB Status accordion — expanded by default, only if IB status feature is enabled -->
+    {% if ib_enabled %}
+    {% set ib = ib_status %}
+    {% set scraper = scraper_info %}
+    <div class="accordion-card" data-accordion="ib-status" data-default-open="true">
+        <div class="accordion-header" onclick="toggleAccordion(this)">
+            <div class="accordion-title">
+                <span class="accordion-label">IB STATUS</span>
+                <span class="ib-dot {% if ib.status == 'available' %}ib-dot-ok{% elif ib.status == 'maintenance' or ib.status == 'scheduled' %}ib-dot-warn{% else %}ib-dot-err{% endif %}"></span>
+                <span class="accordion-status" style="color: {% if ib.status == 'available' %}#4ade80{% elif ib.status == 'maintenance' %}#fbbf24{% else %}#ef4444{% endif %};">
+                    {{ ib.status | upper }}
+                </span>
+                {% if ib.reason %}
+                <span class="accordion-detail">{{ ib.reason[:60] }}</span>
+                {% endif %}
+            </div>
+            <span class="accordion-chevron">&#9660;</span>
         </div>
-        {% if ib.get('expires_in_secs') %}
-        <span style="font-size: 11px; color: #71717a; font-family: 'SF Mono', monospace;">
-            TTL: {{ (ib.get('expires_in_secs', 0) // 60) }}m {{ (ib.get('expires_in_secs', 0) % 60) }}s
-        </span>
-        {% endif %}
+        <div class="accordion-body">
+            <div style="display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-start;">
+                <!-- Left: status + alerts -->
+                <div style="flex: 1; min-width: 260px;">
+                    <!-- Per-instance IB status -->
+                    {% for inst in instances %}
+                    {% set inst_ib = (inst.get('status', {}) or {}).get('ib_system', {}) %}
+                    <div class="ib-instance-row">
+                        <span class="instance-badge-sm {% if inst.get('mode') == 'live' %}badge-live{% else %}badge-paper{% endif %}">{{ inst.get('mode', '?') | upper }}</span>
+                        <span style="color: {% if inst_ib.get('available') %}#4ade80{% else %}#fbbf24{% endif %}; font-weight: 600; font-size: 12px;">
+                            {{ inst_ib.get('status', 'unknown') }}
+                        </span>
+                        {% if inst_ib.get('expires_in_secs') is not none %}
+                        <span class="mono-dim">TTL {{ (inst_ib.get('expires_in_secs', 0) // 60) }}m {{ (inst_ib.get('expires_in_secs', 0) % 60) }}s</span>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+
+                    <!-- Alerts -->
+                    {% if ib.alerts %}
+                    <div style="margin-top: 8px;">
+                        <div class="card-label" style="margin-bottom: 4px;">Alerts ({{ ib.alerts | length }})</div>
+                        {% for alert in ib.alerts[:5] %}
+                        <div class="ib-alert-row">
+                            <span class="alert-sev alert-sev-{{ alert.severity }}">{{ alert.severity | upper }}</span>
+                            <span style="color: #a1a1aa;">{{ alert.message[:120] }}</span>
+                            {% if alert.is_blocking %}<span class="alert-blocking">BLOCKING</span>{% endif %}
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div style="margin-top: 6px; color: #555; font-size: 11px;">No active alerts</div>
+                    {% endif %}
+                </div>
+
+                <!-- Right: scraper + connectivity -->
+                <div style="flex: 1; min-width: 220px;">
+                    <div class="config-grid" style="font-size: 12px;">
+                        <div class="config-item"><span class="config-key">Scraper</span><span class="config-val" style="color: {% if scraper.running %}#4ade80{% else %}#ef4444{% endif %};">{{ 'Running' if scraper.running else 'Stopped' }}</span></div>
+                        <div class="config-item"><span class="config-key">Region</span><span class="config-val">{{ scraper.region }}</span></div>
+                        <div class="config-item"><span class="config-key">Interval</span><span class="config-val">{{ (scraper.interval // 60) }}m</span></div>
+                        <div class="config-item"><span class="config-key">Last Push</span><span class="config-val">{{ scraper.last_pushed_status }}</span></div>
+                    </div>
+                    <div style="display: flex; gap: 10px; margin-top: 8px; align-items: center;">
+                        <span class="ib-dot {% if scraper.internet_ok %}ib-dot-ok{% else %}ib-dot-err{% endif %}"></span>
+                        <span style="font-size: 11px; color: #888;">Internet</span>
+                        <span class="ib-dot {% if scraper.ib_reachable %}ib-dot-ok{% else %}ib-dot-err{% endif %}"></span>
+                        <span style="font-size: 11px; color: #888;">IB Page</span>
+                    </div>
+                    {% if scraper.last_fetch_error %}
+                    <div style="margin-top: 6px; font-size: 11px; color: #ef4444;">{{ scraper.last_fetch_error }}</div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
     </div>
-    {% if ib.get('reason') %}
-    <div style="margin-top: 4px; font-size: 12px; color: #a1a1aa;">{{ ib.get('reason') }}</div>
     {% endif %}
-</div>
-{% endif %}
 
-<div style="display: flex; gap: 16px; flex-wrap: wrap;">
-{% for inst in instances %}
-{% set s = inst.get('status', {}) %}
-{% set advisory = s.get('client_advisory', {}) %}
-{% set stats = s.get('stats', {}) %}
-{% set jvm = s.get('jvm', {}) %}
-{% set socat = s.get('socat', {}) %}
-{% set clients = s.get('clients', {}) %}
-{% set mode = inst.get('mode', 'unknown') %}
+    <!-- Instance accordion cards -->
+    {% for inst in instances %}
+    {% set s = inst.get('status', {}) or {} %}
+    {% set advisory = s.get('client_advisory', {}) or {} %}
+    {% set stats = s.get('stats', {}) or {} %}
+    {% set jvm = s.get('jvm', {}) or {} %}
+    {% set socat = s.get('socat', {}) or {} %}
+    {% set clients = s.get('clients', {}) or {} %}
+    {% set mode = inst.get('mode', 'unknown') %}
 
-<div class="instance-section" style="flex: 1; min-width: 320px;">
-    <div class="instance-header">
-        <span class="instance-badge {% if mode == 'live' %}badge-live{% else %}badge-paper{% endif %}">
-            {{ mode | upper }}
-        </span>
-        {% if inst.get('error') %}
-        <span class="health-pill health-error">Unreachable</span>
-        {% elif s.get('ready') %}
-        <span class="health-pill health-ok">Connected</span>
-        {% elif advisory.get('should_wait') %}
-        <span class="health-pill health-warning">{{ advisory.get('wait_reason', 'waiting') | title }}</span>
-        {% else %}
-        <span class="health-pill health-error">{{ s.get('state', 'Unknown') }}</span>
-        {% endif %}
-    </div>
-
-    {% if inst.get('error') %}
-    <div class="card">
-        <div class="card-label">Error</div>
-        <div class="status-error">{{ inst.get('error') }}</div>
-    </div>
-    {% else %}
-
-    <div class="status-cards">
-        <div class="card">
-            <div class="card-label">State</div>
-            <div class="card-value {% if s.get('state') == 'Connected' %}status-connected{% elif 'Error' in (s.get('state', '') | string) %}status-error{% else %}status-warning{% endif %}">
-                {{ s.get('state', 'Unknown') }}
+    <div class="accordion-card" data-accordion="{{ mode }}">
+        <div class="accordion-header" onclick="toggleAccordion(this)">
+            <div class="accordion-title">
+                <span class="instance-badge-sm {% if mode == 'live' %}badge-live{% else %}badge-paper{% endif %}">{{ mode | upper }}</span>
+                {% if inst.get('error') %}
+                <span class="health-pill health-error">Unreachable</span>
+                {% elif s.get('ready') %}
+                <span class="health-pill health-ok">Connected</span>
+                {% elif advisory.get('should_wait') %}
+                <span class="health-pill health-warning">{{ advisory.get('wait_reason', 'waiting') | title }}</span>
+                {% else %}
+                <span class="health-pill health-error">{{ s.get('state', 'Unknown') }}</span>
+                {% endif %}
+                <span class="accordion-detail">
+                    {% set u = s.get('connected_uptime_secs') or s.get('uptime_secs') %}
+                    {% if u is not none and u %}
+                    {% if u > 3600 %}{{ (u // 3600) }}h {{ ((u % 3600) // 60) }}m{% elif u > 60 %}{{ (u // 60) }}m{% else %}{{ u }}s{% endif %}
+                    {% endif %}
+                    {% if clients.get('count') %} · {{ clients.get('count') }} clients{% endif %}
+                </span>
             </div>
+            <span class="accordion-chevron">&#9660;</span>
         </div>
-        <div class="card">
-            <div class="card-label">Uptime</div>
-            <div class="card-value">
-                {% set u = s.get('connected_uptime_secs') or s.get('uptime_secs', 0) %}
-                {% if u is not none %}
-                {% if u > 3600 %}{{ (u // 3600) }}h {{ ((u % 3600) // 60) }}m
-                {% elif u > 60 %}{{ (u // 60) }}m {{ (u % 60) }}s
-                {% else %}{{ u }}s{% endif %}
-                {% else %}—{% endif %}
-            </div>
-        </div>
-        <div class="card">
-            <div class="card-label">Stats</div>
-            <div class="card-value">{{ stats.get('dialogs_dismissed', 0) }} dialogs</div>
-            <div class="card-detail">{{ stats.get('restarts_today', 0) }} restarts</div>
-        </div>
-    </div>
-
-    <!-- JVM Process Card -->
-    <div class="card" style="margin-top: 8px;">
-        <div class="card-label">JVM Process</div>
-        <div style="display: flex; gap: 20px; margin-top: 6px; flex-wrap: wrap;">
-            <span class="{% if jvm.get('alive') %}status-connected{% else %}status-error{% endif %}">
-                {{ 'Running' if jvm.get('alive') else 'Stopped' }}
-            </span>
-            {% if jvm.get('pid') %}
-            <span style="color: #888;">PID {{ jvm.get('pid') }}</span>
-            {% endif %}
-            {% if jvm.get('uptime_secs') is not none %}
-            {% set ju = jvm.get('uptime_secs', 0) %}
-            <span style="color: #888;">
-                {% if ju > 3600 %}{{ (ju // 3600) }}h {{ ((ju % 3600) // 60) }}m
-                {% elif ju > 60 %}{{ (ju // 60) }}m {{ (ju % 60) }}s
-                {% else %}{{ ju }}s{% endif %}
-            </span>
-            {% endif %}
-        </div>
-        {% if jvm.get('config_dir') %}
-        <div class="card-detail" style="margin-top: 4px;">Config: {{ jvm.get('config_dir') }}</div>
-        {% endif %}
-        {% if jvm.get('agent_socket') %}
-        <div class="card-detail">Agent: {{ jvm.get('agent_socket') }}</div>
-        {% endif %}
-    </div>
-
-    <!-- Socat Port Forwarding Card -->
-    <div class="card" style="margin-top: 8px;">
-        <div class="card-label">Socat Port Forwarding</div>
-        <div style="display: flex; gap: 20px; margin-top: 6px;">
-            <span class="{% if socat.get('running') %}status-connected{% else %}status-error{% endif %}">
-                {{ 'Active' if socat.get('running') else 'Inactive' }}
-            </span>
-            {% if socat.get('pid') %}
-            <span style="color: #888;">PID {{ socat.get('pid') }}</span>
-            {% endif %}
-        </div>
-    </div>
-
-    <!-- Known Client IDs -->
-    <div class="card" style="margin-top: 8px;">
-        <div class="card-label">Known Clients ({{ clients.get('count', 0) }})</div>
-        <div style="margin-top: 4px; font-size: 12px; color: #a1a1aa; font-family: 'SF Mono', monospace;">
-            {% if clients.get('ids') %}
-            {{ clients.get('ids', []) | join(' · ') }}
+        <div class="accordion-body">
+            {% if inst.get('error') %}
+            <div style="color: #ef4444; font-size: 13px;">{{ inst.get('error') }}</div>
             {% else %}
-            <span style="color: #555;">—</span>
+            <div class="inner-cards">
+                <div class="inner-card">
+                    <div class="inner-label">State</div>
+                    <div class="inner-val {% if s.get('state') == 'Connected' %}status-connected{% elif 'Error' in (s.get('state', '') | string) %}status-error{% else %}status-warning{% endif %}">
+                        {{ s.get('state', 'Unknown') }}
+                    </div>
+                </div>
+                <div class="inner-card">
+                    <div class="inner-label">Uptime</div>
+                    <div class="inner-val">
+                        {% set u = s.get('connected_uptime_secs') or s.get('uptime_secs', 0) %}
+                        {% if u is not none %}
+                        {% if u > 3600 %}{{ (u // 3600) }}h {{ ((u % 3600) // 60) }}m
+                        {% elif u > 60 %}{{ (u // 60) }}m {{ (u % 60) }}s
+                        {% else %}{{ u }}s{% endif %}
+                        {% else %}—{% endif %}
+                    </div>
+                </div>
+                <div class="inner-card">
+                    <div class="inner-label">Clients</div>
+                    <div class="inner-val">{{ clients.get('count', 0) }}</div>
+                </div>
+                <div class="inner-card">
+                    <div class="inner-label">JVM</div>
+                    <div class="inner-val" style="font-size: 13px;">
+                        <span class="{% if jvm.get('alive') %}status-connected{% else %}status-error{% endif %}">{{ 'Running' if jvm.get('alive') else 'Stopped' }}</span>
+                        {% if jvm.get('pid') %}<span style="color: #888;"> · PID {{ jvm.get('pid') }}</span>{% endif %}
+                    </div>
+                </div>
+                <div class="inner-card">
+                    <div class="inner-label">Socat</div>
+                    <div class="inner-val" style="font-size: 13px;">
+                        <span class="{% if socat.get('running') %}status-connected{% else %}status-error{% endif %}">{{ 'Active' if socat.get('running') else 'Inactive' }}</span>
+                        {% if socat.get('pid') %}<span style="color: #888;"> · PID {{ socat.get('pid') }}</span>{% endif %}
+                    </div>
+                </div>
+                <div class="inner-card">
+                    <div class="inner-label">Advisory</div>
+                    <div class="inner-val" style="font-size: 13px;">
+                        <span class="{% if advisory.get('should_connect') %}status-connected{% else %}status-error{% endif %}">
+                            {{ 'Connect OK' if advisory.get('should_connect') else 'Do Not Connect' }}
+                        </span>
+                    </div>
+                </div>
+            </div>
+            {% if clients.get('ids') %}
+            <div style="font-size: 11px; color: #888; margin-top: 4px; font-family: 'SF Mono', monospace;">
+                {{ clients.get('ids', []) | join(' · ') }}
+            </div>
+            {% endif %}
+            {% if stats.get('dialogs_dismissed', 0) > 0 or stats.get('restarts_today', 0) > 0 %}
+            <div style="font-size: 11px; color: #555; margin-top: 4px;">
+                {{ stats.get('dialogs_dismissed', 0) }} dialogs dismissed · {{ stats.get('restarts_today', 0) }} restarts today
+            </div>
+            {% endif %}
             {% endif %}
         </div>
     </div>
+    {% endfor %}
 
-    <!-- Client Advisory Card -->
-    <div class="card" style="margin-top: 8px;">
-        <div class="card-label">Client Advisory</div>
-        <div style="display: flex; gap: 20px; margin-top: 6px; flex-wrap: wrap;">
-            <span class="{% if advisory.get('should_connect') %}status-connected{% else %}status-error{% endif %}">
-                {{ 'Connect OK' if advisory.get('should_connect') else 'Do Not Connect' }}
-            </span>
-            {% if advisory.get('should_wait') %}
-            <span class="status-warning">Waiting: {{ advisory.get('wait_reason', 'unknown') }}</span>
-            {% endif %}
-            {% if advisory.get('client_id_likely_stale') %}
-            <span class="status-warning">Stale IDs — rotate</span>
-            {% endif %}
-        </div>
-    </div>
-
-    <!-- Instance Controls -->
-    <div class="card" style="margin-top: 8px;">
-        <div class="card-label">Controls</div>
-        <div style="display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap;">
-            <button class="btn-sm" hx-post="/api/v1/command" hx-vals='{"command":"RECONNECTDATA","mode":"{{ mode }}"}' hx-target="#cmd-result-{{ mode }}">Recon Data</button>
-            <button class="btn-sm" hx-post="/api/v1/command" hx-vals='{"command":"RECONNECTACCOUNT","mode":"{{ mode }}"}' hx-target="#cmd-result-{{ mode }}">Recon Acct</button>
-            <button class="btn-sm" hx-post="/api/v1/command" hx-vals='{"command":"RESTARTSOCAT","mode":"{{ mode }}"}' hx-target="#cmd-result-{{ mode }}">Restart Socat</button>
-            <button class="btn-sm btn-sm-danger" hx-post="/api/v1/command" hx-vals='{"command":"RESTART","mode":"{{ mode }}"}' hx-target="#cmd-result-{{ mode }}" hx-confirm="Restart {{ mode | upper }} Gateway?">Restart</button>
-        </div>
-        <div id="cmd-result-{{ mode }}" style="font-size: 11px; margin-top: 4px;"></div>
-    </div>
-
-    {% endif %}
 </div>
-{% endfor %}
+
+<!-- Sidebar controls -->
+<div class="overview-sidebar">
+    <div class="sidebar-section">
+        <div class="sidebar-label">Target</div>
+        <select id="ctrl-target" class="sidebar-select">
+            {% for inst in instances %}
+            <option value="{{ inst.get('mode', 'live') }}">{{ inst.get('mode', 'live') | upper }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="sidebar-section">
+        <div class="sidebar-label">Data</div>
+        <button class="sidebar-btn" onclick="sendCmd('RECONNECTDATA')"
+                title="Reconnect market data feeds. Sends Ctrl+F to the Gateway, forcing it to re-establish data subscriptions.">Reconnect Data</button>
+        <button class="sidebar-btn" onclick="sendCmd('RECONNECTACCOUNT')"
+                title="Reconnect account data. Sends Ctrl+R to the Gateway, refreshing positions, orders, and account values.">Reconnect Account</button>
+    </div>
+    <div class="sidebar-section">
+        <div class="sidebar-label">Service</div>
+        <button class="sidebar-btn" onclick="sendCmd('RESTARTSOCAT')"
+                title="Restart the socat port forwarder. Kills and re-launches the TCP proxy that bridges the API port to the container interface.">Restart Socat</button>
+        <button class="sidebar-btn sidebar-btn-danger" onclick="if(confirm('Restart '+getTarget()+' Gateway?'))sendCmd('RESTART')"
+                title="Restart the Gateway JVM. Kills the process and triggers a full re-authentication cycle including 2FA.">Restart</button>
+    </div>
+    <div id="sidebar-cmd-result" class="sidebar-result"></div>
+</div>
+
 </div>
 
 <style>
-.btn-sm {
-    padding: 4px 10px; font-size: 10px; letter-spacing: 0.3px;
-    background: transparent; border: 1px solid #3f3f46; border-radius: 3px;
-    color: #a1a1aa; cursor: pointer; font-family: 'SF Mono', monospace;
-    transition: all 0.15s;
+/* Accordion layout */
+.overview-layout { display: flex; gap: 16px; }
+.overview-main { flex: 1; min-width: 0; }
+.overview-sidebar {
+    width: 170px; flex-shrink: 0;
+    background: #0d1b3e; border: 1px solid #16213e; border-radius: 8px;
+    padding: 12px; position: sticky; top: 20px; align-self: flex-start;
 }
-.btn-sm:hover { border-color: #71717a; color: #e0e0e0; }
-.btn-sm-danger:hover { border-color: #ef4444; color: #ef4444; }
+
+/* Accordion cards */
+.accordion-card {
+    background: #0d1b3e; border: 1px solid #16213e; border-radius: 8px;
+    margin-bottom: 6px; overflow: hidden;
+}
+.accordion-card.open { border-color: #1e3a6e; }
+.accordion-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px; cursor: pointer; user-select: none;
+}
+.accordion-header:hover { background: #112040; }
+.accordion-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.accordion-label {
+    font-size: 11px; color: #555; font-weight: 700;
+    letter-spacing: 1px; text-transform: uppercase;
+}
+.accordion-status { font-weight: 600; font-size: 13px; }
+.accordion-detail { color: #555; font-size: 12px; }
+.accordion-chevron { color: #555; font-size: 10px; transition: transform 0.2s; }
+.accordion-card.open .accordion-chevron { transform: rotate(180deg); }
+.accordion-body { display: none; padding: 12px 14px; border-top: 1px solid #16213e; }
+.accordion-card.open .accordion-body { display: block; }
+
+/* Instance badge (small) */
+.instance-badge-sm {
+    font-size: 11px; font-weight: 700; padding: 2px 8px;
+    border-radius: 3px; letter-spacing: 0.8px;
+}
+
+/* Inner stat cards */
+.inner-cards {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 6px; margin-bottom: 6px;
+}
+.inner-card { background: #0f3460; padding: 8px 10px; border-radius: 5px; }
+.inner-label { font-size: 10px; color: #888; text-transform: uppercase; letter-spacing: 0.4px; }
+.inner-val { font-size: 15px; font-weight: 700; margin-top: 2px; }
+
+/* IB Status specific */
+.ib-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.ib-dot-ok { background: #4ade80; }
+.ib-dot-warn { background: #fbbf24; }
+.ib-dot-err { background: #ef4444; }
+.ib-instance-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 4px 0; font-size: 12px;
+}
+.ib-alert-row {
+    padding: 3px 0; font-size: 11px;
+    border-bottom: 1px solid rgba(255,255,255,0.03);
+}
+.alert-sev { font-size: 9px; font-weight: 700; letter-spacing: 0.5px; padding: 1px 4px; border-radius: 2px; }
+.alert-sev-critical { background: #7f1d1d; color: #ef4444; }
+.alert-sev-warning { background: #713f12; color: #fbbf24; }
+.alert-sev-scheduled { background: #1e3a5f; color: #60a5fa; }
+.alert-sev-info { color: #71717a; }
+.alert-blocking { color: #ef4444; font-size: 9px; margin-left: 4px; font-weight: 700; }
+.mono-dim { font-family: 'SF Mono', monospace; font-size: 11px; color: #555; }
+
+/* Sidebar */
+.sidebar-section { margin-bottom: 14px; }
+.sidebar-label { font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+.sidebar-select {
+    width: 100%; padding: 5px 8px; font-size: 11px;
+    background: #0f3460; border: 1px solid #3f3f46; border-radius: 3px;
+    color: #93c5fd; font-family: 'SF Mono', monospace;
+}
+.sidebar-btn {
+    display: block; width: 100%; padding: 6px 10px; font-size: 11px; margin-bottom: 4px;
+    background: transparent; border: 1px solid #3f3f46; border-radius: 3px;
+    color: #a1a1aa; cursor: pointer; text-align: left;
+    font-family: 'SF Mono', monospace; transition: all 0.15s;
+}
+.sidebar-btn:hover { border-color: #71717a; color: #e0e0e0; }
+.sidebar-btn-danger:hover { border-color: #ef4444; color: #ef4444; }
+.sidebar-result { font-size: 10px; margin-top: 4px; min-height: 16px; }
+
+/* Health pills (reused from global style) */
+.health-pill { font-size: 11px; padding: 2px 8px; border-radius: 12px; font-weight: 600; }
+
+@media (max-width: 768px) {
+    .overview-layout { flex-direction: column; }
+    .overview-sidebar { width: 100%; position: static; }
+}
 </style>
+
 <script>
-document.body.addEventListener('htmx:afterSwap', function(evt) {
-    if (evt.detail.target.id && evt.detail.target.id.startsWith('cmd-result-')) {
-        try {
-            var d = JSON.parse(evt.detail.target.textContent);
-            evt.detail.target.innerHTML = '<span style="color:' + (d.ok ? '#4ade80' : '#ef4444') + '">' +
-                (d.ok ? '✓ ' + d.command : '✗ ' + d.error) + '</span>';
-            setTimeout(function() { evt.detail.target.innerHTML = ''; }, 3000);
-        } catch(e) {}
-    }
-});
+// Accordion: opening one closes the others
+function toggleAccordion(header) {
+    var card = header.parentElement;
+    var wasOpen = card.classList.contains('open');
+    // Close all
+    document.querySelectorAll('.accordion-card').forEach(function(c) {
+        c.classList.remove('open');
+    });
+    // Toggle clicked
+    if (!wasOpen) card.classList.add('open');
+}
+
+// Open default cards on load
+(function() {
+    document.querySelectorAll('.accordion-card[data-default-open="true"]').forEach(function(c) {
+        c.classList.add('open');
+    });
+})();
+
+// Sidebar controls
+function getTarget() {
+    var sel = document.getElementById('ctrl-target');
+    return sel ? sel.value : 'live';
+}
+
+function sendCmd(command) {
+    var mode = getTarget();
+    var result = document.getElementById('sidebar-cmd-result');
+    fetch('/api/v1/command', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({command: command, mode: mode})
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+        if (result) {
+            result.innerHTML = '<span style="color:' + (d.ok ? '#4ade80' : '#ef4444') + '">' +
+                (d.ok ? '✓ ' + d.command : '✗ ' + (d.error || 'failed')) + '</span>';
+            setTimeout(function() { result.innerHTML = ''; }, 3000);
+        }
+    })
+    .catch(function() {
+        if (result) {
+            result.innerHTML = '<span style="color:#ef4444">✗ request failed</span>';
+            setTimeout(function() { result.innerHTML = ''; }, 3000);
+        }
+    });
+}
 </script>
