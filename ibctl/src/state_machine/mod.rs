@@ -53,6 +53,26 @@ impl StateMachine {
                 }
             }
 
+            // IB System Status TTL expiry — fail-open if no recent push
+            if let Some(last) = self.ib_system_last_updated {
+                let ttl = std::time::Duration::from_secs(600); // 10 min default TTL
+                if last.elapsed() > ttl && !self.ib_system_available {
+                    log::info!("IB system status TTL expired — assuming available (fail-open)");
+                    self.ib_system_available = true;
+                    self.ib_system_status = "available".to_string();
+                    self.ib_system_reason.clear();
+                }
+            }
+
+            // If IB system unavailable and not already in WaitingForIB, transition there
+            if !self.ib_system_available && self.state != State::WaitingForIB && self.state != State::Shutdown {
+                log::warn!("IB system unavailable: {} — transitioning to WaitingForIB", self.ib_system_reason);
+                self.ib_system_return_state = Some(Box::new(self.state.clone()));
+                let old = self.state.clone();
+                self.state = State::WaitingForIB;
+                self.record_transition(&old, &State::WaitingForIB);
+            }
+
             // Pause mode: skip transitions but keep processing queries/interrupts
             if self.paused {
                 self.process_queries().await;
@@ -107,6 +127,7 @@ impl StateMachine {
             State::ConfiguringApi => self.do_configure_api().await,
             State::Connected => self.do_connected().await,
             State::Restarting => self.do_restart().await,
+            State::WaitingForIB => self.do_waiting_for_ib().await,
             State::Shutdown => Ok(State::Shutdown),
             State::Error(msg) => Ok(State::Error(msg.clone())),
         }
@@ -610,6 +631,26 @@ impl StateMachine {
         Ok(State::Launching)
     }
 
+    async fn do_waiting_for_ib(&mut self) -> Result<State, StateMachineError> {
+        log::info!("Waiting for IB system to become available ({})", self.ib_system_reason);
+
+        // Process queries so STATUS requests still return
+        self.process_queries().await;
+
+        // Check if IB became available
+        if self.ib_system_available {
+            log::info!("IB system is now available — resuming");
+            if let Some(return_state) = self.ib_system_return_state.take() {
+                return Ok(*return_state);
+            }
+            return Ok(State::Init);
+        }
+
+        // Sleep and check again
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        Ok(State::WaitingForIB)
+    }
+
     async fn do_shutdown(&mut self) -> Result<(), StateMachineError> {
         log::info!("Shutting down");
         self.stop_socat();
@@ -659,6 +700,15 @@ impl StateMachine {
 
     async fn handle_command(&mut self, cmd: Command) -> Result<(), StateMachineError> {
         match cmd {
+            Command::IbStatus(ref status, ref reason) => {
+                let available = status == "available";
+                log::info!("IB system status update: {} ({})", status, if reason.is_empty() { "no reason" } else { reason });
+                self.ib_system_available = available;
+                self.ib_system_status = status.clone();
+                self.ib_system_reason = reason.clone();
+                self.ib_system_last_updated = Some(std::time::Instant::now());
+                Ok(())
+            }
             Command::RestartSocat => {
                 log::info!("Restarting socat port forwarding");
                 let (api_port, socat_port) = if self.config.auth.trading_mode == crate::config::TradingMode::Paper {

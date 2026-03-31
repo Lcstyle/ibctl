@@ -51,6 +51,8 @@ pub enum State {
     Connected,
     /// Restarting the Gateway JVM
     Restarting,
+    /// Waiting for IB system to become available (maintenance/outage/no internet)
+    WaitingForIB,
     /// Shutting down cleanly
     Shutdown,
     /// Unrecoverable error state
@@ -72,6 +74,7 @@ impl State {
             "ConfiguringApi" => Some(State::ConfiguringApi),
             "Connected" => Some(State::Connected),
             "Restarting" => Some(State::Restarting),
+            "WaitingForIB" => Some(State::WaitingForIB),
             "Shutdown" => Some(State::Shutdown),
             _ => None,
         }
@@ -134,6 +137,12 @@ pub struct StateMachine {
     pub(super) socat_process: Option<std::process::Child>,
     pub(super) config_retries: u32,
     pub(super) paused: bool,
+    // IB System Status (pushed by dashboard or external clients via IBSTATUS command)
+    pub(super) ib_system_available: bool,
+    pub(super) ib_system_status: String,
+    pub(super) ib_system_reason: String,
+    pub(super) ib_system_last_updated: Option<Instant>,
+    pub(super) ib_system_return_state: Option<Box<State>>,
     pub(super) start_time: Instant,
     pub(super) connected_since: Option<Instant>,
     pub(super) transition_history: VecDeque<Transition>,
@@ -161,6 +170,11 @@ impl StateMachine {
             socat_process: None,
             config_retries: 0,
             paused: false,
+            ib_system_available: true,
+            ib_system_status: "available".to_string(),
+            ib_system_reason: String::new(),
+            ib_system_last_updated: None,
+            ib_system_return_state: None,
             start_time: Instant::now(),
             connected_since: None,
             transition_history: VecDeque::with_capacity(100),
@@ -192,6 +206,7 @@ pub(crate) fn client_advisory(state: &State) -> (bool, bool, Option<&'static str
         State::DismissingPopups | State::ConfiguringApi => (false, true, Some("configuring")),
         State::Connected => (true, false, None),
         State::Restarting => (false, true, Some("restarting")),
+        State::WaitingForIB => (false, true, Some("ib_maintenance")),
         State::Shutdown => (false, false, None),
         State::Error(_) => (false, false, None),
     };

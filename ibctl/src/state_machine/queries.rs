@@ -101,6 +101,15 @@ impl StateMachine {
                 "count": client_ids.len(),
                 "ids": client_ids,
             },
+            "ib_system": {
+                "available": self.ib_system_available,
+                "status": self.ib_system_status,
+                "reason": if self.ib_system_reason.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(self.ib_system_reason.clone()) },
+                "expires_in_secs": self.ib_system_last_updated.map(|t| {
+                    let ttl = 600u64; // TODO: from config
+                    ttl.saturating_sub(t.elapsed().as_secs())
+                }),
+            },
             "stats": self.stats,
             "client_advisory": {
                 "should_connect": should_connect && socat_running,
