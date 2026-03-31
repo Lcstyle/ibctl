@@ -143,7 +143,7 @@ class ScraperConfig:
         ]
         self.ignore_exchanges = ignore_exchanges or list(SystemAlert.EXCHANGE_KEYWORDS)
         self.region = region
-        self.backend_hosts = backend_hosts or ["cdc1-hb1.ibllc.com", "cdc1-hb2.ibllc.com"]
+        self.backend_hosts = ["cdc1-hb1.ibllc.com", "cdc1-hb2.ibllc.com"] if backend_hosts is None else backend_hosts
         self.fallback_host = fallback_host
 
 
