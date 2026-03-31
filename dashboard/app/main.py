@@ -18,6 +18,7 @@ from fastapi.templating import Jinja2Templates
 from app.api.router import api_router
 from app.config import DashboardSettings
 from app.instance_registry import InstanceRegistry
+from app.middleware.auth import TokenAuthMiddleware
 
 logger = logging.getLogger("dashboard")
 
@@ -75,6 +76,9 @@ def create_app(settings: DashboardSettings | None = None) -> FastAPI:
     # Backward compatibility: ibctl_client points to the primary instance
     # (existing API endpoints like /api/v1/status use this)
     app.state.ibctl_client = registry.get_client(registry.primary_mode())
+
+    # Auth middleware (must be added before routes)
+    app.add_middleware(TokenAuthMiddleware)
 
     # Mount API routes
     app.include_router(api_router)
