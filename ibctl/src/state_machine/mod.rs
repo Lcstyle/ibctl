@@ -740,8 +740,10 @@ impl StateMachine {
         if t.contains("re-login") || t.contains("relogin") || t.contains("login is required") {
             return Some(State::WaitingForLogin);
         }
-        // 2FA dialog blocking config
-        if t.contains("second factor") || t.contains("authentication") {
+        // 2FA dialog or Gateway still authenticating
+        // "Second Factor Authentication" = 2FA dialog
+        // "Attempt N: Authenticating..." = auth splash screen (IB still processing login)
+        if t.contains("second factor") || t.contains("authenticat") {
             return Some(State::WaitingFor2fa);
         }
         None
@@ -859,6 +861,23 @@ mod tests {
     fn test_authentication_dialog() {
         assert_eq!(
             StateMachine::classify_blocking_dialog("IB Key Authentication"),
+            Some(State::WaitingFor2fa),
+        );
+    }
+
+    #[test]
+    fn test_authenticating_splash_detected() {
+        // The exact title from the Java agent when Gateway is mid-auth
+        assert_eq!(
+            StateMachine::classify_blocking_dialog("Attempt 2: Authenticating..."),
+            Some(State::WaitingFor2fa),
+        );
+    }
+
+    #[test]
+    fn test_authenticating_first_attempt() {
+        assert_eq!(
+            StateMachine::classify_blocking_dialog("Attempt 1: Authenticating..."),
             Some(State::WaitingFor2fa),
         );
     }
