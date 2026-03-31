@@ -451,6 +451,13 @@ impl StateMachine {
                 return Ok(State::Error("JVM exited during popup dismissal".into()));
             }
 
+            // Check for blocking dialogs that require state changes (re-login, 2FA)
+            if let Some(next_state) = self.check_blocking_dialog().await {
+                log::info!("Blocking dialog detected during popup dismissal — transitioning to {}", next_state);
+                self.handler_registry.reset();
+                return Ok(next_state);
+            }
+
             let mut found_popup = false;
 
             if let Ok(windows) = self.agent_client.list_windows().await {
@@ -480,20 +487,12 @@ impl StateMachine {
     async fn do_configure_api(&mut self) -> Result<State, StateMachineError> {
         const MAX_CONFIG_RETRIES: u32 = 10;
 
-        // Guard: check if a 2FA dialog is blocking (from this or another instance)
-        // If so, go back to WaitingFor2fa instead of trying to open Settings
-        if let Ok(windows) = self.agent_client.list_windows().await {
-            for w in &windows {
-                let t = w.title.to_lowercase();
-                if t.contains("second factor") || t.contains("authentication") {
-                    log::warn!(
-                        "2FA dialog '{}' still visible — cannot configure API, returning to WaitingFor2fa",
-                        w.title
-                    );
-                    self.config_retries = 0;
-                    return Ok(State::WaitingFor2fa);
-                }
-            }
+        // Guard: check for any blocking dialog (re-login, 2FA, session conflict)
+        // These prevent the Settings dialog from opening
+        if let Some(next_state) = self.check_blocking_dialog().await {
+            log::warn!("Blocking dialog detected — cannot configure API, transitioning to {}", next_state);
+            self.config_retries = 0;
+            return Ok(next_state);
         }
 
         self.config_retries += 1;
@@ -698,6 +697,34 @@ impl StateMachine {
         None
     }
 
+    /// Check if any visible window is a blocking dialog that requires a state change.
+    /// Returns the state to transition to, or None if no blocking dialog found.
+    async fn check_blocking_dialog(&self) -> Option<State> {
+        if let Ok(windows) = self.agent_client.list_windows().await {
+            for w in &windows {
+                if let Some(state) = Self::classify_blocking_dialog(&w.title) {
+                    return Some(state);
+                }
+            }
+        }
+        None
+    }
+
+    /// Pure function: classify a window title as a blocking dialog.
+    /// Returns the state to transition to, or None.
+    fn classify_blocking_dialog(title: &str) -> Option<State> {
+        let t = title.to_lowercase();
+        // Re-login dialog: "RE-LOGIN IS REQUIRED" / "Your connection was lost"
+        if t.contains("re-login") || t.contains("relogin") || t.contains("login is required") {
+            return Some(State::WaitingForLogin);
+        }
+        // 2FA dialog blocking config
+        if t.contains("second factor") || t.contains("authentication") {
+            return Some(State::WaitingFor2fa);
+        }
+        None
+    }
+
     async fn handle_command(&mut self, cmd: Command) -> Result<(), StateMachineError> {
         match cmd {
             Command::IbStatus(ref status, ref reason) => {
@@ -766,5 +793,75 @@ impl StateMachine {
             }
             _ => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_relogin_dialog_detected() {
+        // The exact title from the screenshot
+        assert_eq!(
+            StateMachine::classify_blocking_dialog("RE-LOGIN IS REQUIRED"),
+            Some(State::WaitingForLogin),
+        );
+    }
+
+    #[test]
+    fn test_relogin_dialog_lowercase() {
+        assert_eq!(
+            StateMachine::classify_blocking_dialog("re-login is required"),
+            Some(State::WaitingForLogin),
+        );
+    }
+
+    #[test]
+    fn test_login_is_required_variant() {
+        assert_eq!(
+            StateMachine::classify_blocking_dialog("Login is required"),
+            Some(State::WaitingForLogin),
+        );
+    }
+
+    #[test]
+    fn test_2fa_dialog_detected() {
+        assert_eq!(
+            StateMachine::classify_blocking_dialog("Second Factor Authentication"),
+            Some(State::WaitingFor2fa),
+        );
+    }
+
+    #[test]
+    fn test_authentication_dialog() {
+        assert_eq!(
+            StateMachine::classify_blocking_dialog("IB Key Authentication"),
+            Some(State::WaitingFor2fa),
+        );
+    }
+
+    #[test]
+    fn test_normal_window_not_blocking() {
+        assert_eq!(
+            StateMachine::classify_blocking_dialog("IBKR Gateway"),
+            None,
+        );
+    }
+
+    #[test]
+    fn test_config_dialog_not_blocking() {
+        assert_eq!(
+            StateMachine::classify_blocking_dialog("Trader Workstation Configuration"),
+            None,
+        );
+    }
+
+    #[test]
+    fn test_paper_warning_not_blocking() {
+        assert_eq!(
+            StateMachine::classify_blocking_dialog("Warning"),
+            None,
+        );
     }
 }
