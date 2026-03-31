@@ -722,9 +722,8 @@ impl StateMachine {
                     // Dismiss the blocking dialog before transitioning
                     let t = w.title.to_lowercase();
                     if t.contains("re-login") || t.contains("relogin") || t.contains("login is required") {
-                        log::info!("Clicking 'Re-login' on connection-lost dialog");
-                        let _ = self.agent_client.click_button(w.id, "Re-login").await;
-                        let _ = self.agent_client.click_button(w.id, "Relogin").await;
+                        log::info!("Connection lost — clicking Cancel to return to login form");
+                        let _ = self.agent_client.click_button(w.id, "Cancel").await;
                     }
                     return Some(state);
                 }

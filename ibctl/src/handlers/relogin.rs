@@ -28,16 +28,14 @@ impl DialogHandler for ReloginHandler {
         window: &'a WindowInfo,
     ) -> Pin<Box<dyn Future<Output = Result<HandlerResult, HandlerError>> + Send + 'a>> {
         Box::pin(async move {
-            log::info!("Connection lost dialog detected — clicking Re-login");
+            log::info!("Connection lost dialog detected — clicking Cancel to return to login form");
 
-            match client.click_button(window.id, "Re-login").await {
+            match client.click_button(window.id, "Cancel").await {
                 Ok(true) => {
-                    log::info!("Clicked 'Re-login'");
+                    log::info!("Clicked 'Cancel' on re-login dialog");
                     Ok(HandlerResult::Handled)
                 }
                 _ => {
-                    // Try alternate labels
-                    let _ = client.click_button(window.id, "Relogin").await;
                     let _ = client.click_button(window.id, "OK").await;
                     Ok(HandlerResult::Handled)
                 }
