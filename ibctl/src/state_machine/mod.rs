@@ -204,6 +204,12 @@ impl StateMachine {
                 return Ok(State::Error("JVM process exited while waiting for login window".into()));
             }
 
+            // Check for blocking dialogs (re-login, 2FA) before looking for login window
+            if let Some(next_state) = self.check_blocking_dialog().await {
+                log::info!("Blocking dialog detected while waiting for login — transitioning to {}", next_state);
+                return Ok(next_state);
+            }
+
             match self.agent_client.list_windows().await {
                 Ok(windows) => {
                     for w in &windows {
@@ -236,6 +242,12 @@ impl StateMachine {
     async fn do_authenticate(&mut self) -> Result<State, StateMachineError> {
         log::info!("Authenticating with IB Gateway");
 
+        // Check for blocking dialogs (re-login, 2FA) before attempting login
+        if let Some(next_state) = self.check_blocking_dialog().await {
+            log::info!("Blocking dialog detected during authentication — transitioning to {}", next_state);
+            return Ok(next_state);
+        }
+
         let windows = self.agent_client.list_windows().await?;
         let login_window = windows.iter().find(|w| {
             let t = w.title.to_lowercase();
@@ -257,7 +269,8 @@ impl StateMachine {
                 return Ok(State::WaitingForLogin);
             }
             Some(Ok(crate::handlers::HandlerResult::NotApplicable)) => {
-                log::warn!("Login handler didn't recognize window — retrying");
+                log::debug!("Login handler didn't recognize window — waiting for login form");
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 return Ok(State::WaitingForLogin);
             }
             Some(Err(e)) => {
@@ -266,7 +279,10 @@ impl StateMachine {
                 return Ok(State::WaitingForLogin);
             }
             None => {
-                log::warn!("No handler matched login window");
+                // Window exists but no handler matched — Gateway may be in a transitional
+                // state (e.g. "Authenticating..." screen). Wait before retrying.
+                log::debug!("No handler matched login window — waiting for Gateway to settle");
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 return Ok(State::WaitingForLogin);
             }
         }
@@ -698,11 +714,18 @@ impl StateMachine {
     }
 
     /// Check if any visible window is a blocking dialog that requires a state change.
-    /// Returns the state to transition to, or None if no blocking dialog found.
+    /// Clicks the appropriate button to dismiss the dialog, then returns the next state.
     async fn check_blocking_dialog(&self) -> Option<State> {
         if let Ok(windows) = self.agent_client.list_windows().await {
             for w in &windows {
                 if let Some(state) = Self::classify_blocking_dialog(&w.title) {
+                    // Dismiss the blocking dialog before transitioning
+                    let t = w.title.to_lowercase();
+                    if t.contains("re-login") || t.contains("relogin") || t.contains("login is required") {
+                        log::info!("Clicking 'Re-login' on connection-lost dialog");
+                        let _ = self.agent_client.click_button(w.id, "Re-login").await;
+                        let _ = self.agent_client.click_button(w.id, "Relogin").await;
+                    }
                     return Some(state);
                 }
             }
