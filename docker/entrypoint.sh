@@ -162,9 +162,8 @@ IBCTL_AGENT_SOCKET="/run/ibctl/agent-live.sock" \
 PIDS+=($!)
 echo "Live instance PID: ${PIDS[-1]}"
 
-# Wait before starting paper (matches gnzsnz's 15s delay)
-echo "Waiting 15s before starting paper instance..."
-sleep 15
+# No delay — each ibctl instance uses its own agent socket
+# and manages its own JVM independently
 
 # --- Paper instance ---
 PAPER_SETTINGS="${TWS_SETTINGS_PATH:-/home/ibgateway/Jts}_paper"

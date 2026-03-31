@@ -72,4 +72,10 @@ class InstanceRegistry:
             return InstanceStatus(mode=mode, status=status_data)
         except Exception as e:
             logger.debug("Instance %s unreachable: %s", mode, e)
-            return InstanceStatus(mode=mode, error=str(e))
+            # Friendly error messages
+            err = str(e)
+            if "Connection refused" in err or "ConnectionRefusedError" in err:
+                err = "Starting up — waiting for ibctl daemon"
+            elif "Timeout" in err or "timed out" in err:
+                err = "Not responding — ibctl may be busy or starting"
+            return InstanceStatus(mode=mode, error=err)

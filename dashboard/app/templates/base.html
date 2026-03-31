@@ -4,15 +4,15 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ibctl Dashboard</title>
-    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/style.css?v=21">
     <script src="/static/htmx.min.js"></script>
 </head>
 <body>
     <header>
         <nav class="tabs">
             <a href="/" class="tab {% if active_tab == 'overview' %}active{% endif %}">Overview</a>
-            <a href="/state" class="tab {% if active_tab == 'state' %}active{% endif %}">State Machine</a>
-            <a href="/config" class="tab {% if active_tab == 'config' %}active{% endif %}">Configuration</a>
+            <a href="/state" class="tab {% if active_tab == 'state' %}active{% endif %}">State</a>
+            <a href="/config" class="tab {% if active_tab == 'config' %}active{% endif %}">Config</a>
             <a href="/logs" class="tab {% if active_tab == 'logs' %}active{% endif %}">Logs</a>
             <a href="/vnc" class="tab {% if active_tab == 'vnc' %}active{% endif %}">VNC</a>
         </nav>

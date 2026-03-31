@@ -165,9 +165,73 @@
 .tp7-left { flex-shrink: 0; }
 .tp7-history { flex: 1; min-width: 280px; }
 .tp7-history h3 { font-size: 12px; color: #71717a; letter-spacing: 1px; margin: 0 0 8px; font-weight: 400; }
+
+/* Mobile: hide dial, show simple controls */
+.tp7-mobile { display: none; }
+@media (max-width: 768px) {
+    .tp7-left { display: none; }
+    .tp7-mobile { display: block; margin-bottom: 16px; }
+    .tp7-mobile .card { margin-bottom: 8px; }
+    .tp7-m-transport { display: flex; gap: 6px; margin-top: 8px; }
+    .tp7-m-btn { flex: 1; padding: 12px; border: 1px solid #3f3f46; border-radius: 6px; background: #0f3460; color: #a1a1aa; font-size: 13px; cursor: pointer; text-align: center; font-family: inherit; transition: all 0.15s; }
+    .tp7-m-btn:hover:not(:disabled) { border-color: #71717a; color: #e0e0e0; }
+    .tp7-m-btn.danger:hover:not(:disabled) { border-color: #ef4444; color: #ef4444; }
+    .tp7-m-btn:disabled { opacity: 0.3; cursor: default; border-color: #27272a; }
+    .tp7-m-state { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+    .tp7-m-state select { flex: 1; padding: 8px; background: #0f3460; color: #e0e0e0; border: 1px solid #3f3f46; border-radius: 6px; font-size: 13px; }
+    .tp7-m-state button { padding: 8px 14px; }
+}
 </style>
 
 <div class="tp7-page">
+
+<!-- Mobile: simple controls (hidden on desktop) -->
+<div class="tp7-mobile">
+    <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+                <div style="font-size: 11px; color: #71717a; text-transform: uppercase; letter-spacing: 1px;">State Machine</div>
+                <div style="font-size: 22px; font-weight: 700; margin-top: 4px;" id="m-state-display" class="status-connected">—</div>
+            </div>
+            <div style="text-align: right;">
+                <div style="font-size: 11px; color: #71717a;">Uptime</div>
+                <div style="font-size: 16px; font-family: 'SF Mono', monospace;" id="m-uptime">0:00:00</div>
+            </div>
+        </div>
+        <div style="margin-top: 8px;">
+            <select id="m-mode-select" style="width: 100%; padding: 8px; background: #1a1a2e; color: #e0e0e0; border: 1px solid #3f3f46; border-radius: 6px; font-size: 13px;">
+                {% for m in modes %}
+                <option value="{{ m }}" {% if m == default_mode %}selected{% endif %}>{{ m | upper }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="tp7-m-transport">
+            <button class="tp7-m-btn" id="m-btn-pause" onclick="sendCmd('PAUSE')">⏸ Pause</button>
+            <button class="tp7-m-btn" id="m-btn-play" onclick="sendCmd('RESUME')">▶ Play</button>
+            <button class="tp7-m-btn" id="m-btn-stop" onclick="sendCmd('STOP',true,'Stop instance?')">■ Stop</button>
+            <button class="tp7-m-btn danger" id="m-btn-reset" onclick="sendCmd('RESTART',true,'Reset Gateway?')">⏮ Reset</button>
+        </div>
+        <div class="tp7-m-state">
+            <select id="m-setstate-select" style="flex: 1;">
+                <option value="">Force State...</option>
+                <option value="Init">Init</option>
+                <option value="Launching">Launching</option>
+                <option value="WaitingForAgent">WaitingForAgent</option>
+                <option value="WaitingForLogin">WaitingForLogin</option>
+                <option value="Authenticating">Authenticating</option>
+                <option value="WaitingFor2fa">WaitingFor2fa</option>
+                <option value="DismissingPopups">DismissingPopups</option>
+                <option value="ConfiguringApi">ConfiguringApi</option>
+                <option value="Connected">Connected</option>
+                <option value="Restarting">Restarting</option>
+                <option value="Shutdown">Shutdown</option>
+            </select>
+            <button class="tp7-m-btn" onclick="mForceState()" style="flex: 0;">Set</button>
+        </div>
+        <div id="m-command-result" style="font-size: 11px; margin-top: 4px; text-align: center;"></div>
+    </div>
+</div>
+
 <div class="tp7-left">
 <div class="tp7">
     <div class="tp7-label">ibctl</div>
@@ -421,6 +485,7 @@ async function updateReel() {
             innerReel.classList.remove('spinning');
             outerRing.classList.remove('spinning');
         }
+        updateButtonStates(s);
     } catch(e) {
         document.getElementById('oled-state').textContent = 'OFFLINE';
         document.getElementById('oled-uptime').textContent = '—:——:——';
@@ -433,11 +498,69 @@ setNeedle(0);
 setInterval(updateReel, 3000);
 updateReel();
 
+// Mobile mode selector
+var mModeSelect = document.getElementById('m-mode-select');
+if (mModeSelect) {
+    mModeSelect.addEventListener('change', function() { setMode(this.value); });
+}
+
+// Mobile force state
+function mForceState() {
+    var sel = document.getElementById('m-setstate-select');
+    var state = sel.value;
+    if (!state) return;
+    if (!confirm('Force ' + getMode().toUpperCase() + ' → ' + state + '?')) { sel.value = ''; return; }
+    sendCmd('SETSTATE ' + state);
+    sendCmd('PAUSE');
+    sel.value = '';
+}
+
+// Update button states based on current state
+function updateButtonStates(state) {
+    var isStopped = state === 'Shutdown';
+    var isRunning = !isPaused && !isStopped;
+
+    // Mobile buttons
+    var mp = document.getElementById('m-btn-pause');
+    var mr = document.getElementById('m-btn-play');
+    var ms = document.getElementById('m-btn-stop');
+    if (mp) mp.disabled = isPaused || isStopped;
+    if (mr) mr.disabled = isRunning;
+    if (ms) ms.disabled = isStopped;
+
+    // Desktop TP-7 buttons — disable via opacity
+    document.querySelectorAll('.tp7-btn-pause').forEach(function(b) { b.style.opacity = (isPaused || isStopped) ? '0.3' : '1'; b.style.pointerEvents = (isPaused || isStopped) ? 'none' : 'auto'; });
+    document.querySelectorAll('.tp7-btn-play').forEach(function(b) { b.style.opacity = isRunning ? '0.3' : '1'; b.style.pointerEvents = isRunning ? 'none' : 'auto'; });
+    document.querySelectorAll('.tp7-btn-stop').forEach(function(b) { b.style.opacity = isStopped ? '0.3' : '1'; b.style.pointerEvents = isStopped ? 'none' : 'auto'; });
+}
+
+// Update mobile display
+async function updateMobile() {
+    try {
+        var r = await fetch('/api/v1/status?mode=' + getMode());
+        var d = await r.json();
+        var s = d.state || '—';
+        var u = d.uptime_secs || 0;
+        var h = Math.floor(u/3600), m = Math.floor((u%3600)/60), sec = u%60;
+        var el = document.getElementById('m-state-display');
+        if (el) {
+            el.textContent = s;
+            el.className = s === 'Connected' ? 'status-connected' : s.startsWith('Error') ? 'status-error' : 'status-warning';
+        }
+        var ut = document.getElementById('m-uptime');
+        if (ut) ut.textContent = h + ':' + String(m).padStart(2,'0') + ':' + String(sec).padStart(2,'0');
+        updateButtonStates(s);
+    } catch(e) {}
+}
+setInterval(updateMobile, 3000);
+updateMobile();
+
 document.addEventListener('htmx:configRequest', function(evt) {
     if (evt.detail.elt.id === 'state-content') evt.detail.path = '/partials/state-history?mode=' + getMode();
 });
 document.body.addEventListener('htmx:afterSwap', function(evt) {
-    if (evt.detail.target.id === 'command-result') {
+    var tgt = evt.detail.target.id;
+    if (tgt === 'command-result' || tgt === 'm-command-result') {
         try {
             var data = JSON.parse(evt.detail.target.textContent);
             evt.detail.target.innerHTML = '<span style="color:' + (data.ok ? '#4ade80' : '#ef4444') + '">' +

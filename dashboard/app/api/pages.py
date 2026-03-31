@@ -101,6 +101,21 @@ async def state_history_partial(request: Request, mode: str | None = None):
     try:
         state = await client.state()
         state_dict = asdict(state)
+        # Convert epoch timestamps to local time using TZ from ibctl config
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz_name = os.environ.get("TZ", "America/New_York")
+        try:
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = ZoneInfo("America/New_York")
+        for t in state_dict.get("history", []):
+            try:
+                epoch = int(t.get("timestamp", 0))
+                if epoch > 1000000000:
+                    t["timestamp"] = datetime.fromtimestamp(epoch, tz=tz).strftime("%I:%M:%S %p")
+            except (ValueError, TypeError):
+                pass
     except DashboardError as e:
         state_dict = {"current": "unreachable", "history": []}
 
