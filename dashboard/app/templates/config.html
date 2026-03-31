@@ -1,34 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <h2>Configuration</h2>
-
-<!-- Instance port mapping -->
-<div class="instance-section" style="margin-bottom: 16px;">
-    <div class="instance-header">
-        <span class="instance-badge badge-live">LIVE</span>
-        <span style="color: #888; font-size: 13px;">Trading Instance</span>
-    </div>
-    <div class="config-grid">
-        <div class="config-item"><span class="config-key">Gateway API Port</span><span class="config-val">4001 (internal) → 4003 (socat)</span></div>
-        <div class="config-item"><span class="config-key">Agent Socket</span><span class="config-val">/tmp/ibctl-live.sock</span></div>
-        <div class="config-item"><span class="config-key">Command Server</span><span class="config-val">7462 (TCP)</span></div>
-    </div>
-</div>
-
-<div class="instance-section" style="margin-bottom: 16px;">
-    <div class="instance-header">
-        <span class="instance-badge badge-paper">PAPER</span>
-        <span style="color: #888; font-size: 13px;">Simulated Trading Instance</span>
-    </div>
-    <div class="config-grid">
-        <div class="config-item"><span class="config-key">Gateway API Port</span><span class="config-val">4002 (internal) → 4004 (socat)</span></div>
-        <div class="config-item"><span class="config-key">Agent Socket</span><span class="config-val">/tmp/ibctl-paper.sock</span></div>
-        <div class="config-item"><span class="config-key">Command Server</span><span class="config-val">Disabled (uses live instance)</span></div>
-    </div>
-</div>
-
-<!-- Running configuration from ibctl -->
 <div id="config-data" hx-get="/partials/config" hx-trigger="load" hx-swap="innerHTML">
-    <div class="loading">Loading configuration from ibctl...</div>
+    <div class="loading">Loading configuration...</div>
 </div>
 {% endblock %}

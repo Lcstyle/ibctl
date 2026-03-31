@@ -1,31 +1,29 @@
 {% set current = state.get('current', 'unknown') %}
 
-<div class="card" style="margin-bottom: 16px;">
-    <div class="card-label">Current State</div>
-    <div class="card-value {% if current == 'Connected' %}status-connected{% elif 'Error' in current %}status-error{% else %}status-warning{% endif %}">
-        {{ current }}
-    </div>
+<h3 style="font-size: 12px; color: #71717a; letter-spacing: 1px; margin: 0 0 4px; font-weight: 400;">CURRENT STATE</h3>
+<div style="font-size: 24px; font-weight: 700; margin-bottom: 16px;" class="{% if current == 'Connected' %}status-connected{% elif 'Error' in current %}status-error{% else %}status-warning{% endif %}">
+    {{ current }}
 </div>
 
-<h3>Transition History</h3>
-<table class="data-table">
+<h3 style="font-size: 12px; color: #71717a; letter-spacing: 1px; margin: 0 0 8px; font-weight: 400;">Transition History</h3>
+<table class="data-table" style="width: 100%; border-collapse: collapse; font-size: 12px;">
     <thead>
         <tr>
-            <th>Timestamp</th>
-            <th>From</th>
-            <th>To</th>
+            <th style="text-align:left; color:#52525b; font-size:10px; letter-spacing:1px; font-weight:400; padding:4px 8px; border-bottom:1px solid #27272a;">TIMESTAMP</th>
+            <th style="text-align:left; color:#52525b; font-size:10px; letter-spacing:1px; font-weight:400; padding:4px 8px; border-bottom:1px solid #27272a;">FROM</th>
+            <th style="text-align:left; color:#52525b; font-size:10px; letter-spacing:1px; font-weight:400; padding:4px 8px; border-bottom:1px solid #27272a;">TO</th>
         </tr>
     </thead>
     <tbody>
-        {% for t in state.get('history', []) | reverse %}
+        {% for t in state.get('history', []) %}
         <tr>
-            <td>{{ t.timestamp }}</td>
-            <td>{{ t.from_state }}</td>
-            <td>{{ t.to_state }}</td>
+            <td style="padding:3px 8px; color:#a1a1aa; font-family:'SF Mono',monospace; font-size:11px;">{{ t.timestamp }}</td>
+            <td style="padding:3px 8px; color:#a1a1aa; font-family:'SF Mono',monospace; font-size:11px;">{{ t.from_state }}</td>
+            <td style="padding:3px 8px; color:#a1a1aa; font-family:'SF Mono',monospace; font-size:11px;">{{ t.to_state }}</td>
         </tr>
         {% endfor %}
         {% if not state.get('history') %}
-        <tr><td colspan="3" style="color: #666;">No transitions recorded yet</td></tr>
+        <tr><td colspan="3" style="color: #666; padding: 8px;">No transitions recorded yet</td></tr>
         {% endif %}
     </tbody>
 </table>

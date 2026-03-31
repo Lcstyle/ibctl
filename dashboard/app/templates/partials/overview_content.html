@@ -1,3 +1,4 @@
+<div style="display: flex; gap: 16px; flex-wrap: wrap;">
 {% for inst in instances %}
 {% set s = inst.get('status', {}) %}
 {% set advisory = s.get('client_advisory', {}) %}
@@ -7,7 +8,7 @@
 {% set clients = s.get('clients', {}) %}
 {% set mode = inst.get('mode', 'unknown') %}
 
-<div class="instance-section" {% if not loop.first %}style="margin-top: 16px;"{% endif %}>
+<div class="instance-section" style="flex: 1; min-width: 320px;">
     <div class="instance-header">
         <span class="instance-badge {% if mode == 'live' %}badge-live{% else %}badge-paper{% endif %}">
             {{ mode | upper }}
@@ -95,21 +96,14 @@
         </div>
     </div>
 
-    <!-- Known Client IDs Card -->
+    <!-- Known Client IDs -->
     <div class="card" style="margin-top: 8px;">
-        <div class="card-label">Known Client IDs</div>
-        <div style="display: flex; gap: 20px; margin-top: 6px; flex-wrap: wrap; align-items: center;">
-            <span style="font-size: 20px; font-weight: bold; color: {% if clients.get('count', 0) > 0 %}#4ade80{% else %}#888{% endif %};">
-                {{ clients.get('count', 0) }}
-            </span>
+        <div class="card-label">Known Clients ({{ clients.get('count', 0) }})</div>
+        <div style="margin-top: 4px; font-size: 12px; color: #a1a1aa; font-family: 'SF Mono', monospace;">
             {% if clients.get('ids') %}
-            {% for cid in clients.get('ids', []) %}
-            <span style="padding: 2px 8px; background: #1a1a2e; border: 1px solid #333; border-radius: 4px; font-size: 12px; color: #e0e0e0;">
-                {{ cid }}
-            </span>
-            {% endfor %}
+            {{ clients.get('ids', []) | join(' · ') }}
             {% else %}
-            <span style="color: #666; font-size: 12px;">No clients connected</span>
+            <span style="color: #555;">—</span>
             {% endif %}
         </div>
     </div>
@@ -130,6 +124,42 @@
         </div>
     </div>
 
+    <!-- Instance Controls -->
+    <div class="card" style="margin-top: 8px;">
+        <div class="card-label">Controls</div>
+        <div style="display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap;">
+            <button class="btn-sm" hx-post="/api/v1/command" hx-vals='{"command":"RECONNECTDATA","mode":"{{ mode }}"}' hx-target="#cmd-result-{{ mode }}">Recon Data</button>
+            <button class="btn-sm" hx-post="/api/v1/command" hx-vals='{"command":"RECONNECTACCOUNT","mode":"{{ mode }}"}' hx-target="#cmd-result-{{ mode }}">Recon Acct</button>
+            <button class="btn-sm" hx-post="/api/v1/command" hx-vals='{"command":"RESTARTSOCAT","mode":"{{ mode }}"}' hx-target="#cmd-result-{{ mode }}">Restart Socat</button>
+            <button class="btn-sm btn-sm-danger" hx-post="/api/v1/command" hx-vals='{"command":"RESTART","mode":"{{ mode }}"}' hx-target="#cmd-result-{{ mode }}" hx-confirm="Restart {{ mode | upper }} Gateway?">Restart</button>
+        </div>
+        <div id="cmd-result-{{ mode }}" style="font-size: 11px; margin-top: 4px;"></div>
+    </div>
+
     {% endif %}
 </div>
 {% endfor %}
+</div>
+
+<style>
+.btn-sm {
+    padding: 4px 10px; font-size: 10px; letter-spacing: 0.3px;
+    background: transparent; border: 1px solid #3f3f46; border-radius: 3px;
+    color: #a1a1aa; cursor: pointer; font-family: 'SF Mono', monospace;
+    transition: all 0.15s;
+}
+.btn-sm:hover { border-color: #71717a; color: #e0e0e0; }
+.btn-sm-danger:hover { border-color: #ef4444; color: #ef4444; }
+</style>
+<script>
+document.body.addEventListener('htmx:afterSwap', function(evt) {
+    if (evt.detail.target.id && evt.detail.target.id.startsWith('cmd-result-')) {
+        try {
+            var d = JSON.parse(evt.detail.target.textContent);
+            evt.detail.target.innerHTML = '<span style="color:' + (d.ok ? '#4ade80' : '#ef4444') + '">' +
+                (d.ok ? '✓ ' + d.command : '✗ ' + d.error) + '</span>';
+            setTimeout(function() { evt.detail.target.innerHTML = ''; }, 3000);
+        } catch(e) {}
+    }
+});
+</script>

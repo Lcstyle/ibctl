@@ -4,81 +4,85 @@
 </div>
 {% else %}
 
-<!-- Authentication -->
-<details class="config-section" open>
-    <summary>Authentication</summary>
-    <div class="config-grid">
-        <div class="config-item"><span class="config-key">Username</span><span class="config-val">{{ config.auth.username }}</span></div>
-        <div class="config-item"><span class="config-key">Password</span><span class="config-val config-masked">{{ config.auth.password }}</span></div>
-        <div class="config-item"><span class="config-key">Trading Mode</span><span class="config-val">{{ config.auth.trading_mode }}</span></div>
-    </div>
-</details>
+{% set ev = env_vars %}
 
-<!-- Gateway -->
-<details class="config-section" open>
-    <summary>Gateway</summary>
-    <div class="config-grid">
+<!-- Two columns: Global left, LIVE+PAPER+Timing right -->
+<div style="display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start;">
+
+<!-- LEFT COLUMN: Global / Container -->
+<div class="card" style="flex: 1; min-width: 320px;">
+    <div class="card-label" style="font-size: 12px; letter-spacing: 1px; color: #71717a;">GLOBAL / CONTAINER</div>
+    <div class="config-grid" style="margin-top: 8px;">
+        <div class="config-item"><span class="config-key">Trading Mode</span><span class="config-val">{{ ev.get('TRADING_MODE', config.auth.trading_mode) }}</span></div>
+        <div class="config-item"><span class="config-key">Timezone</span><span class="config-val">{{ ev.get('TZ', 'UTC') }}</span></div>
         <div class="config-item"><span class="config-key">TWS Path</span><span class="config-val">{{ config.gateway.tws_path }}</span></div>
-        <div class="config-item"><span class="config-key">Version</span><span class="config-val">{{ config.gateway.version }}</span></div>
-        <div class="config-item"><span class="config-key">Java Heap</span><span class="config-val">{{ config.gateway.java_heap_mb }}MB</span></div>
+        <div class="config-item"><span class="config-key">Gateway Version</span><span class="config-val">{{ ev.get('TWS_MAJOR_VRSN', config.gateway.version) }}</span></div>
         <div class="config-item"><span class="config-key">Program</span><span class="config-val">{{ config.gateway.program }}</span></div>
-        {% if config.gateway.settings_path %}
-        <div class="config-item"><span class="config-key">Settings Path</span><span class="config-val">{{ config.gateway.settings_path }}</span></div>
-        {% endif %}
-    </div>
-</details>
-
-<!-- Session -->
-<details class="config-section" open>
-    <summary>Session</summary>
-    <div class="config-grid">
+        <div class="config-item"><span class="config-key">Java Heap</span><span class="config-val">{{ ev.get('JAVA_HEAP_SIZE', config.gateway.java_heap_mb) }}MB</span></div>
         <div class="config-item"><span class="config-key">Session Action</span><span class="config-val">{{ config.session.action }}</span></div>
         <div class="config-item"><span class="config-key">Accept Incoming</span><span class="config-val">{{ config.session.accept_incoming }}</span></div>
+        <div class="config-item"><span class="config-key">Master Client ID</span><span class="config-val">{{ ev.get('TWS_MASTER_CLIENT_ID', '—') }}</span></div>
+        <div class="config-item"><span class="config-key">Read-Only API</span><span class="config-val">{{ ev.get('READ_ONLY_API', 'no') }}</span></div>
+        <div class="config-item"><span class="config-key">Bypass Warnings</span><span class="config-val">{{ ev.get('BYPASS_WARNING', 'no') }}</span></div>
+        <div class="config-item"><span class="config-key">Cold Restart</span><span class="config-val">{{ ev.get('TWS_COLD_RESTART', '—') }}</span></div>
+        <div class="config-item"><span class="config-key">Auto Restart Time</span><span class="config-val">{{ ev.get('AUTO_RESTART_TIME', '—') }}</span></div>
+        <div class="config-item"><span class="config-key">2FA Device</span><span class="config-val">{{ ev.get('TWOFA_DEVICE', '—') }}</span></div>
+        <div class="config-item"><span class="config-key">2FA Timeout Action</span><span class="config-val">{{ ev.get('TWOFA_TIMEOUT_ACTION', 'restart') }}</span></div>
+        <div class="config-item"><span class="config-key">2FA Timeout</span><span class="config-val">{{ ev.get('TWOFA_EXIT_INTERVAL', '120') }}s</span></div>
+        <div class="config-item"><span class="config-key">Dashboard Port</span><span class="config-val">{{ ev.get('IBCTL_DASHBOARD_PORT', '8080') }}</span></div>
+        <div class="config-item"><span class="config-key">VNC Password</span><span class="config-val config-masked">********</span></div>
     </div>
-</details>
-
-<!-- Command Server -->
-<details class="config-section">
-    <summary>Command Server</summary>
-    <div class="config-grid">
-        <div class="config-item"><span class="config-key">Enabled</span><span class="config-val">{{ config.command_server.enabled }}</span></div>
-        <div class="config-item"><span class="config-key">Port</span><span class="config-val">{{ config.command_server.port }}</span></div>
-        <div class="config-item"><span class="config-key">Bind Address</span><span class="config-val">{{ config.command_server.bind_address }}</span></div>
-    </div>
-</details>
-
-<!-- Timing -->
-<details class="config-section">
-    <summary>Timing</summary>
-    <div class="config-grid">
-        <div class="config-item"><span class="config-key">UI Tick</span><span class="config-val">{{ config.timing.ui_tick_ms }}ms</span></div>
-        <div class="config-item"><span class="config-key">Agent Tick</span><span class="config-val">{{ config.timing.agent_tick_ms }}ms</span></div>
-        <div class="config-item"><span class="config-key">Post-Login Delay</span><span class="config-val">{{ config.timing.post_login_delay_ms }}ms</span></div>
-        <div class="config-item"><span class="config-key">Popup Quiet</span><span class="config-val">{{ config.timing.popup_quiet_secs }}s</span></div>
-    </div>
-</details>
-
-<!-- Agent -->
-<details class="config-section">
-    <summary>Agent</summary>
-    <div class="config-grid">
-        <div class="config-item"><span class="config-key">Socket Path</span><span class="config-val">{{ config.agent.socket_path }}</span></div>
-    </div>
-</details>
-
-<!-- Environment Variables -->
-<details class="config-section">
-    <summary>Environment (from container)</summary>
-    <div class="config-grid">
-        {% for key, val in env_vars.items() %}
-        <div class="config-item">
-            <span class="config-key">{{ key }}</span>
-            <span class="config-val {% if 'PASSWORD' in key or 'SECRET' in key or 'TOKEN' in key %}config-masked{% endif %}">
-                {% if 'PASSWORD' in key or 'SECRET' in key or 'TOKEN' in key %}********{% else %}{{ val }}{% endif %}
-            </span>
+    <div style="margin-top: 12px; padding-top: 10px; border-top: 1px solid #27272a;">
+        <div class="card-label" style="font-size: 11px; letter-spacing: 1px; color: #52525b; margin-bottom: 6px;">TIMING</div>
+        <div class="config-grid">
+            <div class="config-item"><span class="config-key">UI Tick</span><span class="config-val">{{ config.timing.ui_tick_ms }}ms</span></div>
+            <div class="config-item"><span class="config-key">Agent Tick</span><span class="config-val">{{ config.timing.agent_tick_ms }}ms</span></div>
+            <div class="config-item"><span class="config-key">Post-Login Delay</span><span class="config-val">{{ config.timing.post_login_delay_ms }}ms</span></div>
+            <div class="config-item"><span class="config-key">Popup Quiet</span><span class="config-val">{{ config.timing.popup_quiet_secs }}s</span></div>
         </div>
-        {% endfor %}
     </div>
-</details>
+</div>
+
+<!-- RIGHT COLUMN: LIVE + PAPER stacked -->
+<div style="flex: 1; min-width: 320px; display: flex; flex-direction: column; gap: 16px;">
+
+    <!-- LIVE -->
+    <div class="card">
+        <div class="card-label" style="font-size: 12px; letter-spacing: 1px;">
+            <span style="color: #4ade80; font-weight: 700;">LIVE</span>
+            <span style="color: #71717a;"> Trading Instance</span>
+        </div>
+        <div class="config-grid" style="margin-top: 8px;">
+            <div class="config-item"><span class="config-key">Username</span><span class="config-val">{{ ev.get('TWS_USERID', config.auth.username) }}</span></div>
+            <div class="config-item"><span class="config-key">Password</span><span class="config-val config-masked">********</span></div>
+            <div class="config-item"><span class="config-key">Gateway API Port</span><span class="config-val">4001 (internal) → 4003 (socat)</span></div>
+            <div class="config-item"><span class="config-key">Command Server</span><span class="config-val">{{ config.command_server.port }} ({{ config.command_server.bind_address }})</span></div>
+            <div class="config-item"><span class="config-key">Agent Socket</span><span class="config-val">{{ config.agent.socket_path }}</span></div>
+            {% if config.gateway.settings_path %}
+            <div class="config-item"><span class="config-key">Settings Path</span><span class="config-val">{{ config.gateway.settings_path }}</span></div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- PAPER -->
+    <div class="card">
+        <div class="card-label" style="font-size: 12px; letter-spacing: 1px;">
+            <span style="color: #fbbf24; font-weight: 700;">PAPER</span>
+            <span style="color: #71717a;"> Simulated Trading Instance</span>
+        </div>
+        <div class="config-grid" style="margin-top: 8px;">
+            <div class="config-item"><span class="config-key">Username</span><span class="config-val">{{ ev.get('TWS_USERID_PAPER', '—') }}</span></div>
+            <div class="config-item"><span class="config-key">Password</span><span class="config-val config-masked">********</span></div>
+            <div class="config-item"><span class="config-key">Gateway API Port</span><span class="config-val">4002 (internal) → 4004 (socat)</span></div>
+            <div class="config-item"><span class="config-key">Command Server</span><span class="config-val">7463</span></div>
+            <div class="config-item"><span class="config-key">Agent Socket</span><span class="config-val">/run/ibctl/agent-paper.sock</span></div>
+            <div class="config-item"><span class="config-key">Settings Path</span><span class="config-val">/home/ibgateway/Jts_paper</span></div>
+        </div>
+    </div>
+
+
+</div>
+
+</div>
 
 {% endif %}
