@@ -242,6 +242,15 @@ async fn handle_connection(
 
     match parse_command(trimmed) {
         Some(ParsedCommand::Action(cmd)) => {
+            // Privileged commands (SETSTATE, PAUSE, EXIT) require localhost
+            if is_privileged_command(&cmd) && !is_localhost(&peer_addr.ip()) {
+                log::warn!(
+                    "Rejected privileged command from non-localhost IP {}: {}",
+                    peer_addr, trimmed,
+                );
+                writer.write_all(b"ERROR privileged command requires localhost\n").await?;
+                return Ok(());
+            }
             let cmd_name = trimmed.to_uppercase();
             match command_tx.send(cmd).await {
                 Ok(_) => {
@@ -293,6 +302,18 @@ async fn handle_connection(
     }
 
     Ok(())
+}
+
+/// Returns true if the command requires localhost-only access.
+/// Privileged commands (SETSTATE, PAUSE, EXIT) can manipulate the state machine
+/// in dangerous ways — they must not be accessible from the Docker network.
+fn is_privileged_command(cmd: &Command) -> bool {
+    matches!(cmd, Command::SetState(_) | Command::Pause | Command::Exit)
+}
+
+/// Returns true if the address is loopback (127.0.0.1 or ::1).
+fn is_localhost(addr: &IpAddr) -> bool {
+    addr.is_loopback()
 }
 
 /// Check whether a client IP is in the allow-list.
@@ -533,5 +554,55 @@ mod tests {
         assert!(matches!(parse_command("RECONNECTACCOUNT"), Some(ParsedCommand::Action(Command::ReconnectAccount))));
         assert!(matches!(parse_command("ENABLEAPI"), Some(ParsedCommand::Action(Command::EnableApi))));
         assert!(matches!(parse_command("EXIT"), Some(ParsedCommand::Action(Command::Exit))));
+    }
+
+    // --- privileged command tests ---
+
+    #[test]
+    fn test_setstate_is_privileged() {
+        assert!(is_privileged_command(&Command::SetState("Connected".into())));
+    }
+
+    #[test]
+    fn test_pause_is_privileged() {
+        assert!(is_privileged_command(&Command::Pause));
+    }
+
+    #[test]
+    fn test_exit_is_privileged() {
+        assert!(is_privileged_command(&Command::Exit));
+    }
+
+    #[test]
+    fn test_stop_is_not_privileged() {
+        assert!(!is_privileged_command(&Command::Stop));
+    }
+
+    #[test]
+    fn test_restart_is_not_privileged() {
+        assert!(!is_privileged_command(&Command::Restart));
+    }
+
+    #[test]
+    fn test_ibstatus_is_not_privileged() {
+        assert!(!is_privileged_command(&Command::IbStatus("available".into(), "".into())));
+    }
+
+    #[test]
+    fn test_localhost_ipv4() {
+        let addr: IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(is_localhost(&addr));
+    }
+
+    #[test]
+    fn test_localhost_ipv6() {
+        let addr: IpAddr = "::1".parse().unwrap();
+        assert!(is_localhost(&addr));
+    }
+
+    #[test]
+    fn test_docker_ip_not_localhost() {
+        let addr: IpAddr = "172.17.0.3".parse().unwrap();
+        assert!(!is_localhost(&addr));
     }
 }
