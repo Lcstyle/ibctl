@@ -59,7 +59,6 @@ services:
       IB_STATUS_REGION: ${IB_STATUS_REGION:-NA}
       # IB_STATUS_URL: ${IB_STATUS_URL:-}
       # IB_STATUS_BACKEND_HOSTS: ${IB_STATUS_BACKEND_HOSTS:-}
-      # IB_STATUS_BACKEND_PORT: ${IB_STATUS_BACKEND_PORT:-443}
       # IB_STATUS_FALLBACK_HOST: ${IB_STATUS_FALLBACK_HOST:-interactivebrokers.com}
 
       # --- Auto-Update (for volume-mount binary deployment) ---

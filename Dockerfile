@@ -125,7 +125,7 @@ COPY --from=setup /root/Jts /home/ibgateway/Jts
 RUN apt-get update -y \
     && apt-get upgrade -y \
     && apt-get install --no-install-recommends --yes \
-        gettext-base socat xvfb x11vnc sshpass openssh-client telnet \
+        gettext-base socat xvfb x11vnc sshpass openssh-client telnet iputils-ping \
         python3 python3-pip python3-venv websockify \
     && apt-get clean && rm -rf /var/lib/apt/lists/* \
     # Remove default ubuntu user if present

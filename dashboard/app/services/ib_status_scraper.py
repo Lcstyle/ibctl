@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import re
 import socket
+import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, time
 from enum import Enum
@@ -132,9 +133,7 @@ class ScraperConfig:
         ignore_exchanges: list[str] | None = None,
         region: str = "NA",
         backend_hosts: list[str] | None = None,
-        backend_port: int = 443,
         fallback_host: str = "interactivebrokers.com",
-        fallback_port: int = 443,
     ):
         self.url = url
         self.timeout = timeout
@@ -145,9 +144,7 @@ class ScraperConfig:
         self.ignore_exchanges = ignore_exchanges or list(SystemAlert.EXCHANGE_KEYWORDS)
         self.region = region
         self.backend_hosts = backend_hosts or ["cdc1-hb1.ibllc.com", "cdc1-hb2.ibllc.com"]
-        self.backend_port = backend_port
         self.fallback_host = fallback_host
-        self.fallback_port = fallback_port
 
 
 class IBStatusScraper:
@@ -166,31 +163,39 @@ class IBStatusScraper:
             self._session.headers.update({"User-Agent": self.USER_AGENT})
         return self._session
 
+    @staticmethod
+    def _ping(host: str, timeout: int = 3) -> bool:
+        """Ping a host via ICMP. Tests both DNS resolution and network routing."""
+        try:
+            result = subprocess.run(
+                ["ping", "-c", "1", "-W", str(timeout), host],
+                capture_output=True, timeout=timeout + 2,
+            )
+            return result.returncode == 0
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            return False
+
     def check_backends(self) -> tuple[bool, list[str]]:
-        """Check connectivity to IB backend servers (configurable via ScraperConfig).
+        """Check connectivity to IB backend servers via ICMP ping.
+
+        Ping tests both DNS resolution and network routing without requiring
+        an open TCP port. IB's backend hosts respond to ICMP but don't accept
+        TCP connections on public ports.
 
         Returns (any_reachable, list_of_reachable_hosts).
         """
         reachable = []
         for host in self.config.backend_hosts:
-            try:
-                socket.create_connection((host, self.config.backend_port), timeout=5)
+            if self._ping(host):
                 reachable.append(host)
-            except (socket.timeout, OSError):
-                continue
         return len(reachable) > 0, reachable
 
     def check_internet(self) -> bool:
-        """Check basic internet connectivity (IB backends first, then CDN fallback)."""
+        """Check basic internet connectivity (ping backends first, then CDN fallback)."""
         backends_ok, _ = self.check_backends()
         if backends_ok:
             return True
-        # Both backends unreachable — try the status page host as fallback
-        try:
-            socket.create_connection((self.config.fallback_host, self.config.fallback_port), timeout=5)
-            return True
-        except (socket.timeout, OSError):
-            return False
+        return self._ping(self.config.fallback_host)
 
     def fetch_status(self) -> IBSystemStatus:
         """Fetch and parse the IB system status page."""
@@ -198,20 +203,14 @@ class IBStatusScraper:
         if not self.check_internet():
             return IBSystemStatus(
                 status=SystemStatus.NO_INTERNET,
-                fetch_error="Internet connectivity check failed — IB backends and CDN unreachable",
+                fetch_error="Internet connectivity check failed — backends and CDN unreachable",
             )
 
-        # Check IB backends separately — website could be up while trading infra is down
+        # Backend ping is informational — if backends are down but CDN is up,
+        # we still scrape the status page (it's the authoritative source)
         backends_ok, reachable = self.check_backends()
-        if not backends_ok:
-            return IBSystemStatus(
-                status=SystemStatus.OUTAGE,
-                fetch_error="IB trading backends unreachable (cdc1-hb1/hb2.ibllc.com) — website CDN is up but trading infra may be down",
-                alerts=[SystemAlert(
-                    severity=AlertSeverity.CRITICAL,
-                    message="IB backend servers unreachable — trading infrastructure may be down",
-                )],
-            )
+        if not backends_ok and self.config.backend_hosts:
+            logger.warning("IB backend servers not responding to ping: %s", self.config.backend_hosts)
 
         session = self._get_session()
         delay = 1.0

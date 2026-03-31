@@ -125,9 +125,7 @@ def create_monitor(registry, config: dict | None = None) -> IBStatusMonitor:
         url=os.environ.get("IB_STATUS_URL", ScraperConfig().url),
         region=os.environ.get("IB_STATUS_REGION", "NA"),
         backend_hosts=backend_hosts,
-        backend_port=int(os.environ.get("IB_STATUS_BACKEND_PORT", "443")),
         fallback_host=os.environ.get("IB_STATUS_FALLBACK_HOST", "interactivebrokers.com"),
-        fallback_port=int(os.environ.get("IB_STATUS_FALLBACK_PORT", "443")),
     )
 
     return IBStatusMonitor(

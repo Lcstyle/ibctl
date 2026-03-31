@@ -56,10 +56,8 @@ ttl_seconds = 600          # fail-open TTL: if no status push within this period
 # check_interval = 300     # seconds between IB status page scrapes (default 5 min)
 # url = "https://www.interactivebrokers.com/en/software/systemStatus.php"
 # region = "NA"            # "NA", "EU", or "APAC" — which maintenance windows to monitor
-# backend_hosts = "cdc1-hb1.ibllc.com,cdc1-hb2.ibllc.com"  # IB trading backend servers
-# backend_port = 443       # port for backend connectivity check
-# fallback_host = "interactivebrokers.com"  # CDN fallback for internet check
-# fallback_port = 443
+# backend_hosts = "cdc1-hb1.ibllc.com,cdc1-hb2.ibllc.com"  # IB backend servers (checked via ICMP ping)
+# fallback_host = "interactivebrokers.com"  # CDN fallback for internet ping check
 
 [logging]
 level = "info"             # "debug", "info", "warn", or "error"
