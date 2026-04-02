@@ -603,24 +603,19 @@ impl StateMachine {
                 log::info!("JVM exited — waiting for warm restart (install4j auto-restart)");
                 self.stop_socat();
 
-                // Remove stale agent socket so the new JVM's agent can rebind
-                let _ = std::fs::remove_file(&self.config.agent.socket_path);
-
-                // Grace period: wait up to 90s for install4j to spawn a new JVM
-                let grace = std::time::Duration::from_secs(90);
+                // Grace period: wait up to 30s for install4j to spawn a new JVM
+                let grace = std::time::Duration::from_secs(30);
                 let poll = std::time::Duration::from_secs(2);
                 let start = std::time::Instant::now();
-                let mut warm_restarted = false;
+                let mut warm_restart_pid: Option<u32> = None;
 
                 while start.elapsed() < grace {
-                    // Check if a new Gateway JVM appeared for our config dir
                     if let Some(pid) = self.supervisor.find_gateway_pid() {
-                        log::info!("Warm restart detected — new JVM at PID {}", pid);
-                        warm_restarted = true;
+                        log::info!("Warm restart detected — install4j spawned new JVM at PID {}", pid);
+                        warm_restart_pid = Some(pid);
                         break;
                     }
 
-                    // Also check for interrupt commands during the wait
                     if let Some(interrupt) = self.check_interrupts().await {
                         match interrupt {
                             Interrupt::Signal(Signal::Terminate | Signal::Interrupt) => {
@@ -644,39 +639,23 @@ impl StateMachine {
                     tokio::time::sleep(poll).await;
                 }
 
-                if warm_restarted {
-                    // Wait for the agent to become healthy on the new JVM
-                    let agent_grace = std::time::Duration::from_secs(60);
-                    let agent_start = std::time::Instant::now();
-
-                    while agent_start.elapsed() < agent_grace {
-                        match self.agent_client.health().await {
-                            Ok(true) => {
-                                log::info!("Agent healthy after warm restart — resuming Connected state");
-                                // Restart socat for the new JVM
-                                self.start_socat(api_port, socat_port);
-                                // Reset client ID watcher for new JVM
-                                // (old task is still running, it'll pick up new windows)
-                                break;
-                            }
-                            _ => {
-                                self.process_queries().await;
-                                tokio::time::sleep(poll).await;
-                            }
-                        }
-                    }
-
-                    if self.agent_client.health().await.unwrap_or(false) {
-                        // Warm restart succeeded — stay in Connected loop
-                        continue;
-                    }
-                    // Agent didn't come back — fall through to cold restart
-                    log::warn!("Agent not healthy after warm restart — falling back to cold restart");
+                if let Some(pid) = warm_restart_pid {
+                    // install4j spawned a new JVM but without our -javaagent.
+                    // Kill it and relaunch with the agent attached. The session
+                    // cookies in jts.ini are still valid from the warm restart,
+                    // so Gateway will skip 2FA on the next launch.
+                    log::info!("Killing install4j JVM (PID {}) — will relaunch with agent", pid);
+                    unsafe { libc::kill(pid as i32, libc::SIGKILL); }
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
 
-                // No warm restart detected or agent didn't recover
-                log::warn!("Warm restart did not complete — initiating cold restart");
+                // Relaunch — either after killing install4j's JVM (warm restart
+                // with preserved session) or after grace period timeout (cold restart).
+                // Both paths go through Launching → WaitingForAgent → WaitingForLogin.
+                // If session cookies are valid, Gateway skips login/2FA automatically.
+                log::info!("Relaunching Gateway with agent attached");
                 client_id_task.abort();
+                let _ = std::fs::remove_file(&self.config.agent.socket_path);
                 return Ok(State::Restarting);
             }
 
