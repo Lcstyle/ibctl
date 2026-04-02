@@ -587,6 +587,29 @@ impl StateMachine {
                 self.start_socat(api_port, socat_port);
             }
 
+            // Refresh client IDs cache every 30s (slow agent call, not on hot path)
+            let should_refresh_clients = self.client_ids_last_updated
+                .map(|t| t.elapsed() > std::time::Duration::from_secs(30))
+                .unwrap_or(true);
+            if should_refresh_clients {
+                let mut ids = Vec::new();
+                if let Ok(windows) = self.agent_client.list_windows().await {
+                    for w in &windows {
+                        if let Ok(tabs_data) = self.agent_client.list_tabs(w.id).await {
+                            if let Some(tabs) = tabs_data.get("tabs").and_then(|t| t.as_array()) {
+                                for tab in tabs {
+                                    if let Some(title) = tab.get("title").and_then(|t| t.as_str()) {
+                                        ids.push(title.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                self.cached_client_ids = ids;
+                self.client_ids_last_updated = Some(std::time::Instant::now());
+            }
+
             if let Ok(windows) = self.agent_client.list_windows().await {
                 for win in &windows {
                     let title_lower = win.title.to_lowercase();

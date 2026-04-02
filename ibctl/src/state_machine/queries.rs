@@ -20,7 +20,7 @@ impl StateMachine {
     async fn handle_query(&mut self, query: Query) {
         match query {
             Query::Status(tx) => {
-                let json = self.build_status_json().await;
+                let json = self.build_status_json();
                 let _ = tx.send(json);
             }
             Query::State(tx) => {
@@ -47,7 +47,11 @@ impl StateMachine {
     }
 
     /// Build the full STATUS JSON response for the dashboard.
-    async fn build_status_json(&mut self) -> String {
+    ///
+    /// This is a HOT PATH — called on every dashboard poll (3-5s).
+    /// All data is read from in-memory fields, no agent I/O.
+    /// Client IDs are refreshed every 30s in do_connected() and cached.
+    fn build_status_json(&mut self) -> String {
         let uptime = self.start_time.elapsed().as_secs();
         let connected_uptime = self.connected_since.map(|t| t.elapsed().as_secs());
         let socat_running = self.socat_process.as_mut()
@@ -61,24 +65,8 @@ impl StateMachine {
 
         let jvm = self.supervisor.jvm_info();
 
-        // Get known client IDs from Gateway's JTabbedPane tabs
-        // Note: tabs persist after disconnect — they show "ever connected" IDs
-        let mut client_ids: Vec<String> = Vec::new();
-        if is_connected {
-            if let Ok(windows) = self.agent_client.list_windows().await {
-                for w in &windows {
-                    if let Ok(tabs_data) = self.agent_client.list_tabs(w.id).await {
-                        if let Some(tabs) = tabs_data.get("tabs").and_then(|t| t.as_array()) {
-                            for tab in tabs {
-                                if let Some(title) = tab.get("title").and_then(|t| t.as_str()) {
-                                    client_ids.push(title.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Use cached client IDs (refreshed every 30s in do_connected)
+        let client_ids = &self.cached_client_ids;
 
         serde_json::json!({
             "ready": is_connected && socat_running,
