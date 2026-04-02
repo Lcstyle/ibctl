@@ -141,26 +141,33 @@ async def state_history_partial(request: Request, mode: str | None = None):
     target_mode = mode or registry.primary_mode()
     client = registry.get_client(target_mode)
 
-    try:
-        state = await client.state()
-        state_dict = asdict(state)
-        # Convert epoch timestamps to local time using TZ from ibctl config
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-        tz_name = os.environ.get("TZ", "America/New_York")
+    # Read STATE from cache (populated by SSE background task every 2s)
+    cached_state = await registry.cached_command(target_mode, "STATE", registry.STATUS_TTL)
+    if cached_state:
+        state_dict = cached_state
+    else:
+        # Fallback: cache miss (startup or first load)
         try:
-            tz = ZoneInfo(tz_name)
-        except Exception:
-            tz = ZoneInfo("America/New_York")
-        for t in state_dict.get("history", []):
-            try:
-                epoch = int(t.get("timestamp", 0))
-                if epoch > 1000000000:
-                    t["timestamp"] = datetime.fromtimestamp(epoch, tz=tz).strftime("%I:%M:%S %p")
-            except (ValueError, TypeError):
-                pass
-    except DashboardError as e:
-        state_dict = {"current": "unreachable", "history": []}
+            state = await client.state()
+            state_dict = asdict(state)
+        except DashboardError:
+            state_dict = {"current": "unreachable", "history": []}
+
+    # Convert epoch timestamps to local time
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    tz_name = os.environ.get("TZ", "America/New_York")
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("America/New_York")
+    for t in state_dict.get("history", []):
+        try:
+            epoch = int(t.get("timestamp", 0))
+            if epoch > 1000000000:
+                t["timestamp"] = datetime.fromtimestamp(epoch, tz=tz).strftime("%I:%M:%S %p")
+        except (ValueError, TypeError):
+            pass
 
     return templates.TemplateResponse(request, "partials/state_content.html", {
         "state": state_dict,
