@@ -40,8 +40,11 @@ pub enum Command {
     Exit,
     /// Restart socat port forwarding
     RestartSocat,
-    /// Pause state machine — freeze in current state, still responds to queries
+    /// Pause state machine — freeze in current state, still responds to queries.
+    /// Optional state name sets a ceiling: pause when that state is reached.
     Pause,
+    /// Pause at a specific state (ceiling) — state machine runs until it reaches this state
+    PauseAt(String),
     /// Resume normal state transitions
     Resume,
     /// Force state machine to a specific state (God Mode)
@@ -108,7 +111,15 @@ pub(crate) fn parse_command(input: &str) -> Option<ParsedCommand> {
         Some("EXIT") => Some(ParsedCommand::Action(Command::Exit)),
         Some("RESTARTSOCAT") => Some(ParsedCommand::Action(Command::RestartSocat)),
         // State machine control commands (God Mode)
-        Some("PAUSE") => Some(ParsedCommand::Action(Command::Pause)),
+        Some("PAUSE") => {
+            // PAUSE with optional state name: "PAUSE WaitingForLogin"
+            let orig_parts: Vec<&str> = trimmed.split_whitespace().collect();
+            if let Some(state_name) = orig_parts.get(1) {
+                Some(ParsedCommand::Action(Command::PauseAt(state_name.to_string())))
+            } else {
+                Some(ParsedCommand::Action(Command::Pause))
+            }
+        }
         Some("RESUME") => Some(ParsedCommand::Action(Command::Resume)),
         Some("SETSTATE") => {
             // Use the original (non-uppercased) input to preserve state name casing
@@ -308,7 +319,7 @@ async fn handle_connection(
 /// Privileged commands (SETSTATE, PAUSE, EXIT) can manipulate the state machine
 /// in dangerous ways — they must not be accessible from the Docker network.
 fn is_privileged_command(cmd: &Command) -> bool {
-    matches!(cmd, Command::SetState(_) | Command::Pause | Command::Exit)
+    matches!(cmd, Command::SetState(_) | Command::Pause | Command::PauseAt(_) | Command::Exit)
 }
 
 /// Returns true if the address is loopback (127.0.0.1 or ::1).

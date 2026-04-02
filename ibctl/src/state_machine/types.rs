@@ -137,6 +137,7 @@ pub struct StateMachine {
     pub(super) socat_process: Option<std::process::Child>,
     pub(super) config_retries: u32,
     pub(super) paused: bool,
+    pub(super) ceiling_state: Option<State>,
     // IB System Status (pushed by dashboard or external clients via IBSTATUS command)
     pub(super) ib_system_available: bool,
     pub(super) ib_system_status: String,
@@ -170,6 +171,7 @@ impl StateMachine {
             socat_process: None,
             config_retries: 0,
             paused: false,
+            ceiling_state: None,
             ib_system_available: true,
             ib_system_status: "available".to_string(),
             ib_system_reason: String::new(),

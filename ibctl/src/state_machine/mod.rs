@@ -81,6 +81,16 @@ impl StateMachine {
             }
 
             let next = self.transition().await?;
+
+            // Ceiling check: if the next state matches the ceiling, auto-pause
+            if let Some(ref ceiling) = self.ceiling_state {
+                if &next == ceiling {
+                    log::info!("State machine reached ceiling state {} — auto-pausing", next);
+                    self.paused = true;
+                    self.ceiling_state = None;
+                }
+            }
+
             log::info!("State transition: {} -> {}", self.state, next);
 
             self.record_transition(&self.state.clone(), &next);
@@ -796,11 +806,28 @@ impl StateMachine {
             Command::Pause => {
                 log::info!("State machine PAUSED — transitions frozen");
                 self.paused = true;
+                self.ceiling_state = None;
+                Ok(())
+            }
+            Command::PauseAt(ref name) => {
+                if let Some(target) = State::from_name(name) {
+                    log::info!("State machine ceiling set: will pause at {}", target);
+                    self.ceiling_state = Some(target);
+                    // If already at the ceiling state, pause immediately
+                    if self.ceiling_state.as_ref() == Some(&self.state) {
+                        log::info!("Already at ceiling state — pausing now");
+                        self.paused = true;
+                        self.ceiling_state = None;
+                    }
+                } else {
+                    log::error!("PAUSE: unknown state '{}'", name);
+                }
                 Ok(())
             }
             Command::Resume => {
                 log::info!("State machine RESUMED — transitions active");
                 self.paused = false;
+                self.ceiling_state = None;
                 Ok(())
             }
             Command::SetState(ref name) => {

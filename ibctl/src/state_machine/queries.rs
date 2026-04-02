@@ -110,6 +110,8 @@ impl StateMachine {
                     ttl.saturating_sub(t.elapsed().as_secs())
                 }),
             },
+            "paused": self.paused,
+            "ceiling_state": self.ceiling_state.as_ref().map(|s| s.to_string()),
             "stats": self.stats,
             "client_advisory": {
                 "should_connect": should_connect && socat_running,
