@@ -570,11 +570,43 @@ impl StateMachine {
         };
         self.start_socat(api_port, socat_port);
 
+        // Spawn background task for client ID refresh (slow agent calls, must not block main loop)
+        let shared_ids = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let ids_writer = shared_ids.clone();
+        let socket_path = self.config.agent.socket_path.clone();
+        let client_id_task = tokio::spawn(async move {
+            loop {
+                // Create a fresh UDS agent connection for each refresh
+                let mut ids = Vec::new();
+                {
+                    let client = crate::agent_client::AgentClient::new(&socket_path);
+                    if let Ok(windows) = client.list_windows().await {
+                        for w in &windows {
+                            if let Ok(tabs_data) = client.list_tabs(w.id).await {
+                                if let Some(tabs) = tabs_data.get("tabs").and_then(|t| t.as_array()) {
+                                    for tab in tabs {
+                                        if let Some(title) = tab.get("title").and_then(|t| t.as_str()) {
+                                            ids.push(title.to_string());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Ok(mut locked) = ids_writer.lock() {
+                    *locked = ids;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            }
+        });
+
         let poll_interval = std::time::Duration::from_secs(5);
 
         loop {
             if !self.supervisor.is_running() {
                 log::warn!("JVM process exited unexpectedly");
+                client_id_task.abort();
                 return Ok(State::Restarting);
             }
 
@@ -587,29 +619,6 @@ impl StateMachine {
                 self.start_socat(api_port, socat_port);
             }
 
-            // Refresh client IDs cache every 30s (slow agent call, not on hot path)
-            let should_refresh_clients = self.client_ids_last_updated
-                .map(|t| t.elapsed() > std::time::Duration::from_secs(30))
-                .unwrap_or(true);
-            if should_refresh_clients {
-                let mut ids = Vec::new();
-                if let Ok(windows) = self.agent_client.list_windows().await {
-                    for w in &windows {
-                        if let Ok(tabs_data) = self.agent_client.list_tabs(w.id).await {
-                            if let Some(tabs) = tabs_data.get("tabs").and_then(|t| t.as_array()) {
-                                for tab in tabs {
-                                    if let Some(title) = tab.get("title").and_then(|t| t.as_str()) {
-                                        ids.push(title.to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                self.cached_client_ids = ids;
-                self.client_ids_last_updated = Some(std::time::Instant::now());
-            }
-
             if let Ok(windows) = self.agent_client.list_windows().await {
                 for win in &windows {
                     let title_lower = win.title.to_lowercase();
@@ -618,6 +627,7 @@ impl StateMachine {
                         log::info!("Connection lost — clicking Cancel to return to login form");
                         let _ = self.agent_client.click_button(win.id, "Cancel").await;
                         self.handler_registry.reset();
+                        client_id_task.abort();
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         return Ok(State::WaitingForLogin);
                     }
@@ -626,17 +636,27 @@ impl StateMachine {
                 }
             }
 
+            // Sync client IDs from background task (non-blocking mutex read)
+            if let Ok(ids) = shared_ids.lock() {
+                if !ids.is_empty() {
+                    self.cached_client_ids = ids.clone();
+                }
+            }
+
             self.process_queries().await;
 
             if let Some(interrupt) = self.check_interrupts().await {
                 match interrupt {
                     Interrupt::Signal(Signal::Terminate | Signal::Interrupt) => {
+                        client_id_task.abort();
                         return Ok(State::Shutdown);
                     }
                     Interrupt::Command(Command::Stop | Command::Exit) => {
+                        client_id_task.abort();
                         return Ok(State::Shutdown);
                     }
                     Interrupt::Command(Command::Restart) => {
+                        client_id_task.abort();
                         return Ok(State::Restarting);
                     }
                     Interrupt::Command(cmd) => {
@@ -644,6 +664,7 @@ impl StateMachine {
                     }
                     Interrupt::ColdRestart => {
                         log::info!("Sunday cold restart — restarting with full re-authentication");
+                        client_id_task.abort();
                         return Ok(State::Restarting);
                     }
                 }

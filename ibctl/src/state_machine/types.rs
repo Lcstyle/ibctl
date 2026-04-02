@@ -148,7 +148,6 @@ pub struct StateMachine {
     pub(super) connected_since: Option<Instant>,
     pub(super) transition_history: VecDeque<Transition>,
     pub(super) cached_client_ids: Vec<String>,
-    pub(super) client_ids_last_updated: Option<Instant>,
     pub stats: Stats,
 }
 
@@ -183,7 +182,6 @@ impl StateMachine {
             connected_since: None,
             transition_history: VecDeque::with_capacity(100),
             cached_client_ids: Vec::new(),
-            client_ids_last_updated: None,
             stats: Stats::default(),
         }
     }
