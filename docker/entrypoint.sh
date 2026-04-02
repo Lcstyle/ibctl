@@ -86,8 +86,11 @@ create_jts_ini() {
         # running headless, which makes Auto Restart fire at wrong local time.
         # Per IBC maintainer advice: overwrite TimeZone in jts.ini before launch.
         # See: https://github.com/IbcAlpha/IBC/issues/245#issuecomment-1871449053
+        # We also make the file read-only so the Gateway can't overwrite it.
         local tz="${TIME_ZONE:-America/New_York}"
+        chmod u+w "$config_dir/jts.ini" 2>/dev/null
         sed -i "s/TimeZone=.*/TimeZone=$tz/" "$config_dir/jts.ini"
+        chmod a-w "$config_dir/jts.ini"
     fi
     if [ ! -f "$config_dir/jts.ini" ]; then
         echo "Creating jts.ini in $config_dir"
