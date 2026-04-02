@@ -965,6 +965,25 @@ impl StateMachine {
                     Ok(())
                 }
             }
+            Command::SetRestartTime(ref time_str) => {
+                log::info!("SETRESTART: setting auto-restart time to {} (UTC)", time_str);
+                let settings = crate::handlers::api_config::ApiConfigSettings {
+                    master_client_id: None,
+                    read_only_api: None,
+                    bypass_order_precautions: None,
+                    allow_blind_trading: None,
+                    auto_restart_time: Some(time_str.clone()),
+                    auto_logoff_time: None,
+                };
+                let tick_ms = self.config.timing.ui_tick_ms;
+                match crate::handlers::api_config::apply_api_config(
+                    &self.agent_client, &settings, tick_ms,
+                ).await {
+                    Ok(()) => log::info!("SETRESTART: auto-restart time set to {}", time_str),
+                    Err(e) => log::error!("SETRESTART failed: {}", e),
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }

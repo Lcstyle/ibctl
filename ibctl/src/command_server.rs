@@ -51,6 +51,8 @@ pub enum Command {
     SetState(String),
     /// Set IB system status (pushed by dashboard/external clients)
     IbStatus(String, String),  // (status, reason)
+    /// Set auto-restart time via Gateway Settings UI (UTC, "HH:MM AM/PM" or "HH:MM")
+    SetRestartTime(String),
 }
 
 /// Query commands that expect a JSON response via oneshot channel.
@@ -137,6 +139,16 @@ pub(crate) fn parse_command(input: &str) -> Option<ParsedCommand> {
             let status = orig_parts.get(1).copied().unwrap_or("available").to_string();
             let reason = orig_parts.get(2).map(|s| s.trim_matches('"').to_string()).unwrap_or_default();
             Some(ParsedCommand::Action(Command::IbStatus(status, reason)))
+        }
+        // Set auto-restart time: SETRESTART 05:30 PM (UTC)
+        Some("SETRESTART") => {
+            let orig_parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
+            let time_str = orig_parts.get(1).copied().unwrap_or("").trim().to_string();
+            if time_str.is_empty() {
+                None
+            } else {
+                Some(ParsedCommand::Action(Command::SetRestartTime(time_str)))
+            }
         }
         // JSON query commands (for dashboard)
         Some("STATUS") => Some(ParsedCommand::Query(QueryType::Status)),

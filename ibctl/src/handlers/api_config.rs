@@ -46,6 +46,8 @@ impl ApiConfigSettings {
             || self.read_only_api.is_some()
             || self.bypass_order_precautions.is_some()
             || self.allow_blind_trading.is_some()
+            || self.auto_restart_time.is_some()
+            || self.auto_logoff_time.is_some()
     }
 }
 
