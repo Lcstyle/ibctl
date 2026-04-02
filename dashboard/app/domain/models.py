@@ -51,6 +51,8 @@ class GatewayStatus:
     connected_uptime_secs: int | None = None
     socat_running: bool = False
     jvm_running: bool = False
+    paused: bool = False
+    ceiling_state: str | None = None
     stats: Stats = field(default_factory=Stats)
     client_advisory: ClientAdvisory = field(
         default_factory=lambda: ClientAdvisory(
@@ -64,14 +66,19 @@ class GatewayStatus:
         advisory_data = data.get("client_advisory", {})
         stats_data = data.get("stats", {})
 
+        socat_data = data.get("socat", {})
+        jvm_data = data.get("jvm", {})
+
         return cls(
             ready=data.get("ready", False),
             state=data.get("state", "unknown"),
             trading_mode=data.get("trading_mode", "unknown"),
             uptime_secs=data.get("uptime_secs", 0),
             connected_uptime_secs=data.get("connected_uptime_secs"),
-            socat_running=data.get("socat_running", False),
-            jvm_running=data.get("jvm_running", False),
+            socat_running=socat_data.get("running", False),
+            jvm_running=jvm_data.get("alive", False),
+            paused=data.get("paused", False),
+            ceiling_state=data.get("ceiling_state"),
             stats=Stats(
                 restarts_today=stats_data.get("restarts_today", 0),
                 relogins_today=stats_data.get("relogins_today", 0),
