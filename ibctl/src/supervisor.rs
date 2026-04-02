@@ -101,10 +101,10 @@ impl Supervisor {
     /// Builds the classpath, reads vmoptions, constructs the full java command
     /// with `-javaagent:`, and spawns the child process.
     pub fn launch(&mut self) -> Result<(), SupervisorError> {
-        // RC3 FIX: Kill any existing Gateway JVM for this config dir BEFORE
-        // launching. Enforces invariant: at most one JVM per trading mode.
-        // This catches orphans from install4j auto-restart, crashes, or
-        // previous ibctl instances that didn't clean up.
+        // Safety check: kill any orphaned Gateway JVMs for this config dir
+        // before launching. Only relevant for ibctl-initiated restarts (cold
+        // restart, user RESTART command). During warm restarts, the state
+        // machine waits for install4j's auto-restarted JVM instead of calling launch().
         self.kill_orphan_gateways();
 
         let tws_path = Path::new(&self.config.tws_path);
@@ -173,11 +173,6 @@ impl Supervisor {
         cmd.arg("-Dchannel=latest");
         cmd.arg("-Dexe4j.isInstall4j=true");
         cmd.arg("-DinstallType=standalone");
-
-        // RC1 FIX: Disable Gateway's install4j auto-restart.
-        // Without this, Gateway spawns a nohup'd child on exit that ibctl
-        // doesn't track, creating orphan JVMs that fight for the same session.
-        cmd.arg("-DnoAutoRestart=true");
 
         // Main class
         cmd.arg(main_class);
@@ -337,6 +332,44 @@ impl Supervisor {
                 }
             }
         }
+    }
+
+    /// Find a Gateway JVM process for our config dir (not our tracked child).
+    /// Used during warm restart recovery to detect install4j's auto-restarted JVM.
+    /// Returns the PID if found.
+    pub fn find_gateway_pid(&self) -> Option<u32> {
+        let config_dir = if self.config.settings_path.is_empty() {
+            &self.config.tws_path
+        } else {
+            &self.config.settings_path
+        };
+
+        let marker = format!("-DjtsConfigDir={}", config_dir);
+        let our_child_pid = self.child.as_ref().map(|c| c.id());
+
+        if let Ok(entries) = std::fs::read_dir("/proc") {
+            for entry in entries.flatten() {
+                let pid_str = entry.file_name();
+                let pid_str = pid_str.to_string_lossy();
+                let pid: u32 = match pid_str.parse() {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+
+                if our_child_pid == Some(pid) {
+                    continue;
+                }
+
+                let cmdline_path = format!("/proc/{}/cmdline", pid);
+                if let Ok(cmdline) = std::fs::read_to_string(&cmdline_path) {
+                    let cmdline = cmdline.replace('\0', " ");
+                    if cmdline.contains("ibgateway.GWClient") && cmdline.contains(&marker) {
+                        return Some(pid);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Build the classpath by scanning the jars directory.

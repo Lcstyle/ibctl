@@ -600,7 +600,82 @@ impl StateMachine {
 
         loop {
             if !self.supervisor.is_running() {
-                log::warn!("JVM process exited unexpectedly");
+                log::info!("JVM exited — waiting for warm restart (install4j auto-restart)");
+                self.stop_socat();
+
+                // Remove stale agent socket so the new JVM's agent can rebind
+                let _ = std::fs::remove_file(&self.config.agent.socket_path);
+
+                // Grace period: wait up to 90s for install4j to spawn a new JVM
+                let grace = std::time::Duration::from_secs(90);
+                let poll = std::time::Duration::from_secs(2);
+                let start = std::time::Instant::now();
+                let mut warm_restarted = false;
+
+                while start.elapsed() < grace {
+                    // Check if a new Gateway JVM appeared for our config dir
+                    if let Some(pid) = self.supervisor.find_gateway_pid() {
+                        log::info!("Warm restart detected — new JVM at PID {}", pid);
+                        warm_restarted = true;
+                        break;
+                    }
+
+                    // Also check for interrupt commands during the wait
+                    if let Some(interrupt) = self.check_interrupts().await {
+                        match interrupt {
+                            Interrupt::Signal(Signal::Terminate | Signal::Interrupt) => {
+                                client_id_task.abort();
+                                return Ok(State::Shutdown);
+                            }
+                            Interrupt::Command(Command::Stop | Command::Exit) => {
+                                client_id_task.abort();
+                                return Ok(State::Shutdown);
+                            }
+                            Interrupt::Command(Command::Restart) => {
+                                log::info!("Restart command during warm restart wait — doing cold restart");
+                                client_id_task.abort();
+                                return Ok(State::Restarting);
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    self.process_queries().await;
+                    tokio::time::sleep(poll).await;
+                }
+
+                if warm_restarted {
+                    // Wait for the agent to become healthy on the new JVM
+                    let agent_grace = std::time::Duration::from_secs(60);
+                    let agent_start = std::time::Instant::now();
+
+                    while agent_start.elapsed() < agent_grace {
+                        match self.agent_client.health().await {
+                            Ok(true) => {
+                                log::info!("Agent healthy after warm restart — resuming Connected state");
+                                // Restart socat for the new JVM
+                                self.start_socat(api_port, socat_port);
+                                // Reset client ID watcher for new JVM
+                                // (old task is still running, it'll pick up new windows)
+                                break;
+                            }
+                            _ => {
+                                self.process_queries().await;
+                                tokio::time::sleep(poll).await;
+                            }
+                        }
+                    }
+
+                    if self.agent_client.health().await.unwrap_or(false) {
+                        // Warm restart succeeded — stay in Connected loop
+                        continue;
+                    }
+                    // Agent didn't come back — fall through to cold restart
+                    log::warn!("Agent not healthy after warm restart — falling back to cold restart");
+                }
+
+                // No warm restart detected or agent didn't recover
+                log::warn!("Warm restart did not complete — initiating cold restart");
                 client_id_task.abort();
                 return Ok(State::Restarting);
             }
