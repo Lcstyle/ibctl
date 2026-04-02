@@ -100,7 +100,15 @@ impl Supervisor {
     ///
     /// Builds the classpath, reads vmoptions, constructs the full java command
     /// with `-javaagent:`, and spawns the child process.
+    ///
+    /// If `autorestart_path` is provided, passes `-Drestart=<path>` to the JVM
+    /// which tells Gateway to resume the existing session without 2FA (warm restart).
     pub fn launch(&mut self) -> Result<(), SupervisorError> {
+        self.launch_with_restart(None)
+    }
+
+    /// Launch with optional warm restart session path.
+    pub fn launch_with_restart(&mut self, autorestart_path: Option<&str>) -> Result<(), SupervisorError> {
         // Safety check: kill any orphaned Gateway JVMs for this config dir
         // before launching. Only relevant for ibctl-initiated restarts (cold
         // restart, user RESTART command). During warm restarts, the state
@@ -173,6 +181,12 @@ impl Supervisor {
         cmd.arg("-Dchannel=latest");
         cmd.arg("-Dexe4j.isInstall4j=true");
         cmd.arg("-DinstallType=standalone");
+
+        // Warm restart: pass session token path so Gateway skips 2FA
+        if let Some(restart_path) = autorestart_path {
+            log::info!("Warm restart: passing -Drestart={}", restart_path);
+            cmd.arg(format!("-Drestart={}", restart_path));
+        }
 
         // Main class
         cmd.arg(main_class);
@@ -332,6 +346,33 @@ impl Supervisor {
                 }
             }
         }
+    }
+
+    /// Find the `autorestart` session token file written by Gateway before a warm restart.
+    /// Returns the path to the directory containing the file (passed as `-Drestart=<path>`).
+    /// The file lives at `<settings_path>/<session_hash>/autorestart`.
+    pub fn find_autorestart_path(&self) -> Option<String> {
+        let settings_dir = if self.config.settings_path.is_empty() {
+            &self.config.tws_path
+        } else {
+            &self.config.settings_path
+        };
+
+        let base = Path::new(settings_dir);
+        if let Ok(entries) = std::fs::read_dir(base) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let autorestart = path.join("autorestart");
+                    if autorestart.exists() {
+                        let dir_path = path.display().to_string();
+                        log::info!("Found autorestart token at {}", autorestart.display());
+                        return Some(dir_path);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Find a Gateway JVM process for our config dir (not our tracked child).

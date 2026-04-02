@@ -172,6 +172,18 @@ impl StateMachine {
     }
 
     async fn do_launch(&mut self) -> Result<State, StateMachineError> {
+        // Check for warm restart: if the autorestart token exists, pass it
+        // to Gateway via -Drestart so it resumes the session without 2FA.
+        if self.warm_restart_pending {
+            self.warm_restart_pending = false;
+            if let Some(restart_path) = self.supervisor.find_autorestart_path() {
+                log::info!("Warm restart: launching with session token from {}", restart_path);
+                self.supervisor.launch_with_restart(Some(&restart_path))?;
+                return Ok(State::WaitingForAgent);
+            }
+            log::warn!("Warm restart requested but no autorestart token found — doing cold launch");
+        }
+
         log::info!("Launching IB Gateway JVM");
         self.supervisor.launch()?;
         Ok(State::WaitingForAgent)
@@ -654,6 +666,7 @@ impl StateMachine {
                 // Both paths go through Launching → WaitingForAgent → WaitingForLogin.
                 // If session cookies are valid, Gateway skips login/2FA automatically.
                 log::info!("Relaunching Gateway with agent attached");
+                self.warm_restart_pending = true;
                 client_id_task.abort();
                 let _ = std::fs::remove_file(&self.config.agent.socket_path);
                 return Ok(State::Restarting);
