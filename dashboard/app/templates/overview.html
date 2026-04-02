@@ -3,7 +3,8 @@
 <div id="overview-content"
      hx-get="/partials/overview"
      hx-trigger="load, every 5s, ibctl-refresh"
-     hx-swap="innerHTML">
+     hx-swap="innerHTML"
+     data-fixed-rate>
     <div class="loading">Connecting to ibctl...</div>
 </div>
 {% endblock %}

@@ -84,11 +84,11 @@
             localStorage.setItem('ibctl-refresh-rate', rate);
             // Update all HTMX polling elements
             document.querySelectorAll('[hx-trigger]').forEach(function(el) {
+                if (el.hasAttribute('data-fixed-rate')) return; // Skip fixed-rate elements
                 var trigger = el.getAttribute('hx-trigger');
                 if (trigger && trigger.includes('every')) {
                     var newTrigger = trigger.replace(/every\s+\d+s/, 'every ' + rate + 's');
                     el.setAttribute('hx-trigger', newTrigger);
-                    // Re-process so HTMX picks up the new interval
                     htmx.process(el);
                 }
             });
