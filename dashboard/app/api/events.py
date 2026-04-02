@@ -34,11 +34,10 @@ async def events(request: Request):
             try:
                 instances = await registry.all_status()
 
-                # Also cache STATE and CONFIG for each mode
-                # (used by state-history and config partials — avoids TCP from HTTP endpoints)
+                # Also cache STATE for each mode (state-history partial reads from cache)
+                # CONFIG is cached with 300s TTL and only fetched on first miss
                 for m in registry.modes():
                     await registry.cached_command(m, "STATE", registry.STATUS_TTL)
-                    await registry.cached_command(m, "CONFIG", registry.CONFIG_TTL)
 
                 for inst in instances:
                     mode = inst.mode

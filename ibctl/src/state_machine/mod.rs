@@ -571,32 +571,27 @@ impl StateMachine {
         self.start_socat(api_port, socat_port);
 
         // Spawn background task for client ID refresh (slow agent calls, must not block main loop)
-        let shared_ids = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let ids_writer = shared_ids.clone();
+        // Uses tokio::sync::watch — lock-free, change-driven updates
+        let (ids_tx, mut ids_rx) = tokio::sync::watch::channel(Vec::<String>::new());
         let socket_path = self.config.agent.socket_path.clone();
         let client_id_task = tokio::spawn(async move {
             loop {
-                // Create a fresh UDS agent connection for each refresh
                 let mut ids = Vec::new();
-                {
-                    let client = crate::agent_client::AgentClient::new(&socket_path);
-                    if let Ok(windows) = client.list_windows().await {
-                        for w in &windows {
-                            if let Ok(tabs_data) = client.list_tabs(w.id).await {
-                                if let Some(tabs) = tabs_data.get("tabs").and_then(|t| t.as_array()) {
-                                    for tab in tabs {
-                                        if let Some(title) = tab.get("title").and_then(|t| t.as_str()) {
-                                            ids.push(title.to_string());
-                                        }
+                let client = crate::agent_client::AgentClient::new(&socket_path);
+                if let Ok(windows) = client.list_windows().await {
+                    for w in &windows {
+                        if let Ok(tabs_data) = client.list_tabs(w.id).await {
+                            if let Some(tabs) = tabs_data.get("tabs").and_then(|t| t.as_array()) {
+                                for tab in tabs {
+                                    if let Some(title) = tab.get("title").and_then(|t| t.as_str()) {
+                                        ids.push(title.to_string());
                                     }
                                 }
                             }
                         }
                     }
                 }
-                if let Ok(mut locked) = ids_writer.lock() {
-                    *locked = ids;
-                }
+                let _ = ids_tx.send(ids);
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             }
         });
@@ -636,10 +631,11 @@ impl StateMachine {
                 }
             }
 
-            // Sync client IDs from background task (non-blocking mutex read)
-            if let Ok(ids) = shared_ids.lock() {
+            // Sync client IDs from background task (lock-free watch channel)
+            if ids_rx.has_changed().unwrap_or(false) {
+                let ids = ids_rx.borrow_and_update().clone();
                 if !ids.is_empty() {
-                    self.cached_client_ids = ids.clone();
+                    self.cached_client_ids = ids;
                 }
             }
 
