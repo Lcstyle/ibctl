@@ -18,8 +18,8 @@
         {% for t in state.get('history', []) %}
         <tr>
             <td style="padding:3px 8px; color:#a1a1aa; font-family:'SF Mono',monospace; font-size:11px;">{{ t.timestamp }}</td>
-            <td style="padding:3px 8px; color:#a1a1aa; font-family:'SF Mono',monospace; font-size:11px;">{{ t.from_state }}</td>
-            <td style="padding:3px 8px; color:#a1a1aa; font-family:'SF Mono',monospace; font-size:11px;">{{ t.to_state }}</td>
+            <td style="padding:3px 8px; color:#a1a1aa; font-family:'SF Mono',monospace; font-size:11px;">{{ t.get('from_state') or t.get('from', '') }}</td>
+            <td style="padding:3px 8px; color:#a1a1aa; font-family:'SF Mono',monospace; font-size:11px;">{{ t.get('to_state') or t.get('to', '') }}</td>
         </tr>
         {% endfor %}
         {% if not state.get('history') %}
