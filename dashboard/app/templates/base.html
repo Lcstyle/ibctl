@@ -45,7 +45,7 @@
                 console.log('State change:', d.mode, d.from, '→', d.to);
                 // Trigger refresh of all HTMX-polled elements immediately
                 document.querySelectorAll('[hx-trigger]').forEach(function(el) {
-                    if (el.getAttribute('hx-get')) htmx.trigger(el, 'load');
+                    if (el.getAttribute('hx-get')) htmx.trigger(el, 'ibctl-refresh');
                 });
             });
 
@@ -53,7 +53,7 @@
                 var d = JSON.parse(e.data);
                 console.log('Ready change:', d.mode, d.ready ? 'READY' : 'NOT READY');
                 document.querySelectorAll('[hx-trigger]').forEach(function(el) {
-                    if (el.getAttribute('hx-get')) htmx.trigger(el, 'load');
+                    if (el.getAttribute('hx-get')) htmx.trigger(el, 'ibctl-refresh');
                 });
             });
 

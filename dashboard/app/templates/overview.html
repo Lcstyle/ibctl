@@ -2,7 +2,7 @@
 {% block content %}
 <div id="overview-content"
      hx-get="/partials/overview"
-     hx-trigger="load, every 30s"
+     hx-trigger="load, every 30s, ibctl-refresh"
      hx-swap="innerHTML">
     <div class="loading">Connecting to ibctl...</div>
 </div>
