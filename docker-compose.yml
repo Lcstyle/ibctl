@@ -8,6 +8,7 @@ services:
       dockerfile: Dockerfile
     container_name: ibctl-gateway
     restart: unless-stopped
+    oom_score_adj: -1000
     environment:
       # --- Display ---
       DISPLAY: ":1"
