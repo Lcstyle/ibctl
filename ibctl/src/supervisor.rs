@@ -349,7 +349,8 @@ impl Supervisor {
     }
 
     /// Find the `autorestart` session token file written by Gateway before a warm restart.
-    /// Returns the path to the directory containing the file (passed as `-Drestart=<path>`).
+    /// Returns the subdirectory name (session hash) containing the file.
+    /// IBC passes just the subdirectory name via `-Drestart=<hash>`, not the full path.
     /// The file lives at `<settings_path>/<session_hash>/autorestart`.
     pub fn find_autorestart_path(&self) -> Option<String> {
         let settings_dir = if self.config.settings_path.is_empty() {
@@ -365,9 +366,11 @@ impl Supervisor {
                 if path.is_dir() {
                     let autorestart = path.join("autorestart");
                     if autorestart.exists() {
-                        let dir_path = path.display().to_string();
-                        log::info!("Found autorestart token at {}", autorestart.display());
-                        return Some(dir_path);
+                        // Return just the directory name (session hash), not the full path
+                        if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
+                            log::info!("Found autorestart token at {}", autorestart.display());
+                            return Some(dir_name.to_string());
+                        }
                     }
                 }
             }

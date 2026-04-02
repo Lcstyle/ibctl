@@ -175,13 +175,16 @@ impl StateMachine {
         // Check for warm restart: if the autorestart token exists, pass it
         // to Gateway via -Drestart so it resumes the session without 2FA.
         if self.warm_restart_pending {
-            self.warm_restart_pending = false;
-            if let Some(restart_path) = self.supervisor.find_autorestart_path() {
-                log::info!("Warm restart: launching with session token from {}", restart_path);
-                self.supervisor.launch_with_restart(Some(&restart_path))?;
+            if let Some(restart_hash) = self.supervisor.find_autorestart_path() {
+                log::info!("Warm restart: launching with -Drestart={}", restart_hash);
+                self.supervisor.launch_with_restart(Some(&restart_hash))?;
+                // Keep warm_restart_pending=true through the auth flow so
+                // do_wait_for_login and do_authenticate don't touch the login window.
+                // Gateway handles session resumption itself.
                 return Ok(State::WaitingForAgent);
             }
             log::warn!("Warm restart requested but no autorestart token found — doing cold launch");
+            self.warm_restart_pending = false;
         }
 
         log::info!("Launching IB Gateway JVM");
@@ -216,6 +219,50 @@ impl StateMachine {
     }
 
     async fn do_wait_for_login(&mut self) -> Result<State, StateMachineError> {
+        // Warm restart: Gateway handles its own re-authentication via -Drestart.
+        // Don't touch the login window — just wait for Gateway to reach the main
+        // trading window. This mirrors IBC's SessionManager.isRestart() behavior.
+        if self.warm_restart_pending {
+            log::info!("Warm restart: waiting for Gateway to self-authenticate (not touching login)");
+            let max_wait = std::time::Duration::from_secs(120);
+            let poll_interval = std::time::Duration::from_secs(2);
+            let start = std::time::Instant::now();
+
+            loop {
+                if !self.supervisor.is_running() {
+                    self.warm_restart_pending = false;
+                    return Ok(State::Error("JVM exited during warm restart login".into()));
+                }
+
+                if let Ok(windows) = self.agent_client.list_windows().await {
+                    for w in &windows {
+                        let t = w.title.to_lowercase();
+                        // Main Gateway window with API status = warm restart succeeded
+                        if (t.contains("ib gateway") || t.contains("ibkr gateway"))
+                            && !t.contains("login")
+                            && !t.contains("configuration")
+                        {
+                            // Check if it has the connection status bar (main window, not login)
+                            if w.bounds.as_ref().map(|b| b.width > 400).unwrap_or(false) {
+                                log::info!("Warm restart: Gateway self-authenticated — main window detected");
+                                self.warm_restart_pending = false;
+                                return Ok(State::DismissingPopups);
+                            }
+                        }
+                    }
+                }
+
+                self.process_queries().await;
+
+                if start.elapsed() > max_wait {
+                    log::warn!("Warm restart: Gateway did not self-authenticate within {}s — falling back to cold auth", max_wait.as_secs());
+                    self.warm_restart_pending = false;
+                    return Ok(State::WaitingForLogin); // recurse as cold
+                }
+                tokio::time::sleep(poll_interval).await;
+            }
+        }
+
         log::info!("Waiting for login window to appear");
         let max_wait = std::time::Duration::from_secs(120);
         let poll_interval = std::time::Duration::from_millis(500);
