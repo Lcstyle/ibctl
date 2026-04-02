@@ -99,20 +99,28 @@ class InstanceRegistry:
         return await self.cached_command(mode, "CONFIG", self.CONFIG_TTL)
 
     def cached_status_raw(self, mode: str) -> dict | None:
-        """Read cached STATUS dict without opening TCP. Returns None if no cache."""
+        """Read cached STATUS dict without opening TCP. Returns None if no cache.
+
+        Returns data even if TTL-expired — stale data beats "unreachable".
+        The TTL only governs when the SSE background task re-fetches via TCP.
+        """
         cache_key = f"{mode}:STATUS"
         cached = self._cache.get(cache_key)
-        if cached and cached.valid:
+        if cached:
             return cached.data
         return None
 
     def cached_all_status(self) -> list[InstanceStatus]:
-        """Read cached status for all instances. Never opens TCP."""
+        """Read cached status for all instances. Never opens TCP.
+
+        Returns data even if TTL-expired — stale data beats "unreachable".
+        Only returns error if cache has never been populated (true startup).
+        """
         results = []
         for mode in self._clients:
             cache_key = f"{mode}:STATUS"
             cached = self._cache.get(cache_key)
-            if cached and cached.valid:
+            if cached:
                 results.append(InstanceStatus(mode=mode, status=cached.data))
             else:
                 results.append(InstanceStatus(mode=mode, error="Starting up — cache not yet populated"))
