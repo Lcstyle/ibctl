@@ -34,6 +34,10 @@ async def events(request: Request):
             try:
                 instances = await registry.all_status()
 
+                # Also cache STATE for each mode (used by state-history partial)
+                for m in registry.modes():
+                    await registry.cached_command(m, "STATE", registry.STATUS_TTL)
+
                 for inst in instances:
                     mode = inst.mode
                     status = inst.status or {}

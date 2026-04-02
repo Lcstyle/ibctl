@@ -1,4 +1,10 @@
-"""Status API endpoint — primary integration point for external clients."""
+"""Status API endpoint — primary integration point for external clients.
+
+Reads from the InstanceRegistry's in-memory cache (populated by the SSE
+background task every 2s). Never opens TCP connections to ibctl directly.
+TCP fallback only during the first few seconds after startup when the
+cache hasn't been populated yet.
+"""
 
 from __future__ import annotations
 
@@ -6,8 +12,10 @@ import logging
 from dataclasses import asdict
 
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
 from app.domain.errors import DashboardError
+from app.domain.models import GatewayStatus
 
 logger = logging.getLogger("dashboard.api.status")
 router = APIRouter()
@@ -17,12 +25,26 @@ router = APIRouter()
 async def get_status(request: Request, mode: str | None = None):
     """Full gateway status with client advisory.
 
-    This is the primary endpoint for API clients to determine
-    whether the gateway is ready for connections.
-    Pass ?mode=paper or ?mode=live to query a specific instance.
+    Reads from cache (populated by SSE background task). Falls back to
+    TCP only if cache is empty (first few seconds after startup).
     """
     registry = request.app.state.instance_registry
     target_mode = mode or registry.primary_mode()
+
+    # Cache-first: read from in-memory cache (no TCP)
+    cached = registry.cached_status_raw(target_mode)
+    if cached:
+        status = GatewayStatus.from_json(cached)
+        response_data = asdict(status)
+        age = registry.cache_age(target_mode)
+        headers = {}
+        if age is not None:
+            headers["X-Cache-Age"] = str(round(age, 1))
+            if age > 10.0:
+                response_data["_stale"] = True
+        return JSONResponse(content=response_data, headers=headers)
+
+    # Fallback: cache not yet populated (startup)
     client = registry.get_client(target_mode)
     try:
         status = await client.status()
@@ -47,12 +69,20 @@ async def get_status(request: Request, mode: str | None = None):
 async def get_status_raw(request: Request, mode: str | None = None):
     """Raw ibctl STATUS pass-through — no model translation.
 
-    Used by the State page dial which needs all fields (paused,
-    ceiling_state, jvm.alive, socat.running, etc.) without the
-    lossy GatewayStatus model in between.
+    Reads from cache. Used by the State page dial and SSE-driven updates.
     """
     registry = request.app.state.instance_registry
     target_mode = mode or registry.primary_mode()
+
+    # Cache-first
+    cached = registry.cached_status_raw(target_mode)
+    if cached:
+        age = registry.cache_age(target_mode)
+        if age is not None and age > 10.0:
+            cached = {**cached, "_stale": True}
+        return cached
+
+    # Fallback: cache not yet populated
     client = registry.get_client(target_mode)
     try:
         return await client.status_raw()

@@ -24,23 +24,29 @@ logger = logging.getLogger("dashboard.registry")
 
 
 class _CachedResponse:
-    """Simple TTL cache entry."""
-    __slots__ = ("data", "expires")
+    """TTL cache entry with age tracking."""
+    __slots__ = ("data", "expires", "written_at")
 
     def __init__(self, data: dict | str, ttl: float):
         self.data = data
+        self.written_at = time.monotonic()
         self.expires = time.monotonic() + ttl
 
     @property
     def valid(self) -> bool:
         return time.monotonic() < self.expires
 
+    @property
+    def age(self) -> float:
+        """Seconds since this cache entry was written."""
+        return time.monotonic() - self.written_at
+
 
 class InstanceRegistry:
     """Manages connections to multiple ibctl instances with response caching."""
 
     # Cache TTLs in seconds
-    STATUS_TTL = 10.0   # Quick navigation between pages hits cache
+    STATUS_TTL = 15.0   # SSE background task refreshes every 2s; 15s is a safety net
     CONFIG_TTL = 300.0  # Config doesn't change at runtime (5 min)
 
     def __init__(
@@ -91,6 +97,34 @@ class InstanceRegistry:
     async def cached_config(self, mode: str) -> dict | None:
         """Get CONFIG with 60s TTL cache."""
         return await self.cached_command(mode, "CONFIG", self.CONFIG_TTL)
+
+    def cached_status_raw(self, mode: str) -> dict | None:
+        """Read cached STATUS dict without opening TCP. Returns None if no cache."""
+        cache_key = f"{mode}:STATUS"
+        cached = self._cache.get(cache_key)
+        if cached and cached.valid:
+            return cached.data
+        return None
+
+    def cached_all_status(self) -> list[InstanceStatus]:
+        """Read cached status for all instances. Never opens TCP."""
+        results = []
+        for mode in self._clients:
+            cache_key = f"{mode}:STATUS"
+            cached = self._cache.get(cache_key)
+            if cached and cached.valid:
+                results.append(InstanceStatus(mode=mode, status=cached.data))
+            else:
+                results.append(InstanceStatus(mode=mode, error="Starting up — cache not yet populated"))
+        return results
+
+    def cache_age(self, mode: str) -> float | None:
+        """Seconds since cache was last written for this mode. None if no cache."""
+        cache_key = f"{mode}:STATUS"
+        cached = self._cache.get(cache_key)
+        if cached:
+            return cached.age
+        return None
 
     def invalidate(self, mode: str | None = None):
         """Clear cache for a mode or all modes."""

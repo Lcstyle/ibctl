@@ -79,12 +79,12 @@ async def overview_partial(request: Request):
     registry = request.app.state.instance_registry
     templates = request.app.state.templates
 
-    instances = await registry.all_status()
+    instances = registry.cached_all_status()
     instances_data = [
         {
             "mode": inst.mode,
             "status": inst.status or {"ready": False, "state": "unreachable"},
-            "state_data": inst.state_data,
+            "state_data": getattr(inst, 'state_data', None),
             "error": inst.error,
         }
         for inst in instances
@@ -267,8 +267,8 @@ async def ib_status_partial(request: Request):
             for w in scraper_status.weekend_resets
         ]
 
-    # Get per-instance ib_system from ibctl
-    instances = await registry.all_status()
+    # Get per-instance ib_system from ibctl (cache read, no TCP)
+    instances = registry.cached_all_status()
     instances_data = [
         {"mode": i.mode, "status": i.status, "error": i.error}
         for i in instances

@@ -285,7 +285,7 @@
 
 <div class="tp7-history" id="state-content"
      hx-get="/partials/state-history?mode={{ default_mode }}"
-     hx-trigger="load, every 3s"
+     hx-trigger="load"
      hx-swap="innerHTML">
     <div class="loading">Loading...</div>
 </div>
@@ -481,68 +481,63 @@ function sendCmd(command, needsConfirm, confirmMsg) {
     }
 }
 
-// Poll status
-async function updateReel() {
-    try {
-        var resp = await fetch('/api/v1/status/raw?mode=' + getMode());
-        var data = await resp.json();
-        var state = data.state || '—';
-        if (state === 'unreachable' || state === '—') return; // Keep last known good state
+// Update dial from SSE-pushed data (no fetch, no TCP)
+function updateReelFromData(data) {
+    var state = data.state || '—';
+    if (state === 'unreachable' || state === '—') return;
 
-        var uptime = data.uptime_secs || 0;
-        var h = Math.floor(uptime / 3600);
-        var m = Math.floor((uptime % 3600) / 60);
-        var s = uptime % 60;
+    var uptime = data.uptime_secs || 0;
+    var h = Math.floor(uptime / 3600);
+    var m = Math.floor((uptime % 3600) / 60);
+    var s = uptime % 60;
 
-        document.getElementById('oled-state').textContent = state;
-        document.getElementById('oled-uptime').textContent = h + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+    document.getElementById('oled-state').textContent = state;
+    document.getElementById('oled-uptime').textContent = h + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
 
-        var idx = STATES.indexOf(state);
-        if (idx === -1) return; // Unknown state — don't move needle
-        currentStateIdx = idx;
-        if (!isDragging) setNeedle(idx);
+    var idx = STATES.indexOf(state);
+    if (idx === -1) return;
+    currentStateIdx = idx;
+    if (!isDragging) setNeedle(idx);
 
-        // Sync paused/ceiling from server
-        isPaused = !!data.paused;
-        ceilingState = data.ceiling_state || null;
-        updateCeilingDisplay();
+    isPaused = !!data.paused;
+    ceilingState = data.ceiling_state || null;
+    updateCeilingDisplay();
 
-        // Update pause button visual
-        var pauseBtn = document.getElementById('btn-pause');
-        if (pauseBtn) pauseBtn.classList.toggle('active', isPaused);
+    var pauseBtn = document.getElementById('btn-pause');
+    if (pauseBtn) pauseBtn.classList.toggle('active', isPaused);
 
-        // Spin reels when active and not paused
-        var innerReel = document.getElementById('inner-reel');
-        var outerRing = document.querySelector('.tp7-speedo-ring');
-        var isActive = state !== 'Shutdown' && !state.startsWith('Error');
-        if (!isPaused && isActive) {
-            innerReel.classList.add('spinning');
-            outerRing.classList.add('spinning');
-        } else {
-            innerReel.classList.remove('spinning');
-            outerRing.classList.remove('spinning');
-        }
-        updateButtonStates(s);
-    } catch(e) {
-        console.debug('updateReel poll failed (transient):', e.message || e);
-        // Don't reset the dial — keep last known good state
+    var innerReel = document.getElementById('inner-reel');
+    var outerRing = document.querySelector('.tp7-speedo-ring');
+    var isActive = state !== 'Shutdown' && !state.startsWith('Error');
+    if (!isPaused && isActive) {
+        innerReel.classList.add('spinning');
+        outerRing.classList.add('spinning');
+    } else {
+        innerReel.classList.remove('spinning');
+        outerRing.classList.remove('spinning');
     }
+    updateButtonStates(s);
 }
 
 // Init
 buildSpeedo();
 setNeedle(0);
-// Poll as fallback, but SSE events trigger immediate updates
-setInterval(updateReel, 5000);
-updateReel();
 
-// SSE-driven instant updates — hooks into the base template's EventSource
-(function() {
-    var src = new EventSource('/api/v1/events');
-    src.addEventListener('state_change', function() { updateReel(); updateMobile(); });
-    src.addEventListener('ready_change', function() { updateReel(); updateMobile(); });
-    src.onerror = function() { setTimeout(function() { src.close(); }, 5000); };
+// One-time fetch for initial state (before first SSE event arrives)
+(async function() {
+    try {
+        var resp = await fetch('/api/v1/status/raw?mode=' + getMode());
+        var data = await resp.json();
+        updateReelFromData(data);
+    } catch(e) {}
 })();
+
+// SSE-driven updates — listen to base.html's EventSource via custom event
+window.addEventListener('ibctl-status', function(e) {
+    var instances = e.detail || [];
+    var inst = instances.find(function(i) { return i.mode === getMode(); });
+    if (inst && inst.status) updateReelFromData(inst.status);
+});
 
 // Mobile mode selector
 var mModeSelect = document.getElementById('m-mode-select');
@@ -602,29 +597,31 @@ function updateButtonStates(state) {
     document.querySelectorAll('.tp7-btn-stop').forEach(function(b) { b.style.opacity = isStopped ? '0.3' : '1'; b.style.pointerEvents = isStopped ? 'none' : 'auto'; });
 }
 
-// Update mobile display
-async function updateMobile() {
-    try {
-        var r = await fetch('/api/v1/status?mode=' + getMode());
-        var d = await r.json();
-        var s = d.state || '—';
-        var u = d.uptime_secs || 0;
-        var h = Math.floor(u/3600), m = Math.floor((u%3600)/60), sec = u%60;
-        var el = document.getElementById('m-state-display');
-        if (el) {
-            el.textContent = s + (d.paused ? ' ⏸' : '');
-            el.className = s === 'Connected' ? 'status-connected' : s.startsWith('Error') ? 'status-error' : 'status-warning';
-        }
-        var ut = document.getElementById('m-uptime');
-        if (ut) ut.textContent = h + ':' + String(m).padStart(2,'0') + ':' + String(sec).padStart(2,'0');
-        isPaused = !!d.paused;
-        ceilingState = d.ceiling_state || null;
-        updateCeilingDisplay();
-        updateButtonStates(s);
-    } catch(e) {}
+// Update mobile display from SSE data (no fetch, no TCP)
+function updateMobileFromData(data) {
+    var s = data.state || '—';
+    if (s === 'unreachable' || s === '—') return;
+    var u = data.uptime_secs || 0;
+    var h = Math.floor(u/3600), m = Math.floor((u%3600)/60), sec = u%60;
+    var el = document.getElementById('m-state-display');
+    if (el) {
+        el.textContent = s + (data.paused ? ' ⏸' : '');
+        el.className = s === 'Connected' ? 'status-connected' : s.startsWith('Error') ? 'status-error' : 'status-warning';
+    }
+    var ut = document.getElementById('m-uptime');
+    if (ut) ut.textContent = h + ':' + String(m).padStart(2,'0') + ':' + String(sec).padStart(2,'0');
+    isPaused = !!data.paused;
+    ceilingState = data.ceiling_state || null;
+    updateCeilingDisplay();
+    updateButtonStates(s);
 }
-setInterval(updateMobile, 3000);
-updateMobile();
+
+// SSE also drives mobile updates (same listener, different function)
+window.addEventListener('ibctl-status', function(e) {
+    var instances = e.detail || [];
+    var inst = instances.find(function(i) { return i.mode === getMode(); });
+    if (inst && inst.status) updateMobileFromData(inst.status);
+});
 
 document.addEventListener('htmx:configRequest', function(evt) {
     if (evt.detail.elt.id === 'state-content') evt.detail.path = '/partials/state-history?mode=' + getMode();

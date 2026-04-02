@@ -45,6 +45,8 @@ async def send_command(request: Request, body: CommandRequest):
 
     try:
         result = await client.send_command(command)
+        # Invalidate cache so SSE picks up new state on next poll
+        registry.invalidate(target_mode)
         logger.info("Command '%s' sent to %s: %s", command, target_mode, result)
         return {"ok": True, "command": command, "mode": target_mode, "result": result}
     except DashboardError as e:

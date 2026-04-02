@@ -78,6 +78,14 @@ async def client(fake_client, settings):
     app = create_app(settings=settings)
     app.state.ibctl_client = fake_client  # Replace real client with fake
 
+    # Pre-populate registry cache so cache-first endpoints work in tests
+    registry = app.state.instance_registry
+    from dataclasses import asdict
+    from app.instance_registry import _CachedResponse
+    status_dict = asdict(fake_client._status)
+    for mode in registry.modes():
+        registry._cache[f"{mode}:STATUS"] = _CachedResponse(status_dict, registry.STATUS_TTL)
+
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c

@@ -57,6 +57,14 @@
                 });
             });
 
+            // Status heartbeat — dispatch custom event for page-specific JS
+            evtSource.addEventListener('status', function(e) {
+                try {
+                    var d = JSON.parse(e.data);
+                    window.dispatchEvent(new CustomEvent('ibctl-status', {detail: d}));
+                } catch(err) {}
+            });
+
             evtSource.onerror = function() {
                 // Reconnect after 5s on error
                 setTimeout(connectSSE, 5000);
