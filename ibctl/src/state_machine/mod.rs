@@ -172,19 +172,14 @@ impl StateMachine {
     }
 
     async fn do_launch(&mut self) -> Result<State, StateMachineError> {
-        // Check for warm restart: if the autorestart token exists, pass it
-        // to Gateway via -Drestart so it resumes the session without 2FA.
-        if self.warm_restart_pending {
-            if let Some(restart_hash) = self.supervisor.find_autorestart_path() {
-                log::info!("Warm restart: launching with -Drestart={}", restart_hash);
-                self.supervisor.launch_with_restart(Some(&restart_hash))?;
-                // Keep warm_restart_pending=true through the auth flow so
-                // do_wait_for_login and do_authenticate don't touch the login window.
-                // Gateway handles session resumption itself.
-                return Ok(State::WaitingForAgent);
-            }
-            log::warn!("Warm restart requested but no autorestart token found — doing cold launch");
-            self.warm_restart_pending = false;
+        // Check for warm restart: use the captured autorestart hash to pass
+        // -Drestart so Gateway resumes the session without 2FA.
+        if let Some(ref restart_hash) = self.warm_restart_pending {
+            log::info!("Warm restart: launching with -Drestart={}", restart_hash);
+            self.supervisor.launch_with_restart(Some(restart_hash))?;
+            // Keep warm_restart_pending set through the auth flow so
+            // do_wait_for_login doesn't touch the login window.
+            return Ok(State::WaitingForAgent);
         }
 
         log::info!("Launching IB Gateway JVM");
@@ -222,7 +217,7 @@ impl StateMachine {
         // Warm restart: Gateway handles its own re-authentication via -Drestart.
         // Don't touch the login window — just wait for Gateway to reach the main
         // trading window. This mirrors IBC's SessionManager.isRestart() behavior.
-        if self.warm_restart_pending {
+        if self.warm_restart_pending.is_some() {
             log::info!("Warm restart: waiting for Gateway to self-authenticate (not touching login)");
             let max_wait = std::time::Duration::from_secs(120);
             let poll_interval = std::time::Duration::from_secs(2);
@@ -230,7 +225,7 @@ impl StateMachine {
 
             loop {
                 if !self.supervisor.is_running() {
-                    self.warm_restart_pending = false;
+                    self.warm_restart_pending = None;
                     return Ok(State::Error("JVM exited during warm restart login".into()));
                 }
 
@@ -245,7 +240,7 @@ impl StateMachine {
                             // Check if it has the connection status bar (main window, not login)
                             if w.bounds.as_ref().map(|b| b.width > 400).unwrap_or(false) {
                                 log::info!("Warm restart: Gateway self-authenticated — main window detected");
-                                self.warm_restart_pending = false;
+                                self.warm_restart_pending = None;
                                 return Ok(State::DismissingPopups);
                             }
                         }
@@ -256,7 +251,7 @@ impl StateMachine {
 
                 if start.elapsed() > max_wait {
                     log::warn!("Warm restart: Gateway did not self-authenticate within {}s — falling back to cold auth", max_wait.as_secs());
-                    self.warm_restart_pending = false;
+                    self.warm_restart_pending = None;
                     return Ok(State::WaitingForLogin); // recurse as cold
                 }
                 tokio::time::sleep(poll_interval).await;
@@ -659,7 +654,19 @@ impl StateMachine {
 
         loop {
             if !self.supervisor.is_running() {
-                log::info!("JVM exited — waiting for warm restart (install4j auto-restart)");
+                log::info!("JVM exited — checking for autorestart token");
+
+                // Capture the autorestart token IMMEDIATELY — before install4j's
+                // new JVM consumes/deletes it. The original Gateway writes this
+                // token before exiting; the install4j-spawned JVM will read and
+                // delete it on startup.
+                let autorestart_hash = self.supervisor.find_autorestart_path();
+                if let Some(ref hash) = autorestart_hash {
+                    log::info!("Found autorestart token: {} — this is a warm restart", hash);
+                } else {
+                    log::info!("No autorestart token — this is a crash or cold exit");
+                }
+
                 self.stop_socat();
 
                 // Grace period: wait up to 30s for install4j to spawn a new JVM
@@ -713,7 +720,7 @@ impl StateMachine {
                 // Both paths go through Launching → WaitingForAgent → WaitingForLogin.
                 // If session cookies are valid, Gateway skips login/2FA automatically.
                 log::info!("Relaunching Gateway with agent attached");
-                self.warm_restart_pending = true;
+                self.warm_restart_pending = autorestart_hash;
                 client_id_task.abort();
                 let _ = std::fs::remove_file(&self.config.agent.socket_path);
                 return Ok(State::Restarting);
