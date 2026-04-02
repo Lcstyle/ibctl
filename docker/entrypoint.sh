@@ -68,6 +68,34 @@ else
     echo "Dashboard disabled (set IBCTL_DASHBOARD_ENABLED=true to enable)"
 fi
 
+# Convert AUTO_RESTART_TIME from local time (TZ) to UTC
+# IB Gateway always interprets this time in UTC regardless of TIME_ZONE setting
+# See: https://github.com/IbcAlpha/IBC/issues/245
+if [ -n "${AUTO_RESTART_TIME:-}" ] && [ -n "${TZ:-}" ] && [ "$TZ" != "Etc/UTC" ] && [ "$TZ" != "UTC" ]; then
+    UTC_RESTART=$(python3 -c "
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+import sys
+try:
+    local_tz = ZoneInfo('${TZ}')
+    utc = ZoneInfo('UTC')
+    # Parse the time (e.g. '05:05 PM')
+    t = datetime.strptime('${AUTO_RESTART_TIME}', '%I:%M %p')
+    # Attach today's date in local timezone
+    now = datetime.now(local_tz)
+    local_dt = now.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+    # Convert to UTC
+    utc_dt = local_dt.astimezone(utc)
+    print(utc_dt.strftime('%I:%M %p').lstrip('0'))
+except Exception as e:
+    print('', file=sys.stderr)
+    sys.exit(1)
+" 2>/dev/null) && {
+        echo "Auto restart: ${AUTO_RESTART_TIME} ${TZ} -> ${UTC_RESTART} UTC"
+        export AUTO_RESTART_TIME="$UTC_RESTART"
+    }
+fi
+
 # Create jts.ini helper — ensures UseSSL=true and API-only mode
 create_jts_ini() {
     local config_dir="$1"
