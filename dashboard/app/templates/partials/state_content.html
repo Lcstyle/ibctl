@@ -1,7 +1,7 @@
 {% set current = state.get('current', 'unknown') %}
 
 <h3 style="font-size: 12px; color: #71717a; letter-spacing: 1px; margin: 0 0 4px; font-weight: 400;">CURRENT STATE</h3>
-<div style="font-size: 24px; font-weight: 700; margin-bottom: 16px;" class="{% if current == 'Connected' %}status-connected{% elif 'Error' in current %}status-error{% else %}status-warning{% endif %}">
+<div id="current-state-display" style="font-size: 24px; font-weight: 700; margin-bottom: 16px;" class="{% if current == 'Connected' %}status-connected{% elif 'Error' in current %}status-error{% else %}status-warning{% endif %}">
     {{ current }}
 </div>
 

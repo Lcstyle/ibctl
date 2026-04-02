@@ -481,10 +481,17 @@ function sendCmd(command, needsConfirm, confirmMsg) {
     }
 }
 
-// Update dial from SSE-pushed data (no fetch, no TCP)
+// Update dial + current state display from SSE-pushed data (no fetch, no TCP)
 function updateReelFromData(data) {
     var state = data.state || '—';
     if (state === 'unreachable' || state === '—') return;
+
+    // Sync "CURRENT STATE" text with the dial (same source of truth)
+    var csd = document.getElementById('current-state-display');
+    if (csd) {
+        csd.textContent = state;
+        csd.className = state === 'Connected' ? 'status-connected' : (state.indexOf('Error') >= 0 ? 'status-error' : 'status-warning');
+    }
 
     var uptime = data.uptime_secs || 0;
     var h = Math.floor(uptime / 3600);
