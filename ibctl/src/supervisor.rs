@@ -110,10 +110,14 @@ impl Supervisor {
     /// Launch with optional warm restart session path.
     pub fn launch_with_restart(&mut self, autorestart_path: Option<&str>) -> Result<(), SupervisorError> {
         // Safety check: kill any orphaned Gateway JVMs for this config dir
-        // before launching. Only relevant for ibctl-initiated restarts (cold
-        // restart, user RESTART command). During warm restarts, the state
-        // machine waits for install4j's auto-restarted JVM instead of calling launch().
+        // before launching.
         self.kill_orphan_gateways();
+
+        // IBC pattern: rename the install4j launcher script so Gateway can't
+        // auto-restart itself outside ibctl's control. Without this, Gateway
+        // spawns a nohup'd child on exit that consumes the autorestart token
+        // before ibctl can read it. Renaming the script is idempotent.
+        self.disable_install4j_launcher();
 
         let tws_path = Path::new(&self.config.tws_path);
         let version = self.detect_version(tws_path)?;
@@ -348,6 +352,81 @@ impl Supervisor {
         }
     }
 
+    /// IBC pattern: rename the install4j launcher script so Gateway can't auto-restart
+    /// itself via install4j. The script path is `<tws_path>/<version>/ibgateway`.
+    /// Renaming is idempotent — safe to call on every launch.
+    fn disable_install4j_launcher(&self) {
+        let tws_path = Path::new(&self.config.tws_path);
+
+        // Search for the launcher script in known locations
+        let candidates = [
+            tws_path.join("ibgateway"),
+            // Also check under the version directory (e.g., ibgateway/10.45.1b/ibgateway)
+        ];
+
+        // Scan for ibgateway launcher under the tws_path tree
+        if let Ok(entries) = std::fs::read_dir(tws_path) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let launcher = path.join("ibgateway");
+                    let renamed = path.join("ibgateway.ibctl-disabled");
+                    if launcher.exists() && launcher.is_file() && !renamed.exists() {
+                        match std::fs::rename(&launcher, &renamed) {
+                            Ok(()) => log::info!(
+                                "Disabled install4j launcher: {} -> {}",
+                                launcher.display(), renamed.display()
+                            ),
+                            Err(e) => log::warn!(
+                                "Failed to rename install4j launcher {}: {}",
+                                launcher.display(), e
+                            ),
+                        }
+                    }
+                    // Also check one level deeper (ibgateway/10.45.1b/ibgateway)
+                    if let Ok(sub_entries) = std::fs::read_dir(&path) {
+                        for sub in sub_entries.flatten() {
+                            let sub_path = sub.path();
+                            if sub_path.is_dir() {
+                                let launcher = sub_path.join("ibgateway");
+                                let renamed = sub_path.join("ibgateway.ibctl-disabled");
+                                if launcher.exists() && launcher.is_file() && !renamed.exists() {
+                                    match std::fs::rename(&launcher, &renamed) {
+                                        Ok(()) => log::info!(
+                                            "Disabled install4j launcher: {} -> {}",
+                                            launcher.display(), renamed.display()
+                                        ),
+                                        Err(e) => log::warn!(
+                                            "Failed to rename install4j launcher {}: {}",
+                                            launcher.display(), e
+                                        ),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also handle direct candidates
+        for launcher in &candidates {
+            let renamed = launcher.with_extension("ibctl-disabled");
+            if launcher.exists() && launcher.is_file() && !renamed.exists() {
+                match std::fs::rename(launcher, &renamed) {
+                    Ok(()) => log::info!(
+                        "Disabled install4j launcher: {} -> {}",
+                        launcher.display(), renamed.display()
+                    ),
+                    Err(e) => log::warn!(
+                        "Failed to rename install4j launcher {}: {}",
+                        launcher.display(), e
+                    ),
+                }
+            }
+        }
+    }
+
     /// Find the `autorestart` session token file written by Gateway before a warm restart.
     /// Returns the subdirectory name (session hash) containing the file.
     /// IBC passes just the subdirectory name via `-Drestart=<hash>`, not the full path.
@@ -378,43 +457,6 @@ impl Supervisor {
         None
     }
 
-    /// Find a Gateway JVM process for our config dir (not our tracked child).
-    /// Used during warm restart recovery to detect install4j's auto-restarted JVM.
-    /// Returns the PID if found.
-    pub fn find_gateway_pid(&self) -> Option<u32> {
-        let config_dir = if self.config.settings_path.is_empty() {
-            &self.config.tws_path
-        } else {
-            &self.config.settings_path
-        };
-
-        let marker = format!("-DjtsConfigDir={}", config_dir);
-        let our_child_pid = self.child.as_ref().map(|c| c.id());
-
-        if let Ok(entries) = std::fs::read_dir("/proc") {
-            for entry in entries.flatten() {
-                let pid_str = entry.file_name();
-                let pid_str = pid_str.to_string_lossy();
-                let pid: u32 = match pid_str.parse() {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-
-                if our_child_pid == Some(pid) {
-                    continue;
-                }
-
-                let cmdline_path = format!("/proc/{}/cmdline", pid);
-                if let Ok(cmdline) = std::fs::read_to_string(&cmdline_path) {
-                    let cmdline = cmdline.replace('\0', " ");
-                    if cmdline.contains("ibgateway.GWClient") && cmdline.contains(&marker) {
-                        return Some(pid);
-                    }
-                }
-            }
-        }
-        None
-    }
 
     /// Build the classpath by scanning the jars directory.
     ///

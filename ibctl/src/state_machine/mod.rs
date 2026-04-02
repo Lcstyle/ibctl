@@ -656,70 +656,17 @@ impl StateMachine {
             if !self.supervisor.is_running() {
                 log::info!("JVM exited — checking for autorestart token");
 
-                // Capture the autorestart token IMMEDIATELY — before install4j's
-                // new JVM consumes/deletes it. The original Gateway writes this
-                // token before exiting; the install4j-spawned JVM will read and
-                // delete it on startup.
+                // Check for autorestart token — Gateway writes this before a
+                // scheduled exit. The install4j launcher is disabled (renamed),
+                // so the token stays intact for us to read.
                 let autorestart_hash = self.supervisor.find_autorestart_path();
                 if let Some(ref hash) = autorestart_hash {
-                    log::info!("Found autorestart token: {} — this is a warm restart", hash);
+                    log::info!("Found autorestart token: {} — warm restart", hash);
                 } else {
-                    log::info!("No autorestart token — this is a crash or cold exit");
+                    log::info!("No autorestart token — crash or unexpected exit");
                 }
 
                 self.stop_socat();
-
-                // Grace period: wait up to 30s for install4j to spawn a new JVM
-                let grace = std::time::Duration::from_secs(30);
-                let poll = std::time::Duration::from_secs(2);
-                let start = std::time::Instant::now();
-                let mut warm_restart_pid: Option<u32> = None;
-
-                while start.elapsed() < grace {
-                    if let Some(pid) = self.supervisor.find_gateway_pid() {
-                        log::info!("Warm restart detected — install4j spawned new JVM at PID {}", pid);
-                        warm_restart_pid = Some(pid);
-                        break;
-                    }
-
-                    if let Some(interrupt) = self.check_interrupts().await {
-                        match interrupt {
-                            Interrupt::Signal(Signal::Terminate | Signal::Interrupt) => {
-                                client_id_task.abort();
-                                return Ok(State::Shutdown);
-                            }
-                            Interrupt::Command(Command::Stop | Command::Exit) => {
-                                client_id_task.abort();
-                                return Ok(State::Shutdown);
-                            }
-                            Interrupt::Command(Command::Restart) => {
-                                log::info!("Restart command during warm restart wait — doing cold restart");
-                                client_id_task.abort();
-                                return Ok(State::Restarting);
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    self.process_queries().await;
-                    tokio::time::sleep(poll).await;
-                }
-
-                if let Some(pid) = warm_restart_pid {
-                    // install4j spawned a new JVM but without our -javaagent.
-                    // Kill it and relaunch with the agent attached. The session
-                    // cookies in jts.ini are still valid from the warm restart,
-                    // so Gateway will skip 2FA on the next launch.
-                    log::info!("Killing install4j JVM (PID {}) — will relaunch with agent", pid);
-                    unsafe { libc::kill(pid as i32, libc::SIGKILL); }
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                }
-
-                // Relaunch — either after killing install4j's JVM (warm restart
-                // with preserved session) or after grace period timeout (cold restart).
-                // Both paths go through Launching → WaitingForAgent → WaitingForLogin.
-                // If session cookies are valid, Gateway skips login/2FA automatically.
-                log::info!("Relaunching Gateway with agent attached");
                 self.warm_restart_pending = autorestart_hash;
                 client_id_task.abort();
                 let _ = std::fs::remove_file(&self.config.agent.socket_path);
