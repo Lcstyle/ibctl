@@ -158,6 +158,7 @@
     transition: all 0.15s;
 }
 .tp7-sec-btn:hover { border-color: #71717a; color: #a1a1aa; }
+.dial-mode-btn.active { color: #f97316 !important; border-color: #f97316 !important; }
 .tp7-toast { text-align: center; margin-top: 6px; font-size: 10px; height: 14px; font-family: 'SF Mono', monospace; }
 
 /* Side-by-side layout */
@@ -198,6 +199,7 @@
                 <div style="font-size: 16px; font-family: 'SF Mono', monospace;" id="m-uptime">0:00:00</div>
             </div>
         </div>
+        <div style="margin-top: 4px; font-size: 10px; color: #52525b;" id="m-ceiling-display"></div>
         <div style="margin-top: 8px;">
             <select id="m-mode-select" style="width: 100%; padding: 8px; background: #1a1a2e; color: #e0e0e0; border: 1px solid #3f3f46; border-radius: 6px; font-size: 13px;">
                 {% for m in modes %}
@@ -207,13 +209,18 @@
         </div>
         <div class="tp7-m-transport">
             <button class="tp7-m-btn" id="m-btn-pause" onclick="sendCmd('PAUSE')">⏸ Pause</button>
-            <button class="tp7-m-btn" id="m-btn-play" onclick="sendCmd('RESUME')">▶ Play</button>
+            <button class="tp7-m-btn" id="m-btn-play" onclick="sendCmd('RESUME')">▶ Resume</button>
             <button class="tp7-m-btn" id="m-btn-stop" onclick="sendCmd('STOP',true,'Stop instance?')">■ Stop</button>
             <button class="tp7-m-btn danger" id="m-btn-reset" onclick="sendCmd('RESTART',true,'Reset Gateway?')">⏮ Reset</button>
         </div>
+        <!-- Mode toggle: Pause At / Set State -->
+        <div style="display: flex; gap: 0; margin-top: 8px;">
+            <button class="tp7-m-btn dial-mode-btn active" data-dial-mode="pauseat" onclick="setDialMode('pauseat')" style="flex:1; border-radius: 6px 0 0 6px; font-size: 10px; letter-spacing: 1px;">PAUSE AT</button>
+            <button class="tp7-m-btn dial-mode-btn" data-dial-mode="setstate" onclick="setDialMode('setstate')" style="flex:1; border-radius: 0 6px 6px 0; border-left: none; font-size: 10px; letter-spacing: 1px;">SET STATE</button>
+        </div>
         <div class="tp7-m-state">
-            <select id="m-setstate-select" style="flex: 1;">
-                <option value="">Force State...</option>
+            <select id="m-state-select" style="flex: 1;">
+                <option value="">Select State...</option>
                 <option value="Init">Init</option>
                 <option value="Launching">Launching</option>
                 <option value="WaitingForAgent">WaitingForAgent</option>
@@ -226,7 +233,7 @@
                 <option value="Restarting">Restarting</option>
                 <option value="Shutdown">Shutdown</option>
             </select>
-            <button class="tp7-m-btn" onclick="mForceState()" style="flex: 0;">Set</button>
+            <button class="tp7-m-btn" onclick="mApplyState()" style="flex: 0;" id="m-apply-btn">Set</button>
         </div>
         <div id="m-command-result" style="font-size: 11px; margin-top: 4px; text-align: center;"></div>
     </div>
@@ -266,7 +273,13 @@
         <button class="tp7-btn tp7-btn-skip" title="Reset" onclick="sendCmd('RESTART', true, 'Reset Gateway?')">⏭</button>
     </div>
     <div class="tp7-grooves"><div class="tp7-groove"></div><div class="tp7-groove"></div><div class="tp7-groove"></div></div>
+    <!-- Mode toggle: Pause At / Set State -->
+    <div style="display: flex; gap: 0; justify-content: center; margin-top: 8px;">
+        <button class="tp7-sec-btn dial-mode-btn active" data-dial-mode="pauseat" onclick="setDialMode('pauseat')" style="border-radius: 2px 0 0 2px; padding: 3px 14px;">PAUSE AT</button>
+        <button class="tp7-sec-btn dial-mode-btn" data-dial-mode="setstate" onclick="setDialMode('setstate')" style="border-radius: 0 2px 2px 0; border-left: none; padding: 3px 14px;">SET STATE</button>
+    </div>
     <div class="tp7-toast" id="command-result"></div>
+    <div style="text-align: center; font-size: 9px; color: #52525b; margin-top: 2px;" id="ceiling-display"></div>
 </div>
 </div>
 
@@ -286,8 +299,20 @@ var currentMode = '{{ default_mode }}';
 var currentStateIdx = 0;
 var isPaused = false;
 var isDragging = false;
+var dialMode = 'pauseat'; // 'pauseat' or 'setstate'
+var ceilingState = null;
 
 function getMode() { return currentMode; }
+
+function setDialMode(mode) {
+    dialMode = mode;
+    document.querySelectorAll('.dial-mode-btn').forEach(function(b) {
+        b.classList.toggle('active', b.dataset.dialMode === mode);
+    });
+    // Update mobile apply button text
+    var btn = document.getElementById('m-apply-btn');
+    if (btn) btn.textContent = mode === 'pauseat' ? 'Pause At' : 'Set State';
+}
 
 // Position states around the top arc (like a speedometer: -135° to +135°)
 var START_ANGLE = -135;
@@ -338,8 +363,7 @@ function buildSpeedo() {
         label.style.transform = 'translate(-50%, -50%) rotate(' + labelAngle + 'deg)';
         label.onclick = function(e) {
             e.stopPropagation();
-            if (!confirm('Force ' + getMode().toUpperCase() + ' → ' + state + '?')) return;
-            sendCmd('SETSTATE ' + state);
+            applyDialAction(state);
         };
         speedo.appendChild(label);
     });
@@ -419,13 +443,9 @@ function setNeedle(idx) {
 
         var state = STATES[idx];
         if (state !== STATES[currentStateIdx]) {
-            if (confirm('Force ' + getMode().toUpperCase() + ' → ' + state + '?')) {
-                sendCmd('SETSTATE ' + state);
-                // Auto-pause when manually setting state
-                sendCmd('PAUSE');
-            } else {
-                setNeedle(currentStateIdx);
-            }
+            applyDialAction(state);
+        } else {
+            setNeedle(currentStateIdx);
         }
     }
 })();
@@ -447,8 +467,14 @@ function sendCmd(command, needsConfirm, confirmMsg) {
         document.getElementById('inner-reel').classList.remove('spinning');
         document.querySelector('.tp7-speedo-ring').classList.remove('spinning');
         document.getElementById('btn-pause').classList.add('active');
+    } else if (command.startsWith('PAUSE ')) {
+        // PAUSE AT — not immediately paused, ceiling set
+        ceilingState = command.split(' ')[1];
+        updateCeilingDisplay();
     } else if (command === 'RESUME') {
         isPaused = false;
+        ceilingState = null;
+        updateCeilingDisplay();
         document.getElementById('inner-reel').classList.add('spinning');
         document.querySelector('.tp7-speedo-ring').classList.add('spinning');
         document.getElementById('btn-pause').classList.remove('active');
@@ -473,6 +499,15 @@ async function updateReel() {
         if (idx === -1) idx = 0;
         currentStateIdx = idx;
         if (!isDragging) setNeedle(idx);
+
+        // Sync paused/ceiling from server
+        isPaused = !!data.paused;
+        ceilingState = data.ceiling_state || null;
+        updateCeilingDisplay();
+
+        // Update pause button visual
+        var pauseBtn = document.getElementById('btn-pause');
+        if (pauseBtn) pauseBtn.classList.toggle('active', isPaused);
 
         // Spin reels when active and not paused
         var innerReel = document.getElementById('inner-reel');
@@ -504,15 +539,37 @@ if (mModeSelect) {
     mModeSelect.addEventListener('change', function() { setMode(this.value); });
 }
 
-// Mobile force state
-function mForceState() {
-    var sel = document.getElementById('m-setstate-select');
+// Apply dial action (shared by desktop dial, label click, and mobile)
+function applyDialAction(state) {
+    var mode = getMode().toUpperCase();
+    if (dialMode === 'pauseat') {
+        if (!confirm('Pause ' + mode + ' at ' + state + '?')) { setNeedle(currentStateIdx); return; }
+        sendCmd('PAUSE ' + state);
+        ceilingState = state;
+        updateCeilingDisplay();
+    } else {
+        if (!confirm('Force ' + mode + ' → ' + state + '? This will also pause.')) { setNeedle(currentStateIdx); return; }
+        sendCmd('SETSTATE ' + state);
+        sendCmd('PAUSE');
+    }
+}
+
+// Mobile apply state
+function mApplyState() {
+    var sel = document.getElementById('m-state-select');
     var state = sel.value;
     if (!state) return;
-    if (!confirm('Force ' + getMode().toUpperCase() + ' → ' + state + '?')) { sel.value = ''; return; }
-    sendCmd('SETSTATE ' + state);
-    sendCmd('PAUSE');
+    applyDialAction(state);
     sel.value = '';
+}
+
+// Ceiling display
+function updateCeilingDisplay() {
+    var el = document.getElementById('ceiling-display');
+    var mel = document.getElementById('m-ceiling-display');
+    var text = ceilingState ? 'CEILING: ' + ceilingState : '';
+    if (el) el.textContent = text;
+    if (mel) mel.textContent = text;
 }
 
 // Update button states based on current state
@@ -544,11 +601,14 @@ async function updateMobile() {
         var h = Math.floor(u/3600), m = Math.floor((u%3600)/60), sec = u%60;
         var el = document.getElementById('m-state-display');
         if (el) {
-            el.textContent = s;
+            el.textContent = s + (d.paused ? ' ⏸' : '');
             el.className = s === 'Connected' ? 'status-connected' : s.startsWith('Error') ? 'status-error' : 'status-warning';
         }
         var ut = document.getElementById('m-uptime');
         if (ut) ut.textContent = h + ':' + String(m).padStart(2,'0') + ':' + String(sec).padStart(2,'0');
+        isPaused = !!d.paused;
+        ceilingState = d.ceiling_state || null;
+        updateCeilingDisplay();
         updateButtonStates(s);
     } catch(e) {}
 }
