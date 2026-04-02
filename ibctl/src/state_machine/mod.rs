@@ -321,6 +321,14 @@ impl StateMachine {
                 return Ok(State::Error("JVM exited during 2FA wait".into()));
             }
 
+            // Check for blocking dialogs (re-login, authenticating splash)
+            if let Some(next_state) = self.check_blocking_dialog().await {
+                if next_state == State::WaitingForLogin {
+                    log::info!("Blocking dialog detected during 2FA wait — transitioning to {}", next_state);
+                    return Ok(next_state);
+                }
+            }
+
             match self.agent_client.list_windows().await {
                 Ok(windows) => {
                     consecutive_agent_failures = 0;
