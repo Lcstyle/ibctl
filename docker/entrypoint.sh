@@ -74,15 +74,20 @@ create_jts_ini() {
     if [ ! -d "$config_dir" ]; then
         mkdir -p "$config_dir"
     fi
-    # Always ensure ReadOnlyApi is off in existing jts.ini
-    # This prevents the "API write access" warning race condition
+    # Always fix existing jts.ini before Gateway launches
     if [ -f "$config_dir/jts.ini" ]; then
+        # Ensure ReadOnlyApi is off (prevents "API write access" warning race)
         if grep -q "ReadOnlyApi" "$config_dir/jts.ini"; then
             sed -i 's/ReadOnlyApi=.*/ReadOnlyApi=no/' "$config_dir/jts.ini"
         else
-            # Add to [IBGateway] section
             sed -i '/^\[IBGateway\]/a ReadOnlyApi=no' "$config_dir/jts.ini"
         fi
+        # Force TimeZone — Gateway defaults to Africa/Abidjan (UTC) when
+        # running headless, which makes Auto Restart fire at wrong local time.
+        # Per IBC maintainer advice: overwrite TimeZone in jts.ini before launch.
+        # See: https://github.com/IbcAlpha/IBC/issues/245#issuecomment-1871449053
+        local tz="${TIME_ZONE:-America/New_York}"
+        sed -i "s/TimeZone=.*/TimeZone=$tz/" "$config_dir/jts.ini"
     fi
     if [ ! -f "$config_dir/jts.ini" ]; then
         echo "Creating jts.ini in $config_dir"
