@@ -487,6 +487,8 @@ async function updateReel() {
         var resp = await fetch('/api/v1/status/raw?mode=' + getMode());
         var data = await resp.json();
         var state = data.state || '—';
+        if (state === 'unreachable' || state === '—') return; // Keep last known good state
+
         var uptime = data.uptime_secs || 0;
         var h = Math.floor(uptime / 3600);
         var m = Math.floor((uptime % 3600) / 60);
@@ -496,7 +498,7 @@ async function updateReel() {
         document.getElementById('oled-uptime').textContent = h + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
 
         var idx = STATES.indexOf(state);
-        if (idx === -1) idx = 0;
+        if (idx === -1) return; // Unknown state — don't move needle
         currentStateIdx = idx;
         if (!isDragging) setNeedle(idx);
 
@@ -522,9 +524,8 @@ async function updateReel() {
         }
         updateButtonStates(s);
     } catch(e) {
-        console.error('updateReel failed:', e);
-        document.getElementById('oled-state').textContent = 'OFFLINE';
-        document.getElementById('oled-uptime').textContent = '—:——:——';
+        console.debug('updateReel poll failed (transient):', e.message || e);
+        // Don't reset the dial — keep last known good state
     }
 }
 
