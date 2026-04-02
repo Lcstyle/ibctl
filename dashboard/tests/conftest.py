@@ -35,6 +35,10 @@ class FakeIbctlClient:
     async def status(self) -> GatewayStatus:
         return self._status
 
+    async def status_raw(self) -> dict:
+        from dataclasses import asdict
+        return asdict(self._status)
+
     async def state(self) -> StateMachineState:
         return self._state
 

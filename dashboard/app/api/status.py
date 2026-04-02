@@ -43,6 +43,23 @@ async def get_status(request: Request, mode: str | None = None):
         }
 
 
+@router.get("/api/v1/status/raw")
+async def get_status_raw(request: Request, mode: str | None = None):
+    """Raw ibctl STATUS pass-through — no model translation.
+
+    Used by the State page dial which needs all fields (paused,
+    ceiling_state, jvm.alive, socat.running, etc.) without the
+    lossy GatewayStatus model in between.
+    """
+    registry = request.app.state.instance_registry
+    target_mode = mode or registry.primary_mode()
+    client = registry.get_client(target_mode)
+    try:
+        return await client.status_raw()
+    except DashboardError as e:
+        return {"state": "unreachable", "error": e.message, "paused": False, "ceiling_state": None}
+
+
 @router.get("/api/v1/health")
 async def health():
     """Simple health check — always returns 200 if dashboard is running."""

@@ -484,7 +484,7 @@ function sendCmd(command, needsConfirm, confirmMsg) {
 // Poll status
 async function updateReel() {
     try {
-        var resp = await fetch('/api/v1/status?mode=' + getMode());
+        var resp = await fetch('/api/v1/status/raw?mode=' + getMode());
         var data = await resp.json();
         var state = data.state || '—';
         var uptime = data.uptime_secs || 0;
@@ -522,6 +522,7 @@ async function updateReel() {
         }
         updateButtonStates(s);
     } catch(e) {
+        console.error('updateReel failed:', e);
         document.getElementById('oled-state').textContent = 'OFFLINE';
         document.getElementById('oled-uptime').textContent = '—:——:——';
     }
@@ -530,8 +531,17 @@ async function updateReel() {
 // Init
 buildSpeedo();
 setNeedle(0);
-setInterval(updateReel, 3000);
+// Poll as fallback, but SSE events trigger immediate updates
+setInterval(updateReel, 5000);
 updateReel();
+
+// SSE-driven instant updates — hooks into the base template's EventSource
+(function() {
+    var src = new EventSource('/api/v1/events');
+    src.addEventListener('state_change', function() { updateReel(); updateMobile(); });
+    src.addEventListener('ready_change', function() { updateReel(); updateMobile(); });
+    src.onerror = function() { setTimeout(function() { src.close(); }, 5000); };
+})();
 
 // Mobile mode selector
 var mModeSelect = document.getElementById('m-mode-select');

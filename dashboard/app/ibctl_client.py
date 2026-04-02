@@ -24,6 +24,7 @@ class IbctlClientProtocol(Protocol):
     """Abstract interface for ibctl communication."""
 
     async def status(self) -> GatewayStatus: ...
+    async def status_raw(self) -> dict: ...
     async def state(self) -> StateMachineState: ...
     async def config(self) -> dict: ...
     async def logs(self, limit: int = 100) -> list[LogEntry]: ...
@@ -42,6 +43,10 @@ class TcpIbctlClient:
     async def status(self) -> GatewayStatus:
         data = await self._query("STATUS")
         return GatewayStatus.from_json(data)
+
+    async def status_raw(self) -> dict:
+        """Raw STATUS response — no model translation, no field loss."""
+        return await self._query("STATUS")
 
     async def state(self) -> StateMachineState:
         data = await self._query("STATE")
