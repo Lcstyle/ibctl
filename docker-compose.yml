@@ -35,6 +35,8 @@ services:
       ALLOW_BLIND_TRADING: ${ALLOW_BLIND_TRADING:-no}
 
       # --- Scheduling ---
+      # NOTE: IB Gateway ignores TIME_ZONE and uses UTC internally.
+      # AUTO_RESTART_TIME must be in UTC. Example: for 5:05 PM EDT, use "09:05 PM"
       AUTO_RESTART_TIME: ${AUTO_RESTART_TIME:-}
       TWS_COLD_RESTART: ${TWS_COLD_RESTART:-}
 

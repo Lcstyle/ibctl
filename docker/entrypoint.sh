@@ -82,15 +82,12 @@ create_jts_ini() {
         else
             sed -i '/^\[IBGateway\]/a ReadOnlyApi=no' "$config_dir/jts.ini"
         fi
-        # Force TimeZone — Gateway defaults to Africa/Abidjan (UTC) when
-        # running headless, which makes Auto Restart fire at wrong local time.
-        # Per IBC maintainer advice: overwrite TimeZone in jts.ini before launch.
-        # See: https://github.com/IbcAlpha/IBC/issues/245#issuecomment-1871449053
-        # We also make the file read-only so the Gateway can't overwrite it.
-        local tz="${TIME_ZONE:-America/New_York}"
-        chmod u+w "$config_dir/jts.ini" 2>/dev/null
-        sed -i "s/TimeZone=.*/TimeZone=$tz/" "$config_dir/jts.ini"
-        chmod a-w "$config_dir/jts.ini"
+        # NOTE: Gateway defaults to Africa/Abidjan (UTC) when running headless
+        # and overwrites jts.ini on every login (recreates the file, so chmod
+        # is useless). This is a known IB Gateway bug — gnzsnz documents it.
+        # AUTO_RESTART_TIME must be specified in UTC, not local time.
+        # See: https://github.com/IbcAlpha/IBC/issues/245
+        # See: https://github.com/gnzsnz/ib-gateway-docker/issues/43
     fi
     if [ ! -f "$config_dir/jts.ini" ]; then
         echo "Creating jts.ini in $config_dir"
