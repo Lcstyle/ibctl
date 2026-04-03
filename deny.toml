@@ -1,6 +1,6 @@
 [advisories]
-vulnerability = "deny"
-unmaintained = "warn"
+version = 2
+ignore = []
 
 [licenses]
 unlicensed = "deny"
