@@ -208,16 +208,8 @@ impl Supervisor {
         // RC2 FIX: Create a new process group so kill(-pgid) reaps all
         // children, not just the direct child. Prevents install4j launcher
         // grandchildren from surviving SIGTERM.
-        //
-        // SAFETY: Called inside pre_exec (after fork, before exec). setsid() creates
-        // a new session, detaching the child from the parent's process group. This is
-        // safe because we are in the forked child process where no other threads exist.
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
+        // process_group(0) is the safe equivalent of pre_exec(|| { setsid(); Ok(()) })
+        cmd.process_group(0);
 
         log::info!("Launching JVM: {} {}", java_path, main_class);
         log::debug!("Classpath: {}", classpath);
@@ -265,7 +257,7 @@ impl Supervisor {
                 // This reaps install4j launcher children and any grandchildren,
                 // not just the direct child. Prevents orphan JVMs.
                 if let Some(pid) = pid {
-                    let _ = kill_process_group(pid, libc::SIGTERM);
+                    let _ = kill_process_group(pid, nix::sys::signal::Signal::SIGTERM);
                 }
 
                 // Wait for graceful exit (configurable via timing.jvm_shutdown_timeout_secs)
@@ -343,12 +335,10 @@ impl Supervisor {
                             "Killing orphan Gateway JVM (PID {}) with config dir {}",
                             pid, config_dir
                         );
-                        // SAFETY: Sending SIGKILL to a specific PID read from /proc
-                        // and validated as a running IB Gateway process. Positive PID
-                        // targets only that single process, not a process group.
-                        unsafe {
-                            libc::kill(pid, libc::SIGKILL);
-                        }
+                        let _ = nix::sys::signal::kill(
+                            nix::unistd::Pid::from_raw(pid),
+                            nix::sys::signal::Signal::SIGKILL,
+                        );
                     }
                 }
             }
@@ -636,17 +626,7 @@ impl Supervisor {
 
 /// Send a signal to an entire process group.
 ///
-/// Negates the PID to target the group. Panics if `pid` is 0 (which would
-/// kill the caller's own process group).
-fn kill_process_group(pid: u32, signal: i32) -> std::io::Result<()> {
-    assert!(pid > 0, "refusing to kill own process group");
-    // SAFETY: pid is validated non-zero and negated to target the process group.
-    // libc::kill with a negative first argument sends the signal to all processes
-    // in the process group whose PGID equals the absolute value of that argument.
-    let ret = unsafe { libc::kill(-(pid as i32), signal) };
-    if ret == 0 {
-        Ok(())
-    } else {
-        Err(std::io::Error::last_os_error())
-    }
+/// Uses `nix::sys::signal::killpg` — the safe wrapper for kill(-pid, signal).
+fn kill_process_group(pid: u32, signal: nix::sys::signal::Signal) -> nix::Result<()> {
+    nix::sys::signal::killpg(nix::unistd::Pid::from_raw(pid as i32), signal)
 }

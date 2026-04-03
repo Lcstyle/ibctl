@@ -15,5 +15,4 @@ dbg_macro = "deny"
 todo = "warn"
 
 [workspace.lints.rust]
-# unsafe_code is allowed — all 4 blocks have SAFETY comments and are verified by Miri in CI
-unsafe_code = "allow"
+unsafe_code = "deny"

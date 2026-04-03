@@ -42,25 +42,6 @@ jobs:
           cargo install cargo-deny --locked
           cargo deny check
 
-  miri:
-    name: Miri
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: miri
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Run Miri
-        env:
-          CARGO_ENCODED_RUSTFLAGS: ""
-        run: cargo +nightly miri test -p ibctl
-
   java-build:
     name: Java agent build
     runs-on: ubuntu-latest

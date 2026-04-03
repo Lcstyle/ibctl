@@ -75,7 +75,7 @@ const PRECAUTION_LABELS: &[&str] = &[
 ];
 
 /// Short pause — just enough for the Swing EDT to process the previous action.
-/// Configurable via [timing] ui_tick_ms in ibctl.toml.
+/// Configurable via \[timing\] ui_tick_ms in ibctl.toml.
 async fn tick(ms: u64) {
     tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
 }

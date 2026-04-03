@@ -18,7 +18,7 @@
 //! 3. Writes marker file to settings dir (survives container restart if volume-mounted)
 //! 4. Sends signal to state machine which kills JVM and does full re-auth
 //!
-//! Timezone: respects the TZ env var (libc::localtime_r uses system timezone)
+//! Timezone: respects the TZ env var (jiff uses system timezone)
 
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
@@ -187,24 +187,14 @@ struct LocalTime {
 }
 
 fn get_local_time() -> Option<LocalTime> {
-    // SAFETY: libc::tm is a C struct of plain integer fields, safe to zero-initialize
-    // via mem::zeroed(). localtime_r is the thread-safe variant (unlike localtime) and
-    // writes into the provided buffer. libc::time writes the current timestamp into `now`.
-    unsafe {
-        let mut now: libc::time_t = 0;
-        libc::time(&mut now);
-        let mut tm: libc::tm = std::mem::zeroed();
-        if libc::localtime_r(&now, &mut tm).is_null() {
-            return None;
-        }
-        Some(LocalTime {
-            weekday: tm.tm_wday as u32,
-            hour: tm.tm_hour as u32,
-            minute: tm.tm_min as u32,
-            day_of_year: tm.tm_yday as u32,
-            year: tm.tm_year + 1900,
-        })
-    }
+    let now = jiff::Zoned::now();
+    Some(LocalTime {
+        weekday: now.weekday().to_sunday_zero_offset() as u32,
+        hour: now.hour() as u32,
+        minute: now.minute() as u32,
+        day_of_year: now.day_of_year() as u32,
+        year: now.year() as i32,
+    })
 }
 
 #[cfg(test)]
