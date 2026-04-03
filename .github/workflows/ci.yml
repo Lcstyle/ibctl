@@ -56,7 +56,10 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - run: cargo +nightly miri test
+      - name: Run Miri
+        env:
+          CARGO_ENCODED_RUSTFLAGS: ""
+        run: cargo +nightly miri test -p ibctl
 
   java-build:
     name: Java agent build
