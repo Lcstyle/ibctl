@@ -5,6 +5,16 @@
 //! bypasses, auto-restart time. Mirrors IBC's ConfigureApiTask.
 
 use crate::agent_client::AgentClient;
+use crate::types::WindowId;
+
+/// Errors that can occur during API configuration.
+#[derive(Debug, thiserror::Error)]
+pub enum ApiConfigError {
+    #[error("agent error: {0}")]
+    Agent(#[from] crate::handlers::HandlerError),
+    #[error("{0}")]
+    Other(String),
+}
 
 /// Parse an env var as a boolean: "yes", "true", "1" → true.
 fn env_bool(var: &str) -> Option<bool> {
@@ -71,7 +81,7 @@ async fn tick(ms: u64) {
 }
 
 /// Dismiss any popup dialogs that aren't the config dialog.
-async fn dismiss_popups(client: &AgentClient, config_win_id: u64) {
+async fn dismiss_popups(client: &AgentClient, config_win_id: WindowId) {
     if let Ok(windows) = client.list_windows().await {
         for w in &windows {
             if w.id != config_win_id {
@@ -86,7 +96,7 @@ pub async fn apply_api_config(
     client: &AgentClient,
     settings: &ApiConfigSettings,
     tick_ms: u64,
-) -> Result<(), String> {
+) -> Result<(), ApiConfigError> {
     if !settings.has_settings() {
         log::info!("No API configuration settings to apply");
         return Ok(());
@@ -96,7 +106,7 @@ pub async fn apply_api_config(
 
     // Find the main Gateway window
     let windows = client.list_windows().await
-        .map_err(|e| format!("Failed to list windows: {}", e))?;
+        .map_err(|e| ApiConfigError::Other(format!("Failed to list windows: {}", e)))?;
     let main_window = windows.iter().find(|w| {
         let t = w.title.to_lowercase();
         t.contains("ibkr gateway") || t.contains("ib gateway")
@@ -104,7 +114,7 @@ pub async fn apply_api_config(
     let win = match main_window {
         Some(w) => w,
         None => {
-            return Err("Main Gateway window not found — cannot apply API config".to_string());
+            return Err(ApiConfigError::Other("Main Gateway window not found — cannot apply API config".to_string()));
         }
     };
 
@@ -148,7 +158,7 @@ pub async fn apply_api_config(
         Some(w) => w,
         None => {
             log::error!("Configuration dialog not found after 3 attempts — config NOT applied");
-            return Err("Configuration dialog not found after 3 attempts".to_string());
+            return Err(ApiConfigError::Other("Configuration dialog not found after 3 attempts".to_string()));
         }
     };
     let cid = config_win.id;
@@ -156,10 +166,10 @@ pub async fn apply_api_config(
 
     // --- API -> Settings ---
     client.select_tree_node(cid, "API").await
-        .map_err(|e| format!("Failed to select API: {}", e))?;
+        .map_err(|e| ApiConfigError::Other(format!("Failed to select API: {}", e)))?;
     tick(tick_ms).await;
     client.select_tree_node(cid, "Settings").await
-        .map_err(|_| "Failed to navigate to API/Settings".to_string())?;
+        .map_err(|_| ApiConfigError::Other("Failed to navigate to API/Settings".to_string()))?;
     tick(tick_ms).await;
 
     // Master Client ID (field index 1)

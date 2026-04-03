@@ -6,9 +6,10 @@
 //! - Constructing the full `java` command line with `-javaagent:`
 //! - Spawning, monitoring, and killing the child JVM process
 
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{ExitStatus, Stdio};
+
+use tokio::process::{Child, Command};
 
 use thiserror::Error;
 
@@ -207,6 +208,10 @@ impl Supervisor {
         // RC2 FIX: Create a new process group so kill(-pgid) reaps all
         // children, not just the direct child. Prevents install4j launcher
         // grandchildren from surviving SIGTERM.
+        //
+        // SAFETY: Called inside pre_exec (after fork, before exec). setsid() creates
+        // a new session, detaching the child from the parent's process group. This is
+        // safe because we are in the forked child process where no other threads exist.
         unsafe {
             cmd.pre_exec(|| {
                 libc::setsid();
@@ -219,7 +224,7 @@ impl Supervisor {
         log::debug!("Agent: {}", javaagent_arg);
 
         let child = cmd.spawn()?;
-        log::info!("JVM started with PID {}", child.id());
+        log::info!("JVM started with PID {:?}", child.id());
         self.child = Some(child);
         self.launched_at = Some(std::time::Instant::now());
         self.settings_path_resolved = settings_path;
@@ -231,7 +236,7 @@ impl Supervisor {
     pub fn jvm_info(&mut self) -> JvmInfo {
         let alive = self.is_running();
         JvmInfo {
-            pid: self.child.as_ref().map(|c| c.id()),
+            pid: self.child.as_ref().and_then(|c| c.id()),
             alive,
             started_at: self.launched_at.map(|t| t.elapsed().as_secs()),
             config_dir: self.settings_path_resolved.clone(),
@@ -240,55 +245,50 @@ impl Supervisor {
     }
 
     /// Wait for the JVM process to exit and return its exit status.
-    /// Uses async polling to avoid blocking the tokio runtime.
+    /// Uses tokio's async child.wait() — yields to the runtime instead of polling.
     pub async fn wait(&mut self) -> Result<ExitStatus, SupervisorError> {
         match self.child.as_mut() {
-            Some(child) => loop {
-                match child.try_wait() {
-                    Ok(Some(status)) => return Ok(status),
-                    Ok(None) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
-                    Err(e) => return Err(SupervisorError::SpawnFailed(e)),
-                }
-            },
+            Some(child) => Ok(child.wait().await?),
             None => Err(SupervisorError::NotRunning),
         }
     }
 
     /// Gracefully stop the JVM process: SIGTERM first, then SIGKILL after timeout.
-    /// Uses async sleep to avoid blocking the tokio runtime.
+    /// Uses `tokio::time::timeout` + async `child.wait()` instead of busy-wait polling.
     pub async fn kill(&mut self) -> Result<(), SupervisorError> {
         match self.child.as_mut() {
             Some(child) => {
                 let pid = child.id();
-                log::info!("Sending SIGTERM to JVM (PID {})", pid);
+                log::info!("Sending SIGTERM to JVM (PID {:?})", pid);
 
                 // RC2 FIX: Kill the entire process group (negative PID).
                 // This reaps install4j launcher children and any grandchildren,
                 // not just the direct child. Prevents orphan JVMs.
-                unsafe {
-                    libc::kill(-(pid as i32), libc::SIGTERM);
+                if let Some(pid) = pid {
+                    let _ = kill_process_group(pid, libc::SIGTERM);
                 }
 
                 // Wait for graceful exit (configurable via timing.jvm_shutdown_timeout_secs)
-                let iterations = self.shutdown_timeout_secs * 10;
-                for _ in 0..iterations {
-                    match child.try_wait() {
-                        Ok(Some(_)) => {
-                            log::info!("JVM exited gracefully after SIGTERM");
-                            return Ok(());
-                        }
-                        Ok(None) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
-                        Err(e) => {
-                            log::warn!("Error checking JVM status: {}", e);
-                            break;
-                        }
+                let timeout_dur = std::time::Duration::from_secs(self.shutdown_timeout_secs);
+                match tokio::time::timeout(timeout_dur, child.wait()).await {
+                    Ok(Ok(_status)) => {
+                        log::info!("JVM exited gracefully after SIGTERM");
+                        Ok(())
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!("Error waiting for JVM after SIGTERM: {}", e);
+                        // Fallback to SIGKILL
+                        log::warn!("Sending SIGKILL as fallback");
+                        child.start_kill().ok();
+                        Ok(())
+                    }
+                    Err(_elapsed) => {
+                        // Timeout — process didn't exit within the grace period
+                        log::warn!("JVM didn't exit after SIGTERM within {}s — sending SIGKILL", self.shutdown_timeout_secs);
+                        child.start_kill().ok();
+                        Ok(())
                     }
                 }
-
-                // Fallback to SIGKILL
-                log::warn!("JVM didn't exit after SIGTERM — sending SIGKILL");
-                child.kill()?;
-                Ok(())
             }
             None => Err(SupervisorError::NotRunning),
         }
@@ -317,7 +317,7 @@ impl Supervisor {
         };
 
         let marker = format!("-DjtsConfigDir={}", config_dir);
-        let our_child_pid = self.child.as_ref().map(|c| c.id());
+        let our_child_pid = self.child.as_ref().and_then(|c| c.id());
 
         // Scan /proc for java processes with our config dir
         if let Ok(entries) = std::fs::read_dir("/proc") {
@@ -343,6 +343,9 @@ impl Supervisor {
                             "Killing orphan Gateway JVM (PID {}) with config dir {}",
                             pid, config_dir
                         );
+                        // SAFETY: Sending SIGKILL to a specific PID read from /proc
+                        // and validated as a running IB Gateway process. Positive PID
+                        // targets only that single process, not a process group.
                         unsafe {
                             libc::kill(pid, libc::SIGKILL);
                         }
@@ -628,5 +631,22 @@ impl Supervisor {
         Err(SupervisorError::JavaNotFound(
             "no java binary found in JAVA_PATH, i4j_jres, or PATH".to_string(),
         ))
+    }
+}
+
+/// Send a signal to an entire process group.
+///
+/// Negates the PID to target the group. Panics if `pid` is 0 (which would
+/// kill the caller's own process group).
+fn kill_process_group(pid: u32, signal: i32) -> std::io::Result<()> {
+    assert!(pid > 0, "refusing to kill own process group");
+    // SAFETY: pid is validated non-zero and negated to target the process group.
+    // libc::kill with a negative first argument sends the signal to all processes
+    // in the process group whose PGID equals the absolute value of that argument.
+    let ret = unsafe { libc::kill(-(pid as i32), signal) };
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
     }
 }

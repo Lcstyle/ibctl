@@ -413,10 +413,29 @@ impl Default for AgentConfig {
 }
 
 
+/// A config that has passed all validation checks.
+/// Can only be constructed via `Config::load()`.
+#[derive(Debug, Clone)]
+pub struct ValidConfig(Config);
+
+impl std::ops::Deref for ValidConfig {
+    type Target = Config;
+    fn deref(&self) -> &Config { &self.0 }
+}
+
+#[cfg(test)]
+impl ValidConfig {
+    /// Bypass validation for unit tests that need a `ValidConfig` with controlled values.
+    pub fn new_unchecked(config: Config) -> Self { Self(config) }
+}
+
 impl Config {
     /// Load configuration with layered precedence:
     /// defaults -> TOML file -> environment variables.
-    pub fn load(path: Option<&str>) -> Result<Config, ConfigError> {
+    ///
+    /// Validation runs at the end — the returned `ValidConfig` is guaranteed
+    /// to have all required fields present (parse-don't-validate).
+    pub fn load(path: Option<&str>) -> Result<ValidConfig, ConfigError> {
         // Start with defaults
         let mut config = Config::default();
 
@@ -451,7 +470,10 @@ impl Config {
         // Layer 3: Environment variable overrides
         config.apply_env_overrides();
 
-        Ok(config)
+        // Validate before wrapping — invalid config cannot escape
+        config.validate()?;
+
+        Ok(ValidConfig(config))
     }
 
     /// Apply environment variable overrides on top of current config.
@@ -583,7 +605,8 @@ impl Config {
     }
 
     /// Validate that required fields are present.
-    pub fn validate(&self) -> Result<(), ConfigError> {
+    /// Private — called at the end of `load()` to enforce the ValidConfig invariant.
+    fn validate(&self) -> Result<(), ConfigError> {
         if self.auth.username.is_empty() {
             return Err(ConfigError::Missing(
                 "auth.username (or TWS_USERID env var)".to_string(),
@@ -773,6 +796,7 @@ key = "value"
     #[test]
     fn test_validate_missing_username() {
         let config = Config::default();
+        // validate() is private; call it via the test-only access
         assert!(config.validate().is_err());
     }
 
@@ -789,6 +813,16 @@ key = "value"
         config.auth.username = "testuser".to_string();
         config.auth.password = SecretString::from("testpass".to_string());
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_valid_config_deref() {
+        let mut config = Config::default();
+        config.auth.username = "testuser".to_string();
+        config.auth.password = SecretString::from("testpass".to_string());
+        let valid = ValidConfig::new_unchecked(config);
+        // Deref allows field access through ValidConfig
+        assert_eq!(valid.auth.username, "testuser");
     }
 
     #[test]

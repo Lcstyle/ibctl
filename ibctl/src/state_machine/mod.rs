@@ -17,110 +17,263 @@ pub use types::{Channels, State, StateMachine, StateMachineError};
 use std::path::Path;
 use std::time::Instant;
 
+use tokio::sync::mpsc;
+
 use crate::command_server::Command;
 use crate::signals::Signal;
 
 use types::Interrupt;
 
+/// Select result: either an interrupt from a channel, or a completed
+/// state transition.
+enum SelectOutcome {
+    Interrupted(Interrupt),
+    Transitioned(Result<State, StateMachineError>),
+}
+
 impl StateMachine {
     /// Run the state machine until shutdown or fatal error.
+    ///
+    /// Uses `tokio::select!` with `biased;` to ensure signals (SIGTERM/SIGINT)
+    /// are handled with priority over state transitions. This means a SIGTERM
+    /// during a 60s+ agent wait will be caught immediately instead of being
+    /// delayed until the transition completes — critical for Docker's 10s
+    /// stop grace period.
+    ///
+    /// Architecture: the channel receivers are temporarily moved out of `self`
+    /// for the select (and restored afterward) to avoid conflicting `&mut self`
+    /// borrows between the interrupt channels and `transition()`. This is safe
+    /// because `transition()` never accesses the channel receivers.
     pub async fn run(&mut self) -> Result<(), StateMachineError> {
         log::info!("State machine starting in state: {}", self.state);
 
         loop {
-            if let Some(signal_or_cmd) = self.check_interrupts().await {
-                match signal_or_cmd {
-                    Interrupt::Signal(Signal::Terminate | Signal::Interrupt) => {
-                        log::info!("Received shutdown signal, transitioning to Shutdown");
-                        self.state = State::Shutdown;
-                    }
-                    Interrupt::Command(Command::Stop | Command::Exit) => {
-                        log::info!("Received stop command, transitioning to Shutdown");
-                        self.state = State::Shutdown;
-                    }
-                    Interrupt::Command(Command::Restart) => {
-                        log::info!("Received restart command");
-                        self.state = State::Restarting;
-                    }
-                    Interrupt::Command(cmd) => {
-                        log::info!("Received command {:?} in state {}", cmd, self.state);
-                        self.handle_command(cmd).await?;
-                    }
-                    Interrupt::ColdRestart => {
-                        log::info!("Sunday cold restart — full re-authentication required");
-                        self.state = State::Restarting;
-                    }
-                }
-            }
-
-            // IB System Status TTL expiry — fail-open if no recent push
-            if let Some(last) = self.ib_system_last_updated {
-                let ttl = std::time::Duration::from_secs(600); // 10 min default TTL
-                if last.elapsed() > ttl && !self.ib_system_available {
-                    log::info!("IB system status TTL expired — assuming available (fail-open)");
-                    self.ib_system_available = true;
-                    self.ib_system_status = "available".to_string();
-                    self.ib_system_reason.clear();
-                }
-            }
-
-            // If IB system unavailable and not already in WaitingForIB, transition there
-            if !self.ib_system_available && self.state != State::WaitingForIB && self.state != State::Shutdown {
-                log::warn!("IB system unavailable: {} — transitioning to WaitingForIB", self.ib_system_reason);
-                self.ib_system_return_state = Some(Box::new(self.state.clone()));
-                let old = self.state.clone();
-                self.state = State::WaitingForIB;
-                self.record_transition(&old, &State::WaitingForIB);
-            }
-
-            // Pause mode: skip transitions but keep processing queries/interrupts
-            if self.paused {
-                self.process_queries().await;
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                continue;
-            }
-
-            let next = self.transition().await?;
-
-            // Ceiling check: if the next state matches the ceiling, auto-pause
-            if let Some(ref ceiling) = self.ceiling_state {
-                if &next == ceiling {
-                    log::info!("State machine reached ceiling state {} — auto-pausing", next);
-                    self.paused = true;
-                    self.ceiling_state = None;
-                }
-            }
-
-            log::info!("State transition: {} -> {}", self.state, next);
-
-            self.record_transition(&self.state.clone(), &next);
-
-            if next == State::Connected && self.state != State::Connected {
-                self.connected_since = Some(Instant::now());
-            } else if next != State::Connected {
-                self.connected_since = None;
-            }
-
+            // Pre-transition bookkeeping (cheap, no I/O)
+            self.check_ib_status_ttl();
+            self.check_ib_system_availability();
             self.process_queries().await;
 
-            if next == State::Shutdown {
-                self.do_shutdown().await?;
-                break;
-            }
+            // Temporarily take receivers out of self so we can select between
+            // them and self.transition() without borrow conflicts.
+            let mut sig_rx = std::mem::replace(
+                &mut self.signal_rx,
+                mpsc::channel(1).1, // dummy receiver, never polled
+            );
+            let mut cmd_rx = std::mem::replace(
+                &mut self.command_rx,
+                mpsc::channel(1).1,
+            );
+            let mut cold_rx = std::mem::replace(
+                &mut self.cold_restart_rx,
+                mpsc::channel(1).1,
+            );
 
-            if let State::Error(ref msg) = next {
-                log::error!("State machine entered error state: {}", msg);
-                self.do_shutdown().await?;
-                return Err(StateMachineError::Fatal {
-                    state: self.state.to_string(),
-                    reason: msg.clone(),
-                });
-            }
+            let outcome = if self.pause.paused {
+                // Pause mode: wait for interrupt or timeout
+                tokio::select! {
+                    biased;
 
-            self.state = next;
+                    signal = sig_rx.recv() => {
+                        SelectOutcome::Interrupted(match signal {
+                            Some(sig) => Interrupt::Signal(sig),
+                            None => Interrupt::Signal(Signal::Terminate),
+                        })
+                    }
+                    cmd = cmd_rx.recv() => {
+                        SelectOutcome::Interrupted(match cmd {
+                            Some(c) => Interrupt::Command(c),
+                            // Command channel closed — not fatal, just idle
+                            None => Interrupt::Signal(Signal::Terminate),
+                        })
+                    }
+                    _ = cold_rx.recv() => {
+                        SelectOutcome::Interrupted(Interrupt::ColdRestart)
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                        SelectOutcome::Transitioned(Ok(self.state.clone()))
+                    }
+                }
+            } else {
+                // Main select: interrupts race against the state transition.
+                // `biased;` ensures signals get priority when multiple branches
+                // are ready simultaneously.
+                tokio::select! {
+                    biased;
+
+                    signal = sig_rx.recv() => {
+                        SelectOutcome::Interrupted(match signal {
+                            Some(sig) => Interrupt::Signal(sig),
+                            None => Interrupt::Signal(Signal::Terminate),
+                        })
+                    }
+
+                    cmd = cmd_rx.recv() => {
+                        SelectOutcome::Interrupted(match cmd {
+                            Some(c) => Interrupt::Command(c),
+                            None => Interrupt::Signal(Signal::Terminate), // shouldn't happen
+                        })
+                    }
+
+                    _ = cold_rx.recv() => {
+                        SelectOutcome::Interrupted(Interrupt::ColdRestart)
+                    }
+
+                    // State transition — cancellation-safe because:
+                    // 1. Agent HTTP calls are atomic (complete or don't)
+                    // 2. self.state is only updated AFTER transition returns
+                    // 3. Internal timers reset on re-entry, which is acceptable
+                    //    since cancellation only happens on signal/command (rare)
+                    next = self.transition() => {
+                        SelectOutcome::Transitioned(next)
+                    }
+                }
+            };
+
+            // Restore receivers back into self
+            self.signal_rx = sig_rx;
+            self.command_rx = cmd_rx;
+            self.cold_restart_rx = cold_rx;
+
+            // Process the outcome
+            match outcome {
+                SelectOutcome::Interrupted(interrupt) => {
+                    self.handle_interrupt(interrupt).await?;
+                    if matches!(self.state, State::Shutdown) {
+                        self.do_shutdown().await?;
+                        break;
+                    }
+                }
+                SelectOutcome::Transitioned(result) => {
+                    let next = result?;
+                    if next != self.state || matches!(next, State::Connected) {
+                        self.apply_transition(next).await?;
+                    }
+                    if matches!(self.state, State::Shutdown) {
+                        break;
+                    }
+                }
+            }
         }
 
         Ok(())
+    }
+
+    /// Apply a transition result: record history, check ceiling, handle
+    /// terminal states (Shutdown, Error).
+    async fn apply_transition(&mut self, next: State) -> Result<(), StateMachineError> {
+        // Ceiling check: if the next state matches the ceiling, auto-pause
+        if let Some(ref ceiling) = self.pause.ceiling_state {
+            if &next == ceiling {
+                log::info!("State machine reached ceiling state {} — auto-pausing", next);
+                self.pause.paused = true;
+                self.pause.ceiling_state = None;
+            }
+        }
+
+        log::info!("State transition: {} -> {}", self.state, next);
+        self.record_transition(&self.state.clone(), &next);
+
+        if next == State::Connected && self.state != State::Connected {
+            self.connected_since = Some(Instant::now());
+        } else if next != State::Connected {
+            self.connected_since = None;
+        }
+
+        self.process_queries().await;
+
+        if next == State::Shutdown {
+            self.abort_client_id_task();
+            self.do_shutdown().await?;
+            self.state = State::Shutdown;
+            return Ok(());
+        }
+
+        if let State::Error(ref msg) = next {
+            log::error!("State machine entered error state: {}", msg);
+            self.abort_client_id_task();
+            self.do_shutdown().await?;
+            return Err(StateMachineError::Fatal {
+                state: self.state.to_string(),
+                reason: msg.clone(),
+            });
+        }
+
+        self.state = next;
+        Ok(())
+    }
+
+    /// Dispatch a command received from the command server.
+    /// Handles stop/exit/restart specially; delegates the rest to handle_command.
+    async fn dispatch_command(&mut self, cmd: Command) -> Result<(), StateMachineError> {
+        match cmd {
+            Command::Stop | Command::Exit => {
+                log::info!("Received stop command, transitioning to Shutdown");
+                self.abort_client_id_task();
+                self.state = State::Shutdown;
+            }
+            Command::Restart => {
+                log::info!("Received restart command");
+                self.abort_client_id_task();
+                self.state = State::Restarting;
+            }
+            other => {
+                log::info!("Received command {:?} in state {}", other, self.state);
+                self.handle_command(other).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Handle an interrupt received via the select loop.
+    async fn handle_interrupt(&mut self, interrupt: Interrupt) -> Result<(), StateMachineError> {
+        match interrupt {
+            Interrupt::Signal(Signal::Terminate | Signal::Interrupt) => {
+                log::info!("Received shutdown signal, transitioning to Shutdown");
+                self.abort_client_id_task();
+                self.state = State::Shutdown;
+            }
+            Interrupt::Command(cmd) => {
+                self.dispatch_command(cmd).await?;
+            }
+            Interrupt::ColdRestart => {
+                log::info!("Sunday cold restart — full re-authentication required");
+                self.abort_client_id_task();
+                self.state = State::Restarting;
+            }
+        }
+        Ok(())
+    }
+
+    /// IB System Status TTL expiry — fail-open if no recent push.
+    fn check_ib_status_ttl(&mut self) {
+        if let Some(last) = self.ib_status.last_updated {
+            let ttl = std::time::Duration::from_secs(600); // 10 min default TTL
+            if last.elapsed() > ttl && !self.ib_status.available {
+                log::info!("IB system status TTL expired — assuming available (fail-open)");
+                self.ib_status.available = true;
+                self.ib_status.status = "available".to_string();
+                self.ib_status.reason.clear();
+            }
+        }
+    }
+
+    /// If IB system unavailable and not already in WaitingForIB, transition there.
+    fn check_ib_system_availability(&mut self) {
+        if !self.ib_status.available && self.state != State::WaitingForIB && self.state != State::Shutdown {
+            log::warn!("IB system unavailable: {} — transitioning to WaitingForIB", self.ib_status.reason);
+            self.ib_status.return_state = Some(Box::new(self.state.clone()));
+            let old = self.state.clone();
+            self.state = State::WaitingForIB;
+            self.record_transition(&old, &State::WaitingForIB);
+        }
+    }
+
+    /// Abort the background client ID refresh task if running.
+    fn abort_client_id_task(&mut self) {
+        if let Some(handle) = self.client_id_task.take() {
+            handle.abort();
+        }
+        self.client_id_rx = None;
     }
 
     /// Execute the transition for the current state, returning the next state.
@@ -615,132 +768,117 @@ impl StateMachine {
     }
 
     async fn do_connected(&mut self) -> Result<State, StateMachineError> {
-        log::info!("Gateway connected — entering monitoring loop");
+        log::info!("Gateway connected — monitoring loop tick");
 
         let (api_port, socat_port) = if self.config.auth.trading_mode == crate::config::TradingMode::Paper {
             (self.config.gateway.paper_api_port, self.config.gateway.paper_socat_port)
         } else {
             (self.config.gateway.live_api_port, self.config.gateway.live_socat_port)
         };
-        self.start_socat(api_port, socat_port);
 
-        // Spawn background task for client ID refresh (slow agent calls, must not block main loop)
-        // Uses tokio::sync::watch — lock-free, change-driven updates
-        let (ids_tx, mut ids_rx) = tokio::sync::watch::channel(Vec::<String>::new());
-        let socket_path = self.config.agent.socket_path.clone();
-        let client_id_task = tokio::spawn(async move {
-            loop {
-                let mut ids = Vec::new();
-                let client = crate::agent_client::AgentClient::new(&socket_path);
-                if let Ok(windows) = client.list_windows().await {
-                    for w in &windows {
-                        if let Ok(tabs_data) = client.list_tabs(w.id).await {
-                            if let Some(tabs) = tabs_data.get("tabs").and_then(|t| t.as_array()) {
-                                for tab in tabs {
-                                    if let Some(title) = tab.get("title").and_then(|t| t.as_str()) {
-                                        ids.push(title.to_string());
+        // Start socat if not already running
+        let socat_alive = self.socat_process.as_mut()
+            .map(|c| c.try_wait().ok().flatten().is_none())
+            .unwrap_or(false);
+        if !socat_alive {
+            self.start_socat(api_port, socat_port);
+        }
+
+        // Spawn client ID refresh task if not already running.
+        // Stored in struct fields so it survives cancellation by tokio::select!
+        if self.client_id_task.is_none() {
+            let (ids_tx, ids_rx) = tokio::sync::watch::channel(Vec::<String>::new());
+            let socket_path = self.config.agent.socket_path.clone();
+            let handle = tokio::spawn(async move {
+                loop {
+                    let mut ids = Vec::new();
+                    let client = crate::agent_client::AgentClient::new(&socket_path);
+                    if let Ok(windows) = client.list_windows().await {
+                        for w in &windows {
+                            if let Ok(tabs_data) = client.list_tabs(w.id).await {
+                                if let Some(tabs) = tabs_data.get("tabs").and_then(|t| t.as_array()) {
+                                    for tab in tabs {
+                                        if let Some(title) = tab.get("title").and_then(|t| t.as_str()) {
+                                            ids.push(title.to_string());
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+                    let _ = ids_tx.send(ids);
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 }
-                let _ = ids_tx.send(ids);
-                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            });
+            self.client_id_task = Some(handle);
+            self.client_id_rx = Some(ids_rx);
+        }
+
+        // Check JVM health
+        if !self.supervisor.is_running() {
+            log::info!("JVM exited — checking for autorestart token");
+            let autorestart_hash = self.supervisor.find_autorestart_path();
+            if let Some(ref hash) = autorestart_hash {
+                log::info!("Found autorestart token: {} — warm restart", hash);
+            } else {
+                log::info!("No autorestart token — crash or unexpected exit");
             }
-        });
 
-        let poll_interval = std::time::Duration::from_secs(5);
+            self.stop_socat();
+            self.warm_restart_pending = autorestart_hash;
+            self.abort_client_id_task();
+            let _ = std::fs::remove_file(&self.config.agent.socket_path);
+            return Ok(State::Restarting);
+        }
 
-        loop {
-            if !self.supervisor.is_running() {
-                log::info!("JVM exited — checking for autorestart token");
+        // Check socat health — restart if it died
+        let socat_alive = self.socat_process.as_mut()
+            .map(|c| c.try_wait().ok().flatten().is_none())
+            .unwrap_or(false);
+        if !socat_alive {
+            log::warn!("Socat process died — restarting port forwarding");
+            self.start_socat(api_port, socat_port);
+        }
 
-                // Check for autorestart token — Gateway writes this before a
-                // scheduled exit. The install4j launcher is disabled (renamed),
-                // so the token stays intact for us to read.
-                let autorestart_hash = self.supervisor.find_autorestart_path();
-                if let Some(ref hash) = autorestart_hash {
-                    log::info!("Found autorestart token: {} — warm restart", hash);
-                } else {
-                    log::info!("No autorestart token — crash or unexpected exit");
+        // Check windows for re-login dialogs and dismiss popups
+        if let Ok(windows) = self.agent_client.list_windows().await {
+            for win in &windows {
+                let title_lower = win.title.to_lowercase();
+
+                if title_lower.contains("re-login") || title_lower.contains("login is required") {
+                    log::info!("Connection lost — clicking Cancel to return to login form");
+                    let _ = self.agent_client.click_button(win.id, "Cancel").await;
+                    self.handler_registry.reset();
+                    self.abort_client_id_task();
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    return Ok(State::WaitingForLogin);
                 }
 
-                self.stop_socat();
-                self.warm_restart_pending = autorestart_hash;
-                client_id_task.abort();
-                let _ = std::fs::remove_file(&self.config.agent.socket_path);
-                return Ok(State::Restarting);
+                let _ = self.handler_registry.dispatch(&self.agent_client, win).await;
             }
+        }
 
-            // Check socat health — restart if it died
-            let socat_alive = self.socat_process.as_mut()
-                .map(|c| c.try_wait().ok().flatten().is_none())
-                .unwrap_or(false);
-            if !socat_alive {
-                log::warn!("Socat process died — restarting port forwarding");
-                self.start_socat(api_port, socat_port);
-            }
-
-            if let Ok(windows) = self.agent_client.list_windows().await {
-                for win in &windows {
-                    let title_lower = win.title.to_lowercase();
-
-                    if title_lower.contains("re-login") || title_lower.contains("login is required") {
-                        log::info!("Connection lost — clicking Cancel to return to login form");
-                        let _ = self.agent_client.click_button(win.id, "Cancel").await;
-                        self.handler_registry.reset();
-                        client_id_task.abort();
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                        return Ok(State::WaitingForLogin);
-                    }
-
-                    let _ = self.handler_registry.dispatch(&self.agent_client, win).await;
-                }
-            }
-
-            // Sync client IDs from background task (lock-free watch channel)
+        // Sync client IDs from background task (lock-free watch channel)
+        if let Some(ref mut ids_rx) = self.client_id_rx {
             if ids_rx.has_changed().unwrap_or(false) {
                 let ids = ids_rx.borrow_and_update().clone();
                 if !ids.is_empty() {
                     self.cached_client_ids = ids;
                 }
             }
-
-            self.process_queries().await;
-
-            if let Some(interrupt) = self.check_interrupts().await {
-                match interrupt {
-                    Interrupt::Signal(Signal::Terminate | Signal::Interrupt) => {
-                        client_id_task.abort();
-                        return Ok(State::Shutdown);
-                    }
-                    Interrupt::Command(Command::Stop | Command::Exit) => {
-                        client_id_task.abort();
-                        return Ok(State::Shutdown);
-                    }
-                    Interrupt::Command(Command::Restart) => {
-                        client_id_task.abort();
-                        return Ok(State::Restarting);
-                    }
-                    Interrupt::Command(cmd) => {
-                        self.handle_command(cmd).await?;
-                    }
-                    Interrupt::ColdRestart => {
-                        log::info!("Sunday cold restart — restarting with full re-authentication");
-                        client_id_task.abort();
-                        return Ok(State::Restarting);
-                    }
-                }
-            }
-
-            tokio::time::sleep(poll_interval).await;
         }
+
+        // Signal/command/cold-restart handling is done by the outer
+        // tokio::select! in run() — no need to check_interrupts() here.
+
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        Ok(State::Connected)
     }
 
     async fn do_restart(&mut self) -> Result<State, StateMachineError> {
         log::info!("Restarting IB Gateway");
 
+        self.abort_client_id_task();
         self.stop_socat();
 
         if self.supervisor.is_running() {
@@ -773,15 +911,15 @@ impl StateMachine {
     }
 
     async fn do_waiting_for_ib(&mut self) -> Result<State, StateMachineError> {
-        log::info!("Waiting for IB system to become available ({})", self.ib_system_reason);
+        log::info!("Waiting for IB system to become available ({})", self.ib_status.reason);
 
         // Process queries so STATUS requests still return
         self.process_queries().await;
 
         // Check if IB became available
-        if self.ib_system_available {
+        if self.ib_status.available {
             log::info!("IB system is now available — resuming");
-            if let Some(return_state) = self.ib_system_return_state.take() {
+            if let Some(return_state) = self.ib_status.return_state.take() {
                 return Ok(*return_state);
             }
             return Ok(State::Init);
@@ -811,33 +949,9 @@ impl StateMachine {
         Ok(())
     }
 
-    // --- Interrupt handling ---
-
-    async fn check_interrupts(&mut self) -> Option<Interrupt> {
-        use tokio::sync::mpsc::error::TryRecvError;
-
-        match self.signal_rx.try_recv() {
-            Ok(sig) => return Some(Interrupt::Signal(sig)),
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => {
-                log::warn!("Signal channel disconnected");
-            }
-        }
-
-        match self.command_rx.try_recv() {
-            Ok(cmd) => return Some(Interrupt::Command(cmd)),
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => {}
-        }
-
-        match self.cold_restart_rx.try_recv() {
-            Ok(_) => return Some(Interrupt::ColdRestart),
-            Err(TryRecvError::Empty) => {}
-            Err(TryRecvError::Disconnected) => {}
-        }
-
-        None
-    }
+    // check_interrupts() removed — signal/command/cold-restart handling is now
+    // done directly in the tokio::select! loop in run(), giving immediate
+    // responsiveness instead of polling between transitions.
 
     /// Check if any visible window is a blocking dialog that requires a state change.
     /// Clicks the appropriate button to dismiss the dialog, then returns the next state.
@@ -880,10 +994,10 @@ impl StateMachine {
             Command::IbStatus(ref status, ref reason) => {
                 let available = status == "available";
                 log::info!("IB system status update: {} ({})", status, if reason.is_empty() { "no reason" } else { reason });
-                self.ib_system_available = available;
-                self.ib_system_status = status.clone();
-                self.ib_system_reason = reason.clone();
-                self.ib_system_last_updated = Some(std::time::Instant::now());
+                self.ib_status.available = available;
+                self.ib_status.status = status.clone();
+                self.ib_status.reason = reason.clone();
+                self.ib_status.last_updated = Some(std::time::Instant::now());
                 Ok(())
             }
             Command::RestartSocat => {
@@ -921,19 +1035,19 @@ impl StateMachine {
             }
             Command::Pause => {
                 log::info!("State machine PAUSED — transitions frozen");
-                self.paused = true;
-                self.ceiling_state = None;
+                self.pause.paused = true;
+                self.pause.ceiling_state = None;
                 Ok(())
             }
             Command::PauseAt(ref name) => {
                 if let Some(target) = State::from_name(name) {
                     log::info!("State machine ceiling set: will pause at {}", target);
-                    self.ceiling_state = Some(target);
+                    self.pause.ceiling_state = Some(target);
                     // If already at the ceiling state, pause immediately
-                    if self.ceiling_state.as_ref() == Some(&self.state) {
+                    if self.pause.ceiling_state.as_ref() == Some(&self.state) {
                         log::info!("Already at ceiling state — pausing now");
-                        self.paused = true;
-                        self.ceiling_state = None;
+                        self.pause.paused = true;
+                        self.pause.ceiling_state = None;
                     }
                 } else {
                     log::error!("PAUSE: unknown state '{}'", name);
@@ -942,8 +1056,8 @@ impl StateMachine {
             }
             Command::Resume => {
                 log::info!("State machine RESUMED — transitions active");
-                self.paused = false;
-                self.ceiling_state = None;
+                self.pause.paused = false;
+                self.pause.ceiling_state = None;
                 Ok(())
             }
             Command::SetState(ref name) => {

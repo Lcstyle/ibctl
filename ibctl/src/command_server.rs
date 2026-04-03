@@ -98,6 +98,7 @@ pub(crate) enum QueryType {
 
 /// Parse a command string (case-insensitive) matching IBC's wire protocol,
 /// extended with JSON query commands for the dashboard.
+#[must_use]
 pub(crate) fn parse_command(input: &str) -> Option<ParsedCommand> {
     let trimmed = input.trim();
     let upper = trimmed.to_uppercase();

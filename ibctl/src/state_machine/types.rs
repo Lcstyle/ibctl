@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use crate::agent_client::AgentClient;
 use crate::cold_restart::ColdRestartSignal;
 use crate::command_server::{Command, Query};
-use crate::config::Config;
+use crate::config::ValidConfig;
 use crate::handlers::DialogHandlerRegistry;
 use crate::signals::Signal;
 use crate::supervisor::Supervisor;
@@ -123,10 +123,46 @@ pub(super) enum Interrupt {
     ColdRestart,
 }
 
+/// IB system status — pushed by dashboard or external clients via IBSTATUS command.
+pub struct IbSystemStatus {
+    pub(super) available: bool,
+    pub(super) status: String,
+    pub(super) reason: String,
+    pub(super) last_updated: Option<Instant>,
+    pub(super) return_state: Option<Box<State>>,
+}
+
+impl IbSystemStatus {
+    fn new() -> Self {
+        Self {
+            available: true,
+            status: "available".to_string(),
+            reason: String::new(),
+            last_updated: None,
+            return_state: None,
+        }
+    }
+}
+
+/// Pause/ceiling controls for the state machine.
+pub struct PauseControl {
+    pub(super) paused: bool,
+    pub(super) ceiling_state: Option<State>,
+}
+
+impl PauseControl {
+    fn new() -> Self {
+        Self {
+            paused: false,
+            ceiling_state: None,
+        }
+    }
+}
+
 /// The main state machine that orchestrates the IB Gateway lifecycle.
 pub struct StateMachine {
     pub(super) state: State,
-    pub(super) config: Config,
+    pub(super) config: ValidConfig,
     pub(super) agent_client: AgentClient,
     pub(super) supervisor: Supervisor,
     pub(super) handler_registry: DialogHandlerRegistry,
@@ -136,14 +172,8 @@ pub struct StateMachine {
     pub(super) cold_restart_rx: mpsc::Receiver<ColdRestartSignal>,
     pub(super) socat_process: Option<std::process::Child>,
     pub(super) config_retries: u32,
-    pub(super) paused: bool,
-    pub(super) ceiling_state: Option<State>,
-    // IB System Status (pushed by dashboard or external clients via IBSTATUS command)
-    pub(super) ib_system_available: bool,
-    pub(super) ib_system_status: String,
-    pub(super) ib_system_reason: String,
-    pub(super) ib_system_last_updated: Option<Instant>,
-    pub(super) ib_system_return_state: Option<Box<State>>,
+    pub(super) pause: PauseControl,
+    pub(super) ib_status: IbSystemStatus,
     pub(super) start_time: Instant,
     pub(super) connected_since: Option<Instant>,
     pub(super) transition_history: VecDeque<Transition>,
@@ -151,12 +181,18 @@ pub struct StateMachine {
     /// Set by do_connected when JVM exits during warm restart — carries the
     /// autorestart session hash to pass as -Drestart on relaunch (skips 2FA).
     pub(super) warm_restart_pending: Option<String>,
+    /// Background task that periodically refreshes client IDs from the agent.
+    /// Stored here so it survives cancellation of `do_connected()` by the
+    /// `tokio::select!` loop and gets properly cleaned up on state transitions.
+    pub(super) client_id_task: Option<tokio::task::JoinHandle<()>>,
+    /// Watch receiver for client IDs from the background refresh task.
+    pub(super) client_id_rx: Option<tokio::sync::watch::Receiver<Vec<String>>>,
     pub stats: Stats,
 }
 
 impl StateMachine {
     pub fn new(
-        config: Config,
+        config: ValidConfig,
         agent_client: AgentClient,
         supervisor: Supervisor,
         handler_registry: DialogHandlerRegistry,
@@ -174,18 +210,15 @@ impl StateMachine {
             cold_restart_rx: channels.cold_restart,
             socat_process: None,
             config_retries: 0,
-            paused: false,
-            ceiling_state: None,
-            ib_system_available: true,
-            ib_system_status: "available".to_string(),
-            ib_system_reason: String::new(),
-            ib_system_last_updated: None,
-            ib_system_return_state: None,
+            pause: PauseControl::new(),
+            ib_status: IbSystemStatus::new(),
             start_time: Instant::now(),
             connected_since: None,
             transition_history: VecDeque::with_capacity(100),
             cached_client_ids: Vec::new(),
             warm_restart_pending: None,
+            client_id_task: None,
+            client_id_rx: None,
             stats: Stats::default(),
         }
     }

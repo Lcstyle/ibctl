@@ -62,7 +62,7 @@ impl DialogHandler for TotpEntryHandler {
             // Generate TOTP code in a blocking task to avoid blocking the runtime
             let provider_type = self.provider;
             let handler_name = self.name().to_string();
-            let code = tokio::task::spawn_blocking(move || {
+            let totp_code = tokio::task::spawn_blocking(move || {
                 let provider = totp::create_provider(provider_type)?;
                 provider.generate(secret.expose_secret())
             })
@@ -76,7 +76,8 @@ impl DialogHandler for TotpEntryHandler {
                 reason: format!("failed to generate TOTP code: {}", e),
             })?;
 
-            // Type the code into the first text field
+            // Consume the single-use TotpCode and type it into the first text field
+            let code = totp_code.into_inner();
             client
                 .type_text(window.id, 0, &code)
                 .await

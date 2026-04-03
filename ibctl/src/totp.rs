@@ -4,6 +4,7 @@
 //! stdin to avoid exposing it in /proc/PID/cmdline.
 
 use crate::config::TotpProvider;
+use crate::types::TotpCode;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -19,7 +20,7 @@ pub enum TotpError {
 /// Trait for TOTP code generation providers.
 pub trait TotpCodeGenerator: Send + Sync {
     /// Generate a 6-digit TOTP code from a base32-encoded secret.
-    fn generate(&self, secret: &str) -> Result<String, TotpError>;
+    fn generate(&self, secret: &str) -> Result<TotpCode, TotpError>;
 }
 
 /// TOTP provider that shells out to the `oathtool` command-line utility.
@@ -29,7 +30,7 @@ pub trait TotpCodeGenerator: Send + Sync {
 pub struct OathtoolProvider;
 
 impl TotpCodeGenerator for OathtoolProvider {
-    fn generate(&self, secret: &str) -> Result<String, TotpError> {
+    fn generate(&self, secret: &str) -> Result<TotpCode, TotpError> {
         use std::io::Write;
         use std::process::{Command, Stdio};
 
@@ -54,7 +55,7 @@ impl TotpCodeGenerator for OathtoolProvider {
 
         let code = String::from_utf8_lossy(&output.stdout).trim().to_string();
         log::debug!("Generated TOTP code (length={})", code.len());
-        Ok(code)
+        Ok(TotpCode::new(code))
     }
 }
 

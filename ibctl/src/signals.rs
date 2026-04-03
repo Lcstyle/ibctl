@@ -27,16 +27,17 @@ pub enum Signal {
     Interrupt,
 }
 
-/// Register OS signal handlers and return a channel receiver that
-/// yields `Signal` values when SIGTERM or SIGINT are received.
+/// Register OS signal handlers and return a channel receiver plus a future
+/// that bridges OS signals to the channel.
 ///
 /// The returned receiver should be polled in the main select loop.
-/// Spawns a background tokio task to bridge OS signals to the channel.
-pub fn setup_signal_handler() -> Result<mpsc::Receiver<Signal>, SignalError> {
+/// The returned future should be spawned via a `JoinSet` for structured
+/// concurrency — the caller owns the task lifetime.
+pub fn setup_signal_handler() -> Result<(mpsc::Receiver<Signal>, impl std::future::Future<Output = ()>), SignalError> {
     let (tx, rx) = mpsc::channel(4);
 
     let mut signals = Signals::new([SIGTERM, SIGINT])?;
-    tokio::spawn(async move {
+    let task = async move {
         loop {
             // Poll the Signals stream using std::future::poll_fn,
             // which gives us access to the futures_core::Stream::poll_next.
@@ -58,8 +59,8 @@ pub fn setup_signal_handler() -> Result<mpsc::Receiver<Signal>, SignalError> {
                 None => break, // Signal stream closed
             }
         }
-    });
+    };
 
     log::debug!("Signal handlers registered for SIGTERM and SIGINT");
-    Ok(rx)
+    Ok((rx, task))
 }

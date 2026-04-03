@@ -70,16 +70,20 @@ fn write_marker(marker_path: &Path, year: i32, day_of_year: u32) {
     }
 }
 
-/// Spawn the cold restart timer.
+/// Create the cold restart timer future.
+///
+/// Returns `None` if cold restart is not configured (empty time string).
+/// The returned future should be spawned via a `JoinSet` for structured
+/// concurrency — the caller owns the task lifetime.
 ///
 /// - Only fires on Sunday at the exact configured minute (not if past)
 /// - Tracks startup time to distinguish "started before scheduled time" from
 ///   "started after scheduled time" (the latter waits for next Sunday)
 /// - Persists via marker file in TWS_SETTINGS_PATH (volume-mounted)
-pub fn spawn_cold_restart_scheduler(
+pub fn cold_restart_scheduler(
     cold_restart_time: String,
     tx: mpsc::Sender<ColdRestartSignal>,
-) -> Option<tokio::task::JoinHandle<()>> {
+) -> Option<impl std::future::Future<Output = ()>> {
     let (target_hour, target_minute) = match parse_cold_restart_time(&cold_restart_time) {
         Some(t) => t,
         None => {
@@ -103,7 +107,7 @@ pub fn spawn_cold_restart_scheduler(
     // Record the minute we started so we can detect "started after target time"
     let startup_time = get_local_time();
 
-    let handle = tokio::spawn(async move {
+    Some(async move {
         use std::time::Duration;
 
         // Determine if we started AFTER the target time on a Sunday
@@ -171,9 +175,7 @@ pub fn spawn_cold_restart_scheduler(
                 }
             }
         }
-    });
-
-    Some(handle)
+    })
 }
 
 struct LocalTime {
@@ -185,6 +187,9 @@ struct LocalTime {
 }
 
 fn get_local_time() -> Option<LocalTime> {
+    // SAFETY: libc::tm is a C struct of plain integer fields, safe to zero-initialize
+    // via mem::zeroed(). localtime_r is the thread-safe variant (unlike localtime) and
+    // writes into the provided buffer. libc::time writes the current timestamp into `now`.
     unsafe {
         let mut now: libc::time_t = 0;
         libc::time(&mut now);

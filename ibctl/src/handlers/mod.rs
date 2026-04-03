@@ -19,8 +19,6 @@ pub mod version_notice;
 use std::future::Future;
 use std::pin::Pin;
 
-use secrecy::ExposeSecret;
-
 use crate::agent_client::{AgentClient, WindowInfo};
 
 use thiserror::Error;
@@ -34,6 +32,7 @@ pub enum HandlerError {
 }
 
 /// Result of a dialog handler's attempt to process a window.
+#[must_use]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HandlerResult {
     /// The dialog was recognized and successfully handled.
@@ -93,13 +92,13 @@ impl DialogHandlerRegistry {
     ///
     /// Credentials are resolved at registration time: env vars override config file,
     /// matching the Docker-native convention (TWS_USERID, TWS_PASSWORD env vars).
-    pub fn with_defaults(config: &crate::config::Config) -> Self {
+    pub fn with_defaults(config: &crate::config::ValidConfig) -> Self {
         let mut registry = Self::new();
 
         // Use already-resolved config (env vars applied during Config::load)
         registry.register(Box::new(login::LoginHandler::new(
             config.auth.username.clone(),
-            config.auth.password.expose_secret().to_string(),
+            config.auth.password.clone(),
             config.auth.trading_mode,
         )));
         registry.register(Box::new(totp_entry::TotpEntryHandler::new(

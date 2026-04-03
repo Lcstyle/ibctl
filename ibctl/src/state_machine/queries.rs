@@ -90,16 +90,16 @@ impl StateMachine {
                 "ids": client_ids,
             },
             "ib_system": {
-                "available": self.ib_system_available,
-                "status": self.ib_system_status,
-                "reason": if self.ib_system_reason.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(self.ib_system_reason.clone()) },
-                "expires_in_secs": self.ib_system_last_updated.map(|t| {
+                "available": self.ib_status.available,
+                "status": self.ib_status.status,
+                "reason": if self.ib_status.reason.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(self.ib_status.reason.clone()) },
+                "expires_in_secs": self.ib_status.last_updated.map(|t| {
                     let ttl = 600u64; // TODO: from config
                     ttl.saturating_sub(t.elapsed().as_secs())
                 }),
             },
-            "paused": self.paused,
-            "ceiling_state": self.ceiling_state.as_ref().map(|s| s.to_string()),
+            "paused": self.pause.paused,
+            "ceiling_state": self.pause.ceiling_state.as_ref().map(|s| s.to_string()),
             "stats": self.stats,
             "client_advisory": {
                 "should_connect": should_connect && socat_running,

@@ -7,9 +7,16 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use secrecy::{ExposeSecret, SecretString};
+
 use crate::agent_client::{AgentClient, WindowInfo};
 use crate::config::TradingMode;
 use crate::handlers::{DialogHandler, HandlerError, HandlerResult};
+
+/// Text field index for the username input.
+const USERNAME_FIELD: usize = 0;
+/// Text field index for the password input.
+const PASSWORD_FIELD: usize = 1;
 
 /// Handles the IB Gateway login dialog by filling username, password,
 /// and clicking the appropriate login button.
@@ -19,7 +26,7 @@ use crate::handlers::{DialogHandler, HandlerError, HandlerResult};
 /// Mirrors IBC's LoginFrameHandler which also tracks login state.
 pub struct LoginHandler {
     username: String,
-    password: String,
+    password: SecretString,
     trading_mode: TradingMode,
     /// Set to true after credentials are submitted.
     /// Prevents re-matching the main gateway window post-login.
@@ -27,7 +34,7 @@ pub struct LoginHandler {
 }
 
 impl LoginHandler {
-    pub fn new(username: String, password: String, trading_mode: TradingMode) -> Self {
+    pub fn new(username: String, password: SecretString, trading_mode: TradingMode) -> Self {
         Self {
             username,
             password,
@@ -99,17 +106,17 @@ impl DialogHandler for LoginHandler {
             // Brief pause for UI to update after mode selection
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-            // Step 3: Fill username into the first text field (index 0)
+            // Step 3: Fill username into the first text field
             // Matches IBC pattern: SwingUtils.findTextField(window, 0)
             client
-                .type_text(window.id, 0, &self.username)
+                .type_text(window.id, USERNAME_FIELD, &self.username)
                 .await
                 .map_err(HandlerError::AgentError)?;
 
-            // Step 4: Fill password into the second text field (index 1)
+            // Step 4: Fill password into the second text field
             // Matches IBC pattern: SwingUtils.findTextField(window, 1)
             client
-                .type_text(window.id, 1, &self.password)
+                .type_text(window.id, PASSWORD_FIELD, self.password.expose_secret())
                 .await
                 .map_err(HandlerError::AgentError)?;
 

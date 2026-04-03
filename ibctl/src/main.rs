@@ -13,10 +13,13 @@ mod signals;
 mod state_machine;
 mod supervisor;
 mod totp;
+pub mod types;
 
 use std::process::ExitCode;
 
-use config::Config;
+use tokio::task::JoinSet;
+
+use config::{Config, ValidConfig};
 
 fn main() -> ExitCode {
     // Parse CLI args (minimal, no clap dependency)
@@ -56,12 +59,6 @@ fn main() -> ExitCode {
 
     log::info!("ibctl v{} starting", env!("CARGO_PKG_VERSION"));
 
-    // Validate config
-    if let Err(e) = config.validate() {
-        log::error!("Configuration validation failed: {}", e);
-        return ExitCode::from(1);
-    }
-
     // Build the tokio runtime and run the async main
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -81,9 +78,14 @@ fn main() -> ExitCode {
 }
 
 /// Async entry point: sets up all components and runs the state machine.
-async fn async_main(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+async fn async_main(config: ValidConfig) -> Result<(), Box<dyn std::error::Error>> {
+    // JoinSet owns all background tasks — structured concurrency ensures they
+    // are cleaned up (aborted) when the JoinSet is dropped or shut down.
+    let mut tasks: JoinSet<()> = JoinSet::new();
+
     // Set up signal handling (SIGTERM, SIGINT -> channel)
-    let signal_rx = signals::setup_signal_handler()?;
+    let (signal_rx, signal_task) = signals::setup_signal_handler()?;
+    tasks.spawn(signal_task);
 
     // Create the agent client (HTTP+JSON over Unix domain socket)
     let agent_client = agent_client::AgentClient::new(&config.agent.socket_path);
@@ -110,7 +112,7 @@ async fn async_main(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let (query_tx, query_rx) = tokio::sync::mpsc::channel(32);
     if config.command_server.enabled {
         let cmd_server = command_server::CommandServer::new(config.command_server.clone());
-        tokio::spawn(async move {
+        tasks.spawn(async move {
             if let Err(e) = cmd_server.run(command_tx, query_tx).await {
                 log::error!("Command server failed: {}", e);
             }
@@ -128,10 +130,12 @@ async fn async_main(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     // the JVM, and the state machine relaunches with full re-auth.
     let (cold_restart_tx, cold_restart_rx) = tokio::sync::mpsc::channel(1);
     let cold_restart_time = config.session.cold_restart_time.clone();
-    let _cold_restart_handle = cold_restart::spawn_cold_restart_scheduler(
+    if let Some(cold_restart_fut) = cold_restart::cold_restart_scheduler(
         cold_restart_time,
         cold_restart_tx,
-    );
+    ) {
+        tasks.spawn(cold_restart_fut);
+    }
 
     // Create and run the state machine
     let channels = state_machine::Channels {
@@ -149,6 +153,9 @@ async fn async_main(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     );
 
     state_machine.run().await?;
+
+    // Shut down all background tasks (signal handler, command server, cold restart)
+    tasks.shutdown().await;
 
     Ok(())
 }
