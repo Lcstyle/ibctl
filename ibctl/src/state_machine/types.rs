@@ -225,6 +225,9 @@ impl StateMachine {
 
     /// Record a state transition in the history ring buffer.
     pub(super) fn record_transition(&mut self, from: &State, to: &State) {
+        if from == to {
+            return;
+        }
         if self.transition_history.len() >= 100 {
             self.transition_history.pop_front();
         }

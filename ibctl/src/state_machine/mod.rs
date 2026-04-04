@@ -145,7 +145,7 @@ impl StateMachine {
                 }
                 SelectOutcome::Transitioned(result) => {
                     let next = result?;
-                    if next != self.state || matches!(next, State::Connected) {
+                    if next != self.state {
                         self.apply_transition(next).await?;
                     }
                     if matches!(self.state, State::Shutdown) {
