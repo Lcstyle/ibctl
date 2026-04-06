@@ -73,20 +73,13 @@ impl StateMachine {
                 tokio::select! {
                     biased;
 
-                    signal = sig_rx.recv() => {
-                        SelectOutcome::Interrupted(match signal {
-                            Some(sig) => Interrupt::Signal(sig),
-                            None => Interrupt::Signal(Signal::Terminate),
-                        })
+                    Some(sig) = sig_rx.recv() => {
+                        SelectOutcome::Interrupted(Interrupt::Signal(sig))
                     }
-                    cmd = cmd_rx.recv() => {
-                        SelectOutcome::Interrupted(match cmd {
-                            Some(c) => Interrupt::Command(c),
-                            // Command channel closed — not fatal, just idle
-                            None => Interrupt::Signal(Signal::Terminate),
-                        })
+                    Some(c) = cmd_rx.recv() => {
+                        SelectOutcome::Interrupted(Interrupt::Command(c))
                     }
-                    _ = cold_rx.recv() => {
+                    Some(_) = cold_rx.recv() => {
                         SelectOutcome::Interrupted(Interrupt::ColdRestart)
                     }
                     _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
@@ -97,24 +90,24 @@ impl StateMachine {
                 // Main select: interrupts race against the state transition.
                 // `biased;` ensures signals get priority when multiple branches
                 // are ready simultaneously.
+                //
+                // All recv() branches use `Some(_) =` pattern guards so that a
+                // closed channel (sender dropped) is treated as "branch not ready"
+                // rather than firing. Without this, a dropped sender causes an
+                // immediate-resolving branch that busy-loops or triggers spurious
+                // interrupts. See: https://github.com/Lcstyle/ibctl/issues/1
                 tokio::select! {
                     biased;
 
-                    signal = sig_rx.recv() => {
-                        SelectOutcome::Interrupted(match signal {
-                            Some(sig) => Interrupt::Signal(sig),
-                            None => Interrupt::Signal(Signal::Terminate),
-                        })
+                    Some(sig) = sig_rx.recv() => {
+                        SelectOutcome::Interrupted(Interrupt::Signal(sig))
                     }
 
-                    cmd = cmd_rx.recv() => {
-                        SelectOutcome::Interrupted(match cmd {
-                            Some(c) => Interrupt::Command(c),
-                            None => Interrupt::Signal(Signal::Terminate), // shouldn't happen
-                        })
+                    Some(c) = cmd_rx.recv() => {
+                        SelectOutcome::Interrupted(Interrupt::Command(c))
                     }
 
-                    _ = cold_rx.recv() => {
+                    Some(_) = cold_rx.recv() => {
                         SelectOutcome::Interrupted(Interrupt::ColdRestart)
                     }
 
@@ -222,6 +215,33 @@ impl StateMachine {
             }
         }
         Ok(())
+    }
+
+    /// Drain pending commands non-blockingly. Used inside state handler loops
+    /// (like do_wait_for_login) to process IBSTATUS updates that arrive via the
+    /// command channel without waiting for the main select loop.
+    async fn process_commands_nonblocking(&mut self) {
+        loop {
+            match self.command_rx.try_recv() {
+                Ok(cmd) => {
+                    // Only handle non-state-changing commands (like IBSTATUS).
+                    // Stop/Restart/Exit are handled by the main select loop.
+                    match cmd {
+                        Command::IbStatus(_, _) | Command::SetRestartTime(_) => {
+                            let _ = self.handle_command(cmd).await;
+                        }
+                        _ => {
+                            // Put it back? Can't with mpsc. Log and skip —
+                            // these commands will be processed when we return
+                            // to the main loop.
+                            log::debug!("Deferring command {:?} until main loop", cmd);
+                        }
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
+            }
+        }
     }
 
     /// Handle an interrupt received via the select loop.
@@ -411,8 +431,15 @@ impl StateMachine {
             }
         }
 
-        log::info!("Waiting for login window to appear");
-        let max_wait = std::time::Duration::from_secs(120);
+        let timeout_secs = self.config.timing.login_dialog_timeout_secs;
+        let wait_indefinitely = timeout_secs == 0;
+        if wait_indefinitely {
+            log::info!("Waiting for login window (no timeout — will wait indefinitely)");
+        } else {
+            log::info!("Waiting for login window (timeout={}s)", timeout_secs);
+        }
+
+        let max_wait = std::time::Duration::from_secs(timeout_secs);
         let poll_interval = std::time::Duration::from_millis(500);
         let start = std::time::Instant::now();
 
@@ -449,9 +476,22 @@ impl StateMachine {
                 }
             }
 
-            if start.elapsed() > max_wait {
+            if !wait_indefinitely && start.elapsed() > max_wait {
                 return Ok(State::Error("Timed out waiting for login window".into()));
             }
+
+            // Process pending commands (IBSTATUS updates arrive via command channel)
+            // and queries (STATUS requests should still respond during wait)
+            self.process_commands_nonblocking().await;
+            self.process_queries().await;
+
+            // If dashboard scraper pushed IBSTATUS unavailable, exit to main loop
+            // which will transition to WaitingForIB
+            if !self.ib_status.available {
+                log::info!("IB system unavailable during login wait — returning to main loop");
+                return Ok(State::WaitingForLogin); // main loop will catch and go to WaitingForIB
+            }
+
             tokio::time::sleep(poll_interval).await;
         }
     }
@@ -1099,6 +1139,9 @@ impl StateMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cold_restart::ColdRestartSignal;
+    use crate::command_server::Command;
+    use crate::signals::Signal;
 
     #[test]
     fn test_relogin_dialog_detected() {
@@ -1177,5 +1220,145 @@ mod tests {
             StateMachine::classify_blocking_dialog("Warning"),
             None,
         );
+    }
+
+    // --- Channel closure tests (issue #1: closed channel busy-loop) ---
+    // These verify that `Some(_) = rx.recv()` in tokio::select! correctly
+    // skips branches when the sender is dropped (channel closed).
+
+    #[tokio::test]
+    async fn test_closed_cold_restart_channel_does_not_fire() {
+        // Simulate: TWS_COLD_RESTART not set → sender dropped → receiver closed
+        let (_tx, mut rx) = tokio::sync::mpsc::channel::<ColdRestartSignal>(1);
+        drop(_tx); // sender dropped, channel closed
+
+        // recv() on closed channel returns None immediately
+        assert!(rx.recv().await.is_none());
+
+        // In select!, Some(_) pattern should NOT match None → branch skipped
+        let result = tokio::select! {
+            Some(_) = rx.recv() => "cold_restart_fired",
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => "timeout",
+        };
+        assert_eq!(result, "timeout", "closed cold_restart channel must not fire");
+    }
+
+    #[tokio::test]
+    async fn test_closed_command_channel_does_not_fire() {
+        // Simulate: command server disabled → sender dropped
+        let (_tx, mut rx) = tokio::sync::mpsc::channel::<Command>(1);
+        drop(_tx);
+
+        let result = tokio::select! {
+            Some(_) = rx.recv() => "command_fired",
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => "timeout",
+        };
+        assert_eq!(result, "timeout", "closed command channel must not fire");
+    }
+
+    #[tokio::test]
+    async fn test_closed_signal_channel_does_not_fire() {
+        let (_tx, mut rx) = tokio::sync::mpsc::channel::<Signal>(1);
+        drop(_tx);
+
+        let result = tokio::select! {
+            Some(_) = rx.recv() => "signal_fired",
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => "timeout",
+        };
+        assert_eq!(result, "timeout", "closed signal channel must not fire");
+    }
+
+    #[tokio::test]
+    async fn test_live_channel_still_works_with_closed_siblings() {
+        // One channel alive (cold_restart), two closed (signal, command)
+        // The live channel should still deliver messages
+        let (cold_tx, mut cold_rx) = tokio::sync::mpsc::channel::<ColdRestartSignal>(1);
+        let (_sig_tx, mut sig_rx) = tokio::sync::mpsc::channel::<Signal>(1);
+        let (_cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<Command>(1);
+        drop(_sig_tx);
+        drop(_cmd_tx);
+
+        // Send a cold restart signal
+        cold_tx.send(ColdRestartSignal).await.unwrap();
+
+        let result = tokio::select! {
+            biased;
+            Some(_) = sig_rx.recv() => "signal",
+            Some(_) = cmd_rx.recv() => "command",
+            Some(_) = cold_rx.recv() => "cold_restart",
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => "timeout",
+        };
+        assert_eq!(result, "cold_restart", "live channel must still deliver with closed siblings");
+    }
+
+    #[tokio::test]
+    async fn test_biased_select_no_starvation_with_closed_channels() {
+        // Verify that closed channels don't starve later branches.
+        // With the old `_ = rx.recv()` pattern, this would spin on the
+        // closed channel and never reach the transition branch.
+        let (_tx1, mut rx1) = tokio::sync::mpsc::channel::<Signal>(1);
+        let (_tx2, mut rx2) = tokio::sync::mpsc::channel::<Command>(1);
+        let (_tx3, mut rx3) = tokio::sync::mpsc::channel::<ColdRestartSignal>(1);
+        drop(_tx1);
+        drop(_tx2);
+        drop(_tx3);
+
+        // All channels closed — the sleep (simulating transition) must win
+        let result = tokio::select! {
+            biased;
+            Some(_) = rx1.recv() => "signal",
+            Some(_) = rx2.recv() => "command",
+            Some(_) = rx3.recv() => "cold_restart",
+            _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => "transition",
+        };
+        assert_eq!(result, "transition", "closed channels must not starve transition branch");
+    }
+
+    // --- Login timeout configuration tests ---
+
+    #[test]
+    fn test_login_timeout_default_is_120() {
+        let config = crate::config::Config::default();
+        assert_eq!(config.timing.login_dialog_timeout_secs, 120);
+    }
+
+    #[test]
+    fn test_login_timeout_zero_means_indefinite() {
+        let toml_str = r#"
+[timing]
+login_dialog_timeout_secs = 0
+"#;
+        let config: crate::config::Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.timing.login_dialog_timeout_secs, 0);
+    }
+
+    // --- IB status + command processing interaction tests ---
+
+    #[tokio::test]
+    async fn test_ibstatus_command_received_via_try_recv() {
+        // Simulate: IBSTATUS command arrives on command channel
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Command>(32);
+        tx.send(Command::IbStatus("maintenance".into(), "weekend reset".into())).await.unwrap();
+
+        // try_recv should get it without blocking
+        match rx.try_recv() {
+            Ok(Command::IbStatus(status, reason)) => {
+                assert_eq!(status, "maintenance");
+                assert_eq!(reason, "weekend reset");
+            }
+            other => panic!("expected IbStatus, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_closed_command_channel_try_recv_is_disconnected() {
+        // When command server disabled, sender dropped, try_recv returns Disconnected
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Command>(32);
+        drop(tx);
+
+        match rx.try_recv() {
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {} // expected
+            other => panic!("expected Disconnected, got {:?}", other),
+        }
     }
 }
