@@ -78,14 +78,16 @@ RUN mkdir -p /prebuilt \
 # Stage 2b: Build Rust binary from source (fallback)
 ##############################################################################
 FROM rust:1.83-bookworm AS rust-builder
+ARG IBCTL_BUILD_VERSION=""
 COPY Cargo.toml Cargo.lock /build/
 COPY .cargo/ /build/.cargo/
 COPY ibctl/ /build/ibctl/
 WORKDIR /build
 # Use thin LTO for Docker source builds (fast). Release workflow uses fat LTO.
+# IBCTL_BUILD_VERSION is read by build.rs to embed the git tag version.
 RUN sed -i 's/lto = "fat"/lto = "thin"/' /build/.cargo/config.toml \
     && sed -i 's/codegen-units = 1/codegen-units = 16/' /build/.cargo/config.toml \
-    && cargo build --release && strip target/release/ibctl
+    && IBCTL_BUILD_VERSION="${IBCTL_BUILD_VERSION}" cargo build --release && strip target/release/ibctl
 
 ##############################################################################
 # Stage 2c: Build Java agent from source (fallback)

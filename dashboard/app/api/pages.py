@@ -242,6 +242,9 @@ async def ib_status_partial(request: Request):
         scraper_info["region"] = monitor._scraper.config.region
         scraper_info["interval"] = monitor._interval
         scraper_info["last_pushed_status"] = monitor._last_pushed_status
+        scraper_info["override_active"] = monitor.override_active
+        scraper_info["override_status"] = monitor.override_status
+        scraper_info["override_reason"] = monitor.override_reason
 
         # Get last scraped status
         if monitor._scraper._last_status:

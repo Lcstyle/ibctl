@@ -6,6 +6,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        IBCTL_BUILD_VERSION: ${IBCTL_BUILD_VERSION:-}
     container_name: ibctl-gateway
     restart: unless-stopped
     oom_score_adj: -1000

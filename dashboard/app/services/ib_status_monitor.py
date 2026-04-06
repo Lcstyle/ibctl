@@ -3,6 +3,9 @@
 Runs as an async task alongside the dashboard. Polls the IB status page
 at a configurable interval (default 5 min) and pushes IBSTATUS commands
 to all registered ibctl instances via their TCP command servers.
+
+Supports manual override: when set, the scraper is disabled and the
+override status is pushed to all instances on every interval.
 """
 
 from __future__ import annotations
@@ -10,14 +13,29 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
+from collections import deque
+from dataclasses import dataclass, field
 
 from app.services.ib_status_scraper import IBStatusScraper, ScraperConfig, SystemStatus
 
 logger = logging.getLogger("dashboard.services.ib_monitor")
 
 
+@dataclass
+class StatusEvent:
+    """A single IB status transition event for the audit log."""
+    timestamp: float  # time.time()
+    from_status: str
+    to_status: str
+    reason: str
+    source: str  # "scraper" or "manual_override"
+
+
 class IBStatusMonitor:
     """Background monitor that scrapes IB status and pushes to ibctl."""
+
+    MAX_AUDIT_LOG = 200
 
     def __init__(
         self,
@@ -31,6 +49,60 @@ class IBStatusMonitor:
         self._task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
         self._last_pushed_status: str = "available"
+        self._audit_log: deque[StatusEvent] = deque(maxlen=self.MAX_AUDIT_LOG)
+        self._override_status: str | None = None  # None = scraper active
+        self._override_reason: str = ""
+
+    @property
+    def audit_log(self) -> list[StatusEvent]:
+        """Return the audit log as a list (newest first)."""
+        return list(reversed(self._audit_log))
+
+    @property
+    def override_active(self) -> bool:
+        return self._override_status is not None
+
+    @property
+    def override_status(self) -> str | None:
+        return self._override_status
+
+    @property
+    def override_reason(self) -> str:
+        return self._override_reason
+
+    def set_override(self, status: str, reason: str = ""):
+        """Set a manual override, disabling the scraper.
+
+        The override status will be pushed to all instances on every interval.
+        """
+        old = self._last_pushed_status
+        self._override_status = status
+        self._override_reason = reason or f"Manual override: {status}"
+        self._record_event(old, status, self._override_reason, source="manual_override")
+        logger.info("IB status override SET: %s (%s) — scraper disabled", status, self._override_reason)
+
+    def clear_override(self):
+        """Clear the manual override, re-enabling the scraper."""
+        if self._override_status is not None:
+            old = self._override_status
+            self._override_status = None
+            self._override_reason = ""
+            self._record_event(old, "unknown", "Override cleared — scraper re-enabled", source="manual_override")
+            logger.info("IB status override CLEARED — scraper re-enabled")
+
+    def _record_event(self, from_status: str, to_status: str, reason: str, source: str = "scraper"):
+        """Record a status transition in the audit log."""
+        if from_status == to_status:
+            return
+        event = StatusEvent(
+            timestamp=time.time(),
+            from_status=from_status,
+            to_status=to_status,
+            reason=reason,
+            source=source,
+        )
+        self._audit_log.append(event)
+        logger.info("IB status event: %s → %s (%s) [%s]", from_status, to_status, reason, source)
 
     async def start(self):
         """Start the background monitoring task."""
@@ -64,7 +136,13 @@ class IBStatusMonitor:
             await self._check_and_push()
 
     async def _check_and_push(self):
-        """Scrape IB status and push to all ibctl instances."""
+        """Scrape IB status (or use override) and push to all ibctl instances."""
+        # Manual override: skip scraper, push override status directly
+        if self._override_status is not None:
+            await self._push_to_all(self._override_status, self._override_reason)
+            self._last_pushed_status = self._override_status
+            return
+
         try:
             # Run scraper in thread pool (it uses blocking requests)
             loop = asyncio.get_event_loop()
@@ -88,11 +166,9 @@ class IBStatusMonitor:
             elif status.status == SystemStatus.UNKNOWN:
                 reason = status.fetch_error or "IB status page unreachable"
 
-            # Only push if status changed (or periodic refresh)
+            # Record transition in audit log
             if status_str != self._last_pushed_status:
-                logger.info("IB system status changed: %s → %s (%s)", self._last_pushed_status, status_str, reason)
-            else:
-                logger.debug("IB system status: %s (%s)", status_str, reason or "ok")
+                self._record_event(self._last_pushed_status, status_str, reason, source="scraper")
 
             # Push to ALL instances
             await self._push_to_all(status_str, reason)

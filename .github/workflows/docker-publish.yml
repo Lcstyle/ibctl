@@ -41,6 +41,8 @@ jobs:
         with:
           context: .
           push: true
+          build-args: |
+            IBCTL_BUILD_VERSION=${{ steps.version.outputs.version }}
           tags: |
             ghcr.io/lcstyle/ibctl:latest
             ghcr.io/lcstyle/ibctl:${{ steps.version.outputs.version }}

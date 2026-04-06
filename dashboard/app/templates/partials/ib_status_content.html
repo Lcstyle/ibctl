@@ -1,157 +1,219 @@
 {% set ib = ib_status %}
 {% set scraper = scraper_info %}
 
-<div style="display: flex; gap: 16px; flex-wrap: wrap; align-items: flex-start;">
+<!-- Single consolidated status card -->
+<div class="card" style="margin-bottom: 12px;">
 
-<!-- Left: Live Status -->
-<div style="flex: 1; min-width: 320px;">
+    <!-- Row 1: System Status + Scraper Info side by side -->
+    <div style="display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start;">
 
-    <!-- Overall Status -->
-    <div class="card" style="margin-bottom: 12px;">
-        <div class="card-label">System Status</div>
-        <div style="display: flex; align-items: center; gap: 12px; margin-top: 8px;">
-            <div style="width: 14px; height: 14px; border-radius: 50%; background: {% if ib.status == 'available' %}#4ade80{% elif ib.status == 'maintenance' %}#fbbf24{% elif ib.status == 'outage' or ib.status == 'no_internet' %}#ef4444{% else %}#71717a{% endif %}; box-shadow: 0 0 8px {% if ib.status == 'available' %}rgba(74,222,128,0.4){% elif ib.status == 'maintenance' %}rgba(251,191,36,0.4){% else %}rgba(239,68,68,0.4){% endif %};"></div>
-            <span style="font-size: 18px; font-weight: 600; color: {% if ib.status == 'available' %}#4ade80{% elif ib.status == 'maintenance' %}#fbbf24{% elif ib.status == 'outage' or ib.status == 'no_internet' %}#ef4444{% else %}#a1a1aa{% endif %};">
-                {{ ib.status | upper }}
-            </span>
-        </div>
-        {% if ib.reason %}
-        <div style="margin-top: 6px; font-size: 13px; color: #a1a1aa;">{{ ib.reason }}</div>
-        {% endif %}
-    </div>
+        <!-- Left column: Status + Instances + Alerts -->
+        <div style="flex: 1; min-width: 300px;">
 
-    <!-- Per-Instance ibctl Status -->
-    {% for inst in instances %}
-    <div class="card" style="margin-bottom: 8px;">
-        <div class="card-label">
-            <span style="color: {% if inst.mode == 'live' %}#4ade80{% else %}#fbbf24{% endif %}; font-weight: 700;">{{ inst.mode | upper }}</span>
-            <span style="color: #71717a;"> ibctl IB Status</span>
-        </div>
-        {% set inst_ib = (inst.status or {}).get('ib_system', {}) %}
-        <div style="display: flex; gap: 16px; margin-top: 6px; flex-wrap: wrap; font-size: 12px;">
-            <div>
-                <span style="color: #71717a;">Status:</span>
-                <span style="color: {% if inst_ib.get('available') %}#4ade80{% else %}#fbbf24{% endif %}; font-weight: 600;">
-                    {{ inst_ib.get('status', 'unknown') }}
+            <!-- Overall Status -->
+            <div class="card-label">System Status</div>
+            <div style="display: flex; align-items: center; gap: 12px; margin: 8px 0 12px;">
+                <div style="width: 14px; height: 14px; border-radius: 50%; background: {% if ib.status == 'available' %}#4ade80{% elif ib.status == 'maintenance' %}#fbbf24{% elif ib.status == 'outage' or ib.status == 'no_internet' %}#ef4444{% else %}#71717a{% endif %}; box-shadow: 0 0 8px {% if ib.status == 'available' %}rgba(74,222,128,0.4){% elif ib.status == 'maintenance' %}rgba(251,191,36,0.4){% else %}rgba(239,68,68,0.4){% endif %};"></div>
+                <span style="font-size: 18px; font-weight: 600; color: {% if ib.status == 'available' %}#4ade80{% elif ib.status == 'maintenance' %}#fbbf24{% elif ib.status == 'outage' or ib.status == 'no_internet' %}#ef4444{% else %}#a1a1aa{% endif %};">
+                    {{ ib.status | upper }}
                 </span>
+                {% if ib.reason %}
+                <span style="font-size: 12px; color: #a1a1aa;">— {{ ib.reason }}</span>
+                {% endif %}
             </div>
-            {% if inst_ib.get('reason') %}
-            <div><span style="color: #71717a;">Reason:</span> <span style="color: #a1a1aa;">{{ inst_ib.get('reason') }}</span></div>
-            {% endif %}
-            {% if inst_ib.get('expires_in_secs') is not none %}
-            <div><span style="color: #71717a;">TTL:</span> <span style="font-family: 'SF Mono', monospace; color: #a1a1aa;">{{ (inst_ib.get('expires_in_secs', 0) // 60) }}m {{ (inst_ib.get('expires_in_secs', 0) % 60) }}s</span></div>
-            {% endif %}
-        </div>
-    </div>
-    {% endfor %}
 
-    <!-- Alerts -->
-    <div class="card" style="margin-bottom: 8px;">
-        <div class="card-label">Active Alerts ({{ ib.alerts | length }})</div>
-        {% if ib.alerts %}
-        <div style="margin-top: 6px;">
-            {% for alert in ib.alerts %}
-            <div style="padding: 4px 0; font-size: 12px; border-bottom: 1px solid #1a1a2e;">
-                <span style="color: {% if alert.severity == 'critical' %}#ef4444{% elif alert.severity == 'warning' %}#fbbf24{% elif alert.severity == 'scheduled' %}#60a5fa{% else %}#71717a{% endif %}; font-weight: 600; font-size: 10px; letter-spacing: 0.5px;">
-                    {{ alert.severity | upper }}
-                </span>
-                <span style="color: #a1a1aa; margin-left: 8px;">{{ alert.message[:150] }}</span>
-                {% if alert.is_blocking %}
-                <span style="color: #ef4444; font-size: 10px; margin-left: 4px;">⬤ BLOCKING</span>
+            <!-- Per-Instance Status (compact) -->
+            {% for inst in instances %}
+            {% set inst_ib = (inst.status or {}).get('ib_system', {}) %}
+            <div style="display: flex; align-items: center; gap: 10px; padding: 4px 0; font-size: 12px;">
+                <span style="color: {% if inst.mode == 'live' %}#4ade80{% else %}#fbbf24{% endif %}; font-weight: 700; font-size: 11px; min-width: 45px;">{{ inst.mode | upper }}</span>
+                <span style="color: #71717a;">Status:</span>
+                <span style="color: {% if inst_ib.get('available') %}#4ade80{% else %}#fbbf24{% endif %}; font-weight: 600;">{{ inst_ib.get('status', 'unknown') }}</span>
+                {% if inst_ib.get('expires_in_secs') is not none %}
+                <span style="color: #71717a;">TTL:</span>
+                <span style="font-family: 'SF Mono', monospace; color: #a1a1aa;">{{ (inst_ib.get('expires_in_secs', 0) // 60) }}m {{ (inst_ib.get('expires_in_secs', 0) % 60) }}s</span>
+                {% endif %}
+                {% if inst_ib.get('reason') %}
+                <span style="color: #71717a;">—</span>
+                <span style="color: #a1a1aa;">{{ inst_ib.get('reason') }}</span>
                 {% endif %}
             </div>
             {% endfor %}
-        </div>
-        {% else %}
-        <div style="margin-top: 6px; color: #555; font-size: 12px;">No active alerts</div>
-        {% endif %}
-    </div>
 
-</div>
-
-<!-- Right: Scraper Config + Maintenance Windows -->
-<div style="flex: 1; min-width: 320px;">
-
-    <!-- Scraper Status -->
-    <div class="card" style="margin-bottom: 12px;">
-        <div class="card-label">Scraper</div>
-        <div class="config-grid" style="margin-top: 8px;">
-            <div class="config-item"><span class="config-key">Status</span><span class="config-val" style="color: {% if scraper.running %}#4ade80{% else %}#ef4444{% endif %};">{{ 'Running' if scraper.running else 'Stopped' }}</span></div>
-            <div class="config-item"><span class="config-key">URL</span><span class="config-val" style="font-size: 10px;">{{ scraper.url }}</span></div>
-            <div class="config-item"><span class="config-key">Region</span><span class="config-val">{{ scraper.region }}</span></div>
-            <div class="config-item"><span class="config-key">Check Interval</span><span class="config-val">{{ scraper.interval }}s ({{ (scraper.interval // 60) }}m)</span></div>
-            <div class="config-item"><span class="config-key">Last Push</span><span class="config-val">{{ scraper.last_pushed_status }}</span></div>
-            {% if scraper.last_fetch_error %}
-            <div class="config-item"><span class="config-key">Last Error</span><span class="config-val" style="color: #ef4444;">{{ scraper.last_fetch_error }}</span></div>
-            {% endif %}
-        </div>
-    </div>
-
-    <!-- Daily Reset Windows -->
-    <div class="card" style="margin-bottom: 8px;">
-        <div class="card-label">Daily Maintenance Windows</div>
-        {% if ib.daily_resets %}
-        <table style="width: 100%; margin-top: 6px; font-size: 12px; border-collapse: collapse;">
-            <thead>
-                <tr>
-                    <th style="text-align: left; color: #52525b; font-size: 10px; padding: 3px 6px; border-bottom: 1px solid #27272a;">Region</th>
-                    <th style="text-align: left; color: #52525b; font-size: 10px; padding: 3px 6px; border-bottom: 1px solid #27272a;">Window</th>
-                    <th style="text-align: left; color: #52525b; font-size: 10px; padding: 3px 6px; border-bottom: 1px solid #27272a;">TZ</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for w in ib.daily_resets %}
-                <tr>
-                    <td style="padding: 3px 6px; color: #a1a1aa;">{{ w.region }}</td>
-                    <td style="padding: 3px 6px; color: #a1a1aa; font-family: 'SF Mono', monospace;">{{ w.start_time }} – {{ w.end_time }}</td>
-                    <td style="padding: 3px 6px; color: #71717a;">{{ w.timezone }}</td>
-                </tr>
+            <!-- Alerts (compact) -->
+            <div style="margin-top: 10px; padding-top: 8px; border-top: 1px solid #1a1a2e;">
+                <span class="card-label" style="font-size: 10px;">Alerts ({{ ib.alerts | length }})</span>
+                {% if ib.alerts %}
+                {% for alert in ib.alerts %}
+                <div style="padding: 3px 0; font-size: 11px;">
+                    <span style="color: {% if alert.severity == 'critical' %}#ef4444{% elif alert.severity == 'warning' %}#fbbf24{% elif alert.severity == 'scheduled' %}#60a5fa{% else %}#71717a{% endif %}; font-weight: 600; font-size: 9px; letter-spacing: 0.5px;">{{ alert.severity | upper }}</span>
+                    <span style="color: #a1a1aa; margin-left: 6px;">{{ alert.message[:150] }}</span>
+                    {% if alert.is_blocking %}<span style="color: #ef4444; font-size: 9px; margin-left: 4px;">BLOCKING</span>{% endif %}
+                </div>
                 {% endfor %}
-            </tbody>
-        </table>
-        {% else %}
-        <div style="margin-top: 6px; color: #555; font-size: 12px;">No daily resets detected</div>
-        {% endif %}
-    </div>
+                {% else %}
+                <div style="color: #555; font-size: 11px; margin-top: 4px;">No active alerts</div>
+                {% endif %}
+            </div>
+        </div>
 
-    <!-- Weekend Reset Windows -->
-    <div class="card" style="margin-bottom: 8px;">
-        <div class="card-label">Weekend Maintenance Windows</div>
-        {% if ib.weekend_resets %}
-        <table style="width: 100%; margin-top: 6px; font-size: 12px; border-collapse: collapse;">
-            <thead>
-                <tr>
-                    <th style="text-align: left; color: #52525b; font-size: 10px; padding: 3px 6px; border-bottom: 1px solid #27272a;">Region</th>
-                    <th style="text-align: left; color: #52525b; font-size: 10px; padding: 3px 6px; border-bottom: 1px solid #27272a;">Window</th>
-                    <th style="text-align: left; color: #52525b; font-size: 10px; padding: 3px 6px; border-bottom: 1px solid #27272a;">TZ</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for w in ib.weekend_resets %}
-                <tr>
-                    <td style="padding: 3px 6px; color: #a1a1aa;">{{ w.region }}</td>
-                    <td style="padding: 3px 6px; color: #a1a1aa; font-family: 'SF Mono', monospace;">{{ w.start_time }} – {{ w.end_time }}</td>
-                    <td style="padding: 3px 6px; color: #71717a;">{{ w.timezone }}</td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-        {% else %}
-        <div style="margin-top: 6px; color: #555; font-size: 12px;">No weekend resets detected</div>
-        {% endif %}
-    </div>
+        <!-- Right column: Scraper + Override + Maintenance Windows + Connectivity -->
+        <div style="flex: 1; min-width: 300px;">
 
-    <!-- Internet Connectivity -->
-    <div class="card">
-        <div class="card-label">Connectivity</div>
-        <div style="display: flex; gap: 12px; margin-top: 6px; align-items: center;">
-            <div style="width: 10px; height: 10px; border-radius: 50%; background: {% if scraper.internet_ok %}#4ade80{% else %}#ef4444{% endif %};"></div>
-            <span style="font-size: 12px; color: #a1a1aa;">Internet: {{ 'OK' if scraper.internet_ok else 'DOWN' }}</span>
-            <div style="width: 10px; height: 10px; border-radius: 50%; background: {% if scraper.ib_reachable %}#4ade80{% else %}#ef4444{% endif %};"></div>
-            <span style="font-size: 12px; color: #a1a1aa;">IB Page: {{ 'Reachable' if scraper.ib_reachable else 'Unreachable' }}</span>
+            <!-- Scraper Config -->
+            <div class="card-label">Scraper</div>
+            <div class="config-grid" style="margin-top: 6px;">
+                <div class="config-item"><span class="config-key">Status</span><span class="config-val" style="color: {% if scraper.get('override_active') %}#fbbf24{% elif scraper.running %}#4ade80{% else %}#ef4444{% endif %};">{{ 'Overridden' if scraper.get('override_active') else ('Running' if scraper.running else 'Stopped') }}</span></div>
+                <div class="config-item"><span class="config-key">Region</span><span class="config-val">{{ scraper.region }}</span></div>
+                <div class="config-item"><span class="config-key">Interval</span><span class="config-val">{{ (scraper.interval // 60) }}m</span></div>
+                <div class="config-item"><span class="config-key">Last Push</span><span class="config-val">{{ scraper.last_pushed_status }}</span></div>
+                {% if scraper.get('override_active') %}
+                <div class="config-item"><span class="config-key">Override</span><span class="config-val" style="color: #fbbf24;">{{ scraper.get('override_status', '?') | upper }}</span></div>
+                {% endif %}
+                {% if scraper.last_fetch_error %}
+                <div class="config-item"><span class="config-key">Error</span><span class="config-val" style="color: #ef4444;">{{ scraper.last_fetch_error }}</span></div>
+                {% endif %}
+            </div>
+
+            <!-- Manual Override -->
+            <div style="margin-top: 12px; padding-top: 8px; border-top: 1px solid #1a1a2e;">
+                <span class="card-label" style="font-size: 10px;">Manual Override</span>
+                <div style="margin-top: 6px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center;">
+                    {% if scraper.get('override_active') %}
+                    <span style="font-size: 11px; color: #fbbf24; margin-right: 6px;">Active: {{ scraper.get('override_status', '?') | upper }}</span>
+                    <button class="ctrl-btn" onclick="clearOverride()">Clear Override</button>
+                    {% else %}
+                    <button class="ctrl-btn" onclick="setOverride('available','Manual: force available')" title="Force IB status to Available — disables scraper">Force Available</button>
+                    <button class="ctrl-btn" onclick="setOverride('maintenance','Manual: force maintenance')" title="Force IB status to Maintenance — disables scraper">Force Maintenance</button>
+                    {% endif %}
+                    <span id="override-result" style="font-size: 10px; margin-left: auto;"></span>
+                </div>
+            </div>
+
+            <!-- Maintenance Windows (compact) -->
+            <div style="margin-top: 12px; padding-top: 8px; border-top: 1px solid #1a1a2e;">
+                <span class="card-label" style="font-size: 10px;">Maintenance Windows</span>
+                {% if ib.daily_resets or ib.weekend_resets %}
+                <div style="margin-top: 4px; font-size: 11px;">
+                    {% for w in ib.daily_resets %}
+                    <div style="padding: 2px 0; color: #a1a1aa;">
+                        <span style="color: #71717a;">Daily</span> {{ w.region }} <span style="font-family: 'SF Mono', monospace;">{{ w.start_time }}–{{ w.end_time }}</span> <span style="color: #555;">{{ w.timezone }}</span>
+                    </div>
+                    {% endfor %}
+                    {% for w in ib.weekend_resets %}
+                    <div style="padding: 2px 0; color: #a1a1aa;">
+                        <span style="color: #71717a;">Weekend</span> {{ w.region }} <span style="font-family: 'SF Mono', monospace;">{{ w.start_time }}–{{ w.end_time }}</span> <span style="color: #555;">{{ w.timezone }}</span>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <div style="margin-top: 4px; color: #555; font-size: 11px;">No maintenance windows detected</div>
+                {% endif %}
+            </div>
+
+            <!-- Connectivity (inline) -->
+            <div style="margin-top: 12px; padding-top: 8px; border-top: 1px solid #1a1a2e;">
+                <span class="card-label" style="font-size: 10px;">Connectivity</span>
+                <div style="display: flex; gap: 12px; margin-top: 4px; align-items: center;">
+                    <div style="width: 8px; height: 8px; border-radius: 50%; background: {% if scraper.internet_ok %}#4ade80{% else %}#ef4444{% endif %};"></div>
+                    <span style="font-size: 11px; color: #a1a1aa;">Internet</span>
+                    <div style="width: 8px; height: 8px; border-radius: 50%; background: {% if scraper.ib_reachable %}#4ade80{% else %}#ef4444{% endif %};"></div>
+                    <span style="font-size: 11px; color: #a1a1aa;">IB Page</span>
+                </div>
+            </div>
+
         </div>
     </div>
-
 </div>
 
+<!-- Status History — separate card underneath -->
+<div class="card">
+    <div class="card-label" style="display: flex; align-items: center; gap: 8px;">
+        Status History
+        <button class="ctrl-btn" onclick="loadAuditLog()" style="font-size: 9px; padding: 2px 6px;">Refresh</button>
+    </div>
+    <div id="audit-log-content" style="margin-top: 8px; max-height: 400px; overflow-y: auto;">
+        <div style="color: #555; font-size: 11px;">Loading...</div>
+    </div>
 </div>
+
+<script>
+function setOverride(status, reason) {
+    var result = document.getElementById('override-result');
+    fetch('/api/v1/ib-status/override', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({status: status, reason: reason})
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+        if (result) {
+            result.innerHTML = '<span style="color:' + (d.ok ? '#4ade80' : '#ef4444') + '">' +
+                (d.ok ? 'Override set: ' + d.status : d.error) + '</span>';
+        }
+        var el = document.getElementById('ib-status-content');
+        if (el) htmx.trigger(el, 'ibctl-refresh');
+    })
+    .catch(function() {
+        if (result) result.innerHTML = '<span style="color:#ef4444">Request failed</span>';
+    });
+}
+
+function clearOverride() {
+    var result = document.getElementById('override-result');
+    fetch('/api/v1/ib-status/override', { method: 'DELETE' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+        if (result) {
+            result.innerHTML = '<span style="color:' + (d.ok ? '#4ade80' : '#ef4444') + '">' +
+                (d.ok ? 'Override cleared' : d.error) + '</span>';
+        }
+        var el = document.getElementById('ib-status-content');
+        if (el) htmx.trigger(el, 'ibctl-refresh');
+    })
+    .catch(function() {
+        if (result) result.innerHTML = '<span style="color:#ef4444">Request failed</span>';
+    });
+}
+
+function loadAuditLog() {
+    var container = document.getElementById('audit-log-content');
+    if (!container) return;
+    container.innerHTML = '<div style="color: #555; font-size: 11px;">Loading...</div>';
+
+    fetch('/api/v1/ib-status/audit-log')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+        if (!d.ok || !d.events || d.events.length === 0) {
+            container.innerHTML = '<div style="color: #555; font-size: 11px;">No status transitions recorded</div>';
+            return;
+        }
+        var html = '<table style="width: 100%; font-size: 11px; border-collapse: collapse;">';
+        html += '<thead><tr>';
+        html += '<th style="text-align:left; color:#52525b; font-size:10px; padding:3px 6px; border-bottom:1px solid #27272a;">Time</th>';
+        html += '<th style="text-align:left; color:#52525b; font-size:10px; padding:3px 6px; border-bottom:1px solid #27272a;">From</th>';
+        html += '<th style="text-align:left; color:#52525b; font-size:10px; padding:3px 6px; border-bottom:1px solid #27272a;">To</th>';
+        html += '<th style="text-align:left; color:#52525b; font-size:10px; padding:3px 6px; border-bottom:1px solid #27272a;">Reason</th>';
+        html += '<th style="text-align:left; color:#52525b; font-size:10px; padding:3px 6px; border-bottom:1px solid #27272a;">Source</th>';
+        html += '</tr></thead><tbody>';
+        d.events.forEach(function(e) {
+            var toColor = e.to_status === 'available' ? '#60a5fa' : (e.to_status === 'maintenance' ? '#fbbf24' : '#ef4444');
+            var srcColor = e.source === 'manual_override' ? '#fbbf24' : '#71717a';
+            html += '<tr>';
+            html += '<td style="padding:3px 6px; color:#a1a1aa; white-space:nowrap; font-family:SF Mono,monospace;">' + e.timestamp + '</td>';
+            html += '<td style="padding:3px 6px; color:#71717a;">' + e.from_status + '</td>';
+            html += '<td style="padding:3px 6px; color:' + toColor + '; font-weight:600;">' + e.to_status + '</td>';
+            html += '<td style="padding:3px 6px; color:#a1a1aa; max-width:250px; overflow:hidden; text-overflow:ellipsis;">' + (e.reason || '') + '</td>';
+            html += '<td style="padding:3px 6px; color:' + srcColor + '; font-size:10px;">' + e.source + '</td>';
+            html += '</tr>';
+        });
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    })
+    .catch(function() {
+        container.innerHTML = '<div style="color: #ef4444; font-size: 11px;">Failed to load audit log</div>';
+    });
+}
+
+loadAuditLog();
+</script>

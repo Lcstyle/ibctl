@@ -323,6 +323,10 @@ pub struct TimingConfig {
     pub login_radio_delay_ms: u64,
     /// Seconds to wait for JVM graceful shutdown (SIGTERM) before SIGKILL
     pub jvm_shutdown_timeout_secs: u64,
+    /// Seconds to wait for login window to appear before giving up.
+    /// 0 = wait indefinitely (useful for headless servers during IB maintenance).
+    /// Default: 120
+    pub login_dialog_timeout_secs: u64,
 }
 
 // --- Default implementations ---
@@ -337,6 +341,7 @@ impl Default for TimingConfig {
             popup_max_wait_secs: 30,
             login_radio_delay_ms: 100,
             jvm_shutdown_timeout_secs: 5,
+            login_dialog_timeout_secs: 120,
         }
     }
 }
@@ -587,6 +592,11 @@ impl Config {
                 v.split(',').map(|s| s.trim().to_string()).collect();
         }
 
+        // Timing
+        if let Some(v) = std::env::var("IBCTL_LOGIN_TIMEOUT").ok().and_then(|s| s.parse().ok()) {
+            self.timing.login_dialog_timeout_secs = v;
+        }
+
         // Agent
         if let Ok(v) = std::env::var("IBCTL_AGENT_SOCKET") {
             self.agent.socket_path = v;
@@ -754,6 +764,27 @@ mod tests {
         assert_eq!(config.logging.level, LogLevel::Info);
         assert_eq!(config.command_server.port, 7462);
         assert!(config.command_server.enabled);
+        assert_eq!(config.timing.login_dialog_timeout_secs, 120);
+    }
+
+    #[test]
+    fn test_login_timeout_zero_from_toml() {
+        let toml_str = r#"
+[timing]
+login_dialog_timeout_secs = 0
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.timing.login_dialog_timeout_secs, 0);
+    }
+
+    #[test]
+    fn test_login_timeout_custom_from_toml() {
+        let toml_str = r#"
+[timing]
+login_dialog_timeout_secs = 300
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.timing.login_dialog_timeout_secs, 300);
     }
 
     // --- TOML parsing tests ---

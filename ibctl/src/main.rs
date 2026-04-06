@@ -57,7 +57,7 @@ fn main() -> ExitCode {
         })
         .init();
 
-    log::info!("ibctl v{} starting", env!("CARGO_PKG_VERSION"));
+    log::info!("ibctl v{} starting", env!("IBCTL_VERSION"));
 
     // Build the tokio runtime and run the async main
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -177,7 +177,7 @@ fn parse_config_arg(args: &[String]) -> Option<String> {
                 std::process::exit(0);
             }
             "--version" | "-V" => {
-                println!("ibctl {}", env!("CARGO_PKG_VERSION"));
+                println!("ibctl {}", env!("IBCTL_VERSION"));
                 std::process::exit(0);
             }
             _ => {

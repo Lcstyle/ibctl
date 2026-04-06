@@ -16,6 +16,28 @@ header {
     border-bottom: 1px solid #0f3460;
 }
 
+.header-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 8px 20px 0;
+}
+.header-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: #e2e8f0;
+    letter-spacing: 1.5px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+}
+.header-version {
+    font-size: 11px;
+    color: #4ade80;
+    font-family: 'SF Mono', monospace;
+    opacity: 0.8;
+}
+
 .tabs {
     display: flex;
     max-width: 1200px;

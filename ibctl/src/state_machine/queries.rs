@@ -69,6 +69,7 @@ impl StateMachine {
         let client_ids = &self.cached_client_ids;
 
         serde_json::json!({
+            "version": env!("IBCTL_VERSION"),
             "ready": is_connected && socat_running,
             "state": self.state.to_string(),
             "trading_mode": self.config.auth.trading_mode.to_string(),

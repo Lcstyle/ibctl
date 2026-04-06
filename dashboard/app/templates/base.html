@@ -9,9 +9,14 @@
 </head>
 <body>
     <header>
+        <div class="header-bar">
+            <span class="header-title">ibctl</span>
+            <span class="header-version" id="ibctl-version"></span>
+        </div>
         <nav class="tabs">
             <a href="/" class="tab {% if active_tab == 'overview' %}active{% endif %}">Overview</a>
             <a href="/state" class="tab {% if active_tab == 'state' %}active{% endif %}">State</a>
+            <a href="/ib-status" class="tab {% if active_tab == 'ib-status' %}active{% endif %}">IB Status</a>
             <a href="/config" class="tab {% if active_tab == 'config' %}active{% endif %}">Config</a>
             <a href="/logs" class="tab {% if active_tab == 'logs' %}active{% endif %}">Logs</a>
             <a href="/vnc" class="tab {% if active_tab == 'vnc' %}active{% endif %}">VNC</a>
@@ -62,6 +67,11 @@
                 try {
                     var d = JSON.parse(e.data);
                     window.dispatchEvent(new CustomEvent('ibctl-status', {detail: d}));
+                    // Extract version from first instance's status
+                    if (d && d.length > 0 && d[0].status && d[0].status.version) {
+                        var el = document.getElementById('ibctl-version');
+                        if (el) el.textContent = 'v' + d[0].status.version;
+                    }
                 } catch(err) {}
             });
 

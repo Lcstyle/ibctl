@@ -27,7 +27,11 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
 
       - name: Build release binary (fat LTO, static musl)
+        env:
+          IBCTL_BUILD_VERSION: ${{ github.ref_name }}
         run: |
+          # Strip leading 'v' from tag for version string
+          export IBCTL_BUILD_VERSION="${IBCTL_BUILD_VERSION#v}"
           cargo build --release --target x86_64-unknown-linux-musl
           strip target/x86_64-unknown-linux-musl/release/ibctl
           ls -la target/x86_64-unknown-linux-musl/release/ibctl

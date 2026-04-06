@@ -70,3 +70,4 @@ popup_quiet_secs = 5       # seconds of no popups before considering login compl
 popup_max_wait_secs = 30   # max seconds to wait for popups
 login_radio_delay_ms = 100 # pause after selecting radio buttons on login screen
 jvm_shutdown_timeout_secs = 5  # SIGTERM wait before SIGKILL
+login_dialog_timeout_secs = 120  # seconds to wait for login window (0 = wait indefinitely)
