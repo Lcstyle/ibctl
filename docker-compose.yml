@@ -53,6 +53,7 @@ services:
       IBCTL_DASHBOARD_ENABLED: ${IBCTL_DASHBOARD_ENABLED:-false}
       IBCTL_DASHBOARD_PORT: ${IBCTL_DASHBOARD_PORT:-8080}
       IBCTL_DASHBOARD_TOKEN: ${IBCTL_DASHBOARD_TOKEN:-}
+      IBCTL_ROOT_PATH: ${IBCTL_ROOT_PATH:-}
       IBCTL_DEBUG_MODE: ${IBCTL_DEBUG_MODE:-false}
       IBCTL_COMMAND_HOST: ${IBCTL_COMMAND_HOST:-127.0.0.1}
       IBCTL_COMMAND_PORT: ${IBCTL_COMMAND_PORT:-7462}
@@ -75,10 +76,11 @@ services:
     #   - ./bin:/opt/ibctl/bin:ro
     #   - ./dashboard/app:/opt/ibctl/dashboard/app:ro
     ports:
-      - "127.0.0.1:4001:4003"   # Live API
-      - "127.0.0.1:4002:4004"   # Paper API
-      - "127.0.0.1:5900:5900"   # VNC
-      - "127.0.0.1:6080:6080"   # noVNC websocket
-      - "127.0.0.1:7462:7462"   # Live command server
-      - "127.0.0.1:7463:7463"   # Paper command server
+      - "${IBCTL_API_BIND:-127.0.0.1}:${IBCTL_LIVE_API_PORT:-4001}:4003"    # Live API
+      - "${IBCTL_API_BIND:-127.0.0.1}:${IBCTL_PAPER_API_PORT:-4002}:4004"   # Paper API
+      - "${IBCTL_VNC_BIND:-127.0.0.1}:5900:5900"                            # VNC
+      - "${IBCTL_VNC_BIND:-127.0.0.1}:6080:6080"                            # noVNC websocket
+      - "127.0.0.1:7462:7462"                                               # Live command server
+      - "127.0.0.1:7463:7463"                                               # Paper command server
+      - "${IBCTL_DASHBOARD_BIND:-127.0.0.1}:${IBCTL_DASHBOARD_PORT:-3080}:${IBCTL_DASHBOARD_PORT:-3080}" # Dashboard
     tty: true

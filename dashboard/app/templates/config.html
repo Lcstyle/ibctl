@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <h2>Configuration</h2>
-<div id="config-data" hx-get="/partials/config" hx-trigger="load" hx-swap="innerHTML">
+<div id="config-data" hx-get="{{ root_path }}/partials/config" hx-trigger="load" hx-swap="innerHTML">
     <div class="loading">Loading configuration...</div>
 </div>
 {% endblock %}

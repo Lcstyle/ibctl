@@ -8,6 +8,7 @@ via the InstanceRegistry for multi-instance monitoring and control.
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -59,6 +60,10 @@ def create_app(settings: DashboardSettings | None = None) -> FastAPI:
     if settings is None:
         settings = DashboardSettings.from_env()
 
+    # IBCTL_ROOT_PATH is used for URL generation in templates only.
+    # Do NOT pass it as FastAPI root_path — nginx strips the prefix with
+    # trailing-slash proxy_pass, so the app must serve at / internally.
+    root_path = os.environ.get("IBCTL_ROOT_PATH", "")
     app = FastAPI(
         title="ibctl Dashboard",
         version="0.2.0",
@@ -87,8 +92,10 @@ def create_app(settings: DashboardSettings | None = None) -> FastAPI:
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-    # Templates (for web UI)
-    app.state.templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    # Templates (for web UI) — inject root_path as global variable
+    templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    templates.env.globals["root_path"] = root_path
+    app.state.templates = templates
 
     return app
 

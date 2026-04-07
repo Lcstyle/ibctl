@@ -117,15 +117,12 @@ impl fmt::Display for AcceptIncoming {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SiteRole {
+    #[default]
     Primary,
     Standby,
-}
-
-impl Default for SiteRole {
-    fn default() -> Self { Self::Primary }
 }
 
 impl fmt::Display for SiteRole {

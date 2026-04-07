@@ -140,7 +140,7 @@
 <script>
 function setOverride(status, reason) {
     var result = document.getElementById('override-result');
-    fetch('/api/v1/ib-status/override', {
+    fetch(ROOT_PATH + '/api/v1/ib-status/override', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({status: status, reason: reason})
@@ -161,7 +161,7 @@ function setOverride(status, reason) {
 
 function clearOverride() {
     var result = document.getElementById('override-result');
-    fetch('/api/v1/ib-status/override', { method: 'DELETE' })
+    fetch(ROOT_PATH + '/api/v1/ib-status/override', { method: 'DELETE' })
     .then(function(r) { return r.json(); })
     .then(function(d) {
         if (result) {
@@ -181,7 +181,7 @@ function loadAuditLog() {
     if (!container) return;
     container.innerHTML = '<div style="color: #555; font-size: 11px;">Loading...</div>';
 
-    fetch('/api/v1/ib-status/audit-log')
+    fetch(ROOT_PATH + '/api/v1/ib-status/audit-log')
     .then(function(r) { return r.json(); })
     .then(function(d) {
         if (!d.ok || !d.events || d.events.length === 0) {

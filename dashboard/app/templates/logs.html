@@ -12,7 +12,7 @@
 </div>
 <div id="log-content"
      class="log-viewer"
-     hx-get="/partials/logs"
+     hx-get="{{ root_path }}/partials/logs"
      hx-trigger="load, every 2s"
      hx-swap="innerHTML">
     <div class="loading">Loading logs...</div>
@@ -21,7 +21,7 @@
 function updateLogFilter() {
     const level = document.getElementById('log-level').value;
     const el = document.getElementById('log-content');
-    el.setAttribute('hx-get', '/partials/logs' + (level ? '?level=' + level : ''));
+    el.setAttribute('hx-get', ROOT_PATH + '/partials/logs' + (level ? '?level=' + level : ''));
     htmx.trigger(el, 'load');
 }
 </script>

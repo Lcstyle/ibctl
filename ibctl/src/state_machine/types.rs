@@ -21,8 +21,6 @@ pub enum StateMachineError {
     Agent(#[from] crate::agent_client::AgentError),
     #[error("handler error: {0}")]
     Handler(#[from] crate::handlers::HandlerError),
-    #[error("fatal error in state {state}: {reason}")]
-    Fatal { state: String, reason: String },
 }
 
 /// All possible states in the ibctl lifecycle.

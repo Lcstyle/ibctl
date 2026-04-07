@@ -284,7 +284,7 @@
 </div>
 
 <div class="tp7-history" id="state-content"
-     hx-get="/partials/state-history?mode={{ default_mode }}"
+     hx-get="{{ root_path }}/partials/state-history?mode={{ default_mode }}"
      hx-trigger="load, ibctl-refresh"
      hx-swap="innerHTML">
     <div class="loading">Loading...</div>
@@ -533,7 +533,7 @@ setNeedle(0);
 // One-time fetch for initial state (before first SSE event arrives)
 (async function() {
     try {
-        var resp = await fetch('/api/v1/status/raw?mode=' + getMode());
+        var resp = await fetch(ROOT_PATH + '/api/v1/status/raw?mode=' + getMode());
         var data = await resp.json();
         updateReelFromData(data);
     } catch(e) {}

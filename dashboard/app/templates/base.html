@@ -4,8 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ibctl Dashboard</title>
-    <link rel="stylesheet" href="/static/style.css?v=23">
-    <script src="/static/htmx.min.js"></script>
+    <link rel="stylesheet" href="{{ root_path }}/static/style.css?v=24">
+    <script src="{{ root_path }}/static/htmx.min.js"></script>
+    <script>var ROOT_PATH = '{{ root_path }}';</script>
 </head>
 <body>
     <header>
@@ -14,12 +15,12 @@
             <span class="header-version" id="ibctl-version"></span>
         </div>
         <nav class="tabs">
-            <a href="/" class="tab {% if active_tab == 'overview' %}active{% endif %}">Overview</a>
-            <a href="/state" class="tab {% if active_tab == 'state' %}active{% endif %}">State</a>
-            <a href="/ib-status" class="tab {% if active_tab == 'ib-status' %}active{% endif %}">IB Status</a>
-            <a href="/config" class="tab {% if active_tab == 'config' %}active{% endif %}">Config</a>
-            <a href="/logs" class="tab {% if active_tab == 'logs' %}active{% endif %}">Logs</a>
-            <a href="/vnc" class="tab {% if active_tab == 'vnc' %}active{% endif %}">VNC</a>
+            <a href="{{ root_path }}/" class="tab {% if active_tab == 'overview' %}active{% endif %}">Overview</a>
+            <a href="{{ root_path }}/state" class="tab {% if active_tab == 'state' %}active{% endif %}">State</a>
+            <a href="{{ root_path }}/ib-status" class="tab {% if active_tab == 'ib-status' %}active{% endif %}">IB Status</a>
+            <a href="{{ root_path }}/config" class="tab {% if active_tab == 'config' %}active{% endif %}">Config</a>
+            <a href="{{ root_path }}/logs" class="tab {% if active_tab == 'logs' %}active{% endif %}">Logs</a>
+            <a href="{{ root_path }}/vnc" class="tab {% if active_tab == 'vnc' %}active{% endif %}">VNC</a>
             <span style="flex: 1;"></span>
             <span style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: #52525b;">
                 <span>⟳</span>
@@ -43,7 +44,7 @@
         var evtSource = null;
         function connectSSE() {
             if (evtSource) evtSource.close();
-            evtSource = new EventSource('/api/v1/events');
+            evtSource = new EventSource('{{ root_path }}/api/v1/events');
 
             evtSource.addEventListener('state_change', function(e) {
                 var d = JSON.parse(e.data);

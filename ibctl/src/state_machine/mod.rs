@@ -602,7 +602,8 @@ impl StateMachine {
             return Ok(State::WaitingForLogin);
         }
 
-        let win = login_window.unwrap();
+        // Safety: login_window.is_none() was checked above and returned early
+        let Some(win) = login_window else { return Ok(State::WaitingForLogin) };
 
         match self.handler_registry.dispatch(&self.agent_client, win).await {
             Some(Ok(crate::handlers::HandlerResult::Handled)) => {
