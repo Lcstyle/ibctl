@@ -12,19 +12,12 @@ use tokio::sync::mpsc;
 use std::pin::Pin;
 use std::task::Context;
 
+use crate::types::Signal;
+
 #[derive(Debug, Error)]
 pub enum SignalError {
     #[error("failed to register signal handler: {0}")]
     Registration(#[from] std::io::Error),
-}
-
-/// Signals that ibctl handles for lifecycle management.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Signal {
-    /// SIGTERM -- graceful shutdown requested (e.g., Docker stop)
-    Terminate,
-    /// SIGINT -- interrupt (Ctrl+C)
-    Interrupt,
 }
 
 /// Register OS signal handlers and return a channel receiver plus a future

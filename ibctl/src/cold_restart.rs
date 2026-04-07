@@ -23,8 +23,7 @@
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
-#[derive(Debug, Clone)]
-pub struct ColdRestartSignal;
+use crate::types::ColdRestartSignal;
 
 /// Parse a cold restart time like "09:00" (24h format).
 pub fn parse_cold_restart_time(time_str: &str) -> Option<(u32, u32)> {
