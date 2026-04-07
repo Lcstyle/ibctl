@@ -125,10 +125,19 @@ async def overview_partial(request: Request):
                 for a in scraper_status.alerts
             ]
 
+    # Site config from first instance status
+    site_config = None
+    if instances_data:
+        first_status = instances_data[0].get("status", {}) or {}
+        site_role = first_status.get("site_role", "primary")
+        auto_launch = first_status.get("auto_launch", True)
+        site_config = {"role": site_role, "auto_launch": auto_launch}
+
     return templates.TemplateResponse(request, "partials/overview_content.html", {
         "instances": instances_data,
         "ib_status": ib_data,
         "scraper_info": scraper_info,
+        "site_config": site_config,
     })
 
 

@@ -17,6 +17,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::config::CommandServerConfig;
+use crate::types::{Command, Query};
 
 #[derive(Debug, Error)]
 pub enum CommandServerError {
@@ -27,58 +28,6 @@ pub enum CommandServerError {
     },
     #[error("connection error: {0}")]
     ConnectionError(#[from] std::io::Error),
-}
-
-/// Action commands dispatched to the state machine (fire-and-forget).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Command {
-    Stop,
-    Restart,
-    ReconnectData,
-    ReconnectAccount,
-    EnableApi,
-    Exit,
-    /// Restart socat port forwarding
-    RestartSocat,
-    /// Pause state machine — freeze in current state, still responds to queries.
-    /// Optional state name sets a ceiling: pause when that state is reached.
-    Pause,
-    /// Pause at a specific state (ceiling) — state machine runs until it reaches this state
-    PauseAt(String),
-    /// Resume normal state transitions
-    Resume,
-    /// Force state machine to a specific state (God Mode)
-    SetState(String),
-    /// Set IB system status (pushed by dashboard/external clients)
-    IbStatus(String, String),  // (status, reason)
-    /// Set auto-restart time via Gateway Settings UI (UTC, "HH:MM AM/PM" or "HH:MM")
-    SetRestartTime(String),
-}
-
-/// Query commands that expect a JSON response via oneshot channel.
-pub enum Query {
-    /// Full gateway status with client advisory
-    Status(oneshot::Sender<String>),
-    /// State machine state + transition history
-    State(oneshot::Sender<String>),
-    /// Running config (passwords masked)
-    Config(oneshot::Sender<String>),
-    /// Last N log lines
-    Logs(usize, oneshot::Sender<String>),
-    /// Current Gateway windows + client tabs
-    Windows(oneshot::Sender<String>),
-}
-
-impl std::fmt::Debug for Query {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Query::Status(_) => write!(f, "Query::Status"),
-            Query::State(_) => write!(f, "Query::State"),
-            Query::Config(_) => write!(f, "Query::Config"),
-            Query::Logs(n, _) => write!(f, "Query::Logs({})", n),
-            Query::Windows(_) => write!(f, "Query::Windows"),
-        }
-    }
 }
 
 /// Parsed input from a TCP command line — either an action or a query.
@@ -107,6 +56,7 @@ pub(crate) fn parse_command(input: &str) -> Option<ParsedCommand> {
     match parts.first().copied() {
         // Legacy IBC action commands
         Some("STOP") => Some(ParsedCommand::Action(Command::Stop)),
+        Some("START") => Some(ParsedCommand::Action(Command::Start)),
         Some("RESTART") => Some(ParsedCommand::Action(Command::Restart)),
         Some("RECONNECTDATA") => Some(ParsedCommand::Action(Command::ReconnectData)),
         Some("RECONNECTACCOUNT") => Some(ParsedCommand::Action(Command::ReconnectAccount)),
@@ -571,8 +521,22 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_start() {
+        match parse_command("START") {
+            Some(ParsedCommand::Action(Command::Start)) => {}
+            _ => panic!("Expected Action(Start)"),
+        }
+    }
+
+    #[test]
+    fn test_start_is_not_privileged() {
+        assert!(!is_privileged_command(&Command::Start));
+    }
+
+    #[test]
     fn test_parse_all_action_types() {
         assert!(matches!(parse_command("STOP"), Some(ParsedCommand::Action(Command::Stop))));
+        assert!(matches!(parse_command("START"), Some(ParsedCommand::Action(Command::Start))));
         assert!(matches!(parse_command("RESTART"), Some(ParsedCommand::Action(Command::Restart))));
         assert!(matches!(parse_command("RECONNECTDATA"), Some(ParsedCommand::Action(Command::ReconnectData))));
         assert!(matches!(parse_command("RECONNECTACCOUNT"), Some(ParsedCommand::Action(Command::ReconnectAccount))));

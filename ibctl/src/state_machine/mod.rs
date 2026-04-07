@@ -19,8 +19,7 @@ use std::time::Instant;
 
 use tokio::sync::mpsc;
 
-use crate::command_server::Command;
-use crate::signals::Signal;
+use crate::types::{Command, Signal};
 
 use types::Interrupt;
 
@@ -45,6 +44,15 @@ impl StateMachine {
     /// borrows between the interrupt channels and `transition()`. This is safe
     /// because `transition()` never accesses the channel receivers.
     pub async fn run(&mut self) -> Result<(), StateMachineError> {
+        // If auto_launch is disabled, start in dormant WaitingForLaunch state
+        if !self.config.site.auto_launch && self.state == State::Init {
+            log::info!(
+                "Site role={}, auto_launch=false — starting in WaitingForLaunch (JVM will not launch until START command)",
+                self.config.site.role,
+            );
+            self.state = State::WaitingForLaunch;
+        }
+
         log::info!("State machine starting in state: {}", self.state);
 
         loop {
@@ -168,6 +176,7 @@ impl StateMachine {
 
         if next == State::Connected && self.state != State::Connected {
             self.connected_since = Some(Instant::now());
+            self.relogin_attempts = 0;
         } else if next != State::Connected {
             self.connected_since = None;
         }
@@ -182,13 +191,12 @@ impl StateMachine {
         }
 
         if let State::Error(ref msg) = next {
-            log::error!("State machine entered error state: {}", msg);
-            self.abort_client_id_task();
-            self.do_shutdown().await?;
-            return Err(StateMachineError::Fatal {
-                state: self.state.to_string(),
-                reason: msg.clone(),
-            });
+            log::error!("State machine error: {} — will restart after delay", msg);
+            // Error is recoverable: restart the JVM instead of killing the process.
+            // Fatal errors (actual bugs) will panic; transient errors (connection loss,
+            // login timeout) should retry with the configurable restart delay.
+            self.state = State::Restarting;
+            return Ok(());
         }
 
         self.state = next;
@@ -196,13 +204,47 @@ impl StateMachine {
     }
 
     /// Dispatch a command received from the command server.
-    /// Handles stop/exit/restart specially; delegates the rest to handle_command.
+    /// Handles stop/exit/start/restart specially; delegates the rest to handle_command.
     async fn dispatch_command(&mut self, cmd: Command) -> Result<(), StateMachineError> {
         match cmd {
-            Command::Stop | Command::Exit => {
-                log::info!("Received stop command, transitioning to Shutdown");
+            Command::Stop => {
+                if matches!(self.state, State::WaitingForLaunch) {
+                    log::info!("STOP received but already in WaitingForLaunch — no-op");
+                } else {
+                    log::info!("Received STOP — killing JVM, transitioning to WaitingForLaunch");
+                    self.abort_client_id_task();
+                    self.stop_socat();
+                    if self.supervisor.is_running() {
+                        if let Err(e) = self.supervisor.kill().await {
+                            log::error!("Failed to kill JVM: {}", e);
+                        }
+                        match self.supervisor.wait().await {
+                            Ok(status) => log::info!("JVM exited with status: {}", status),
+                            Err(e) => log::warn!("JVM wait failed: {} (may already be dead)", e),
+                        }
+                    }
+                    let socket = &self.config.agent.socket_path.clone();
+                    let _ = std::fs::remove_file(socket);
+                    self.handler_registry.reset();
+                    let old = self.state.clone();
+                    self.state = State::WaitingForLaunch;
+                    self.record_transition(&old, &State::WaitingForLaunch);
+                }
+            }
+            Command::Exit => {
+                log::info!("Received EXIT command, transitioning to Shutdown");
                 self.abort_client_id_task();
                 self.state = State::Shutdown;
+            }
+            Command::Start => {
+                if matches!(self.state, State::WaitingForLaunch) {
+                    log::info!("Received START — launching JVM");
+                    let old = self.state.clone();
+                    self.state = State::Init;
+                    self.record_transition(&old, &State::Init);
+                } else {
+                    log::info!("START received but not in WaitingForLaunch (state={}) — ignoring", self.state);
+                }
             }
             Command::Restart => {
                 log::info!("Received restart command");
@@ -279,7 +321,7 @@ impl StateMachine {
 
     /// If IB system unavailable and not already in WaitingForIB, transition there.
     fn check_ib_system_availability(&mut self) {
-        if !self.ib_status.available && self.state != State::WaitingForIB && self.state != State::Shutdown {
+        if !self.ib_status.available && self.state != State::WaitingForIB && self.state != State::Shutdown && self.state != State::WaitingForLaunch {
             log::warn!("IB system unavailable: {} — transitioning to WaitingForIB", self.ib_status.reason);
             self.ib_status.return_state = Some(Box::new(self.state.clone()));
             let old = self.state.clone();
@@ -299,6 +341,7 @@ impl StateMachine {
     /// Execute the transition for the current state, returning the next state.
     async fn transition(&mut self) -> Result<State, StateMachineError> {
         match &self.state {
+            State::WaitingForLaunch => self.do_waiting_for_launch().await,
             State::Init => self.do_init().await,
             State::Launching => self.do_launch().await,
             State::WaitingForAgent => self.do_wait_for_agent().await,
@@ -317,6 +360,19 @@ impl StateMachine {
     }
 
     // --- State handler methods ---
+
+    /// Dormant standby mode: process is running but JVM is NOT launched.
+    /// Only processes queries. Waits for a START command to transition to Init.
+    async fn do_waiting_for_launch(&mut self) -> Result<State, StateMachineError> {
+        log::info!("Standby mode — waiting for START command (JVM not launched)");
+
+        // Process any pending queries so STATUS/STATE/CONFIG still respond
+        self.process_queries().await;
+
+        // Sleep and loop — commands/signals are handled by the outer select! in run()
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        Ok(State::WaitingForLaunch)
+    }
 
     async fn do_init(&mut self) -> Result<State, StateMachineError> {
         log::info!("Initializing: validating configuration");
@@ -456,19 +512,41 @@ impl StateMachine {
 
             match self.agent_client.list_windows().await {
                 Ok(windows) => {
+                    let mut has_login_form = false;
+                    let mut has_main_window = false;
+
                     for w in &windows {
                         let title_lower = w.title.to_lowercase();
+                        let class_lower = w.class.to_lowercase();
+
                         if title_lower.contains("existing session") {
                             log::info!("Session conflict dialog detected: {}", w.title);
                             return Ok(State::HandlingSessionConflict);
                         }
-                        if title_lower.contains("ib gateway")
-                            || title_lower.contains("ibkr gateway")
-                            || title_lower.contains("login")
-                        {
-                            log::info!("Login window detected: {}", w.title);
-                            return Ok(State::Authenticating);
+
+                        // Login form: class contains "login" (jclient.login.as)
+                        if class_lower.contains("login") {
+                            has_login_form = true;
                         }
+
+                        // Main Gateway window: title matches but class is NOT login
+                        if (title_lower.contains("ib gateway") || title_lower.contains("ibkr gateway"))
+                            && !class_lower.contains("login")
+                        {
+                            has_main_window = true;
+                        }
+                    }
+
+                    if has_login_form {
+                        log::info!("Login form detected — proceeding to authenticate");
+                        return Ok(State::Authenticating);
+                    }
+
+                    if has_main_window && !has_login_form {
+                        // Gateway already authenticated (e.g., paper auto-login).
+                        // The main window is showing but no login form exists.
+                        log::info!("Gateway already authenticated — main window present, no login form");
+                        return Ok(State::DismissingPopups);
                     }
                 }
                 Err(e) => {
@@ -506,15 +584,25 @@ impl StateMachine {
         }
 
         let windows = self.agent_client.list_windows().await?;
-        let login_window = windows.iter().find(|w| {
-            let t = w.title.to_lowercase();
-            t.contains("ib gateway") || t.contains("ibkr gateway") || t.contains("login")
-        });
 
-        let win = match login_window {
-            Some(w) => w,
-            None => return Ok(State::WaitingForLogin),
-        };
+        // Find the login form by class (not title — the main window also says "IBKR Gateway")
+        let login_window = windows.iter().find(|w| w.class.to_lowercase().contains("login"));
+
+        // If no login form exists but the main Gateway window is showing,
+        // Gateway already authenticated (e.g., paper auto-login without 2FA)
+        if login_window.is_none() {
+            let has_main = windows.iter().any(|w| {
+                let t = w.title.to_lowercase();
+                (t.contains("ib gateway") || t.contains("ibkr gateway")) && !w.class.to_lowercase().contains("login")
+            });
+            if has_main {
+                log::info!("No login form but main Gateway window present — already authenticated");
+                return Ok(State::DismissingPopups);
+            }
+            return Ok(State::WaitingForLogin);
+        }
+
+        let win = login_window.unwrap();
 
         match self.handler_registry.dispatch(&self.agent_client, win).await {
             Some(Ok(crate::handlers::HandlerResult::Handled)) => {
@@ -526,7 +614,9 @@ impl StateMachine {
                 return Ok(State::WaitingForLogin);
             }
             Some(Ok(crate::handlers::HandlerResult::NotApplicable)) => {
-                log::debug!("Login handler didn't recognize window — waiting for login form");
+                // Handler couldn't interact with the window — might be a transient
+                // state where the login form is closing. Check again shortly.
+                log::debug!("Login handler didn't recognize window — retrying");
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 return Ok(State::WaitingForLogin);
             }
@@ -768,12 +858,22 @@ impl StateMachine {
     async fn do_configure_api(&mut self) -> Result<State, StateMachineError> {
         const MAX_CONFIG_RETRIES: u32 = 10;
 
+        // Close any stale Configure menu from a previous failed attempt.
+        // An open menu covers dialogs and interferes with detection.
+        self.dismiss_menus().await;
+
         // Guard: check for any blocking dialog (re-login, 2FA, session conflict)
-        // These prevent the Settings dialog from opening
         if let Some(next_state) = self.check_blocking_dialog().await {
             log::warn!("Blocking dialog detected — cannot configure API, transitioning to {}", next_state);
             self.config_retries = 0;
             return Ok(next_state);
+        }
+
+        // Guard: JVM must still be running
+        if !self.supervisor.is_running() {
+            log::warn!("JVM not running — cannot configure API");
+            self.config_retries = 0;
+            return Ok(State::Restarting);
         }
 
         self.config_retries += 1;
@@ -791,13 +891,18 @@ impl StateMachine {
                 Ok(State::Connected)
             }
             Err(e) => {
+                // Close any menu left open by the failed attempt
+                self.dismiss_menus().await;
+
                 if self.config_retries >= MAX_CONFIG_RETRIES {
-                    log::error!(
-                        "API configuration failed {} times — restarting Gateway: {}",
+                    // Configuration is best-effort — don't restart Gateway for config failures.
+                    // Proceed to Connected and let the user configure manually if needed.
+                    log::warn!(
+                        "API configuration failed {} times — proceeding without config: {}",
                         MAX_CONFIG_RETRIES, e
                     );
                     self.config_retries = 0;
-                    Ok(State::Restarting)
+                    Ok(State::Connected)
                 } else {
                     log::error!("API configuration FAILED: {} — will retry ({}/{})", e, self.config_retries, MAX_CONFIG_RETRIES);
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -886,12 +991,52 @@ impl StateMachine {
                 let title_lower = win.title.to_lowercase();
 
                 if title_lower.contains("re-login") || title_lower.contains("login is required") {
-                    log::info!("Connection lost — clicking Cancel to return to login form");
-                    let _ = self.agent_client.click_button(win.id, "Cancel").await;
-                    self.handler_registry.reset();
-                    self.abort_client_id_task();
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    return Ok(State::WaitingForLogin);
+                    self.relogin_attempts += 1;
+                    log::info!(
+                        "RE-LOGIN dialog detected (attempt {}) — connection lost",
+                        self.relogin_attempts
+                    );
+
+                    if self.relogin_attempts <= self.config.timing.relogin_max_attempts {
+                        // First occurrence: wait 30s for transient recovery, then click Re-login
+                        log::info!("Waiting 30s before attempting re-login...");
+                        for _ in 0..15 { self.process_queries().await; tokio::time::sleep(std::time::Duration::from_secs(2)).await; }
+
+                        // Check if dialog is still there (Gateway may have self-recovered)
+                        if let Ok(current_windows) = self.agent_client.list_windows().await {
+                            let still_showing = current_windows.iter().any(|w| {
+                                let t = w.title.to_lowercase();
+                                t.contains("re-login") || t.contains("login is required")
+                            });
+                            if !still_showing {
+                                log::info!("RE-LOGIN dialog disappeared during wait — Gateway self-recovered");
+                                continue;
+                            }
+                            // Still showing — click Re-login to attempt reconnection
+                            if let Some(dialog) = current_windows.iter().find(|w| {
+                                let t = w.title.to_lowercase();
+                                t.contains("re-login") || t.contains("login is required")
+                            }) {
+                                log::info!("Clicking Re-login to attempt reconnection");
+                                let _ = self.agent_client.click_button(dialog.id, "Re-login").await;
+                                self.handler_registry.reset();
+                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                                return Ok(State::WaitingForLogin);
+                            }
+                        }
+                    } else {
+                        // Second+ occurrence: re-login failed, cancel and restart JVM
+                        log::warn!(
+                            "RE-LOGIN failed after {} attempts — cancelling and restarting JVM",
+                            self.relogin_attempts
+                        );
+                        let _ = self.agent_client.click_button(win.id, "Cancel").await;
+                        self.handler_registry.reset();
+                        self.abort_client_id_task();
+                        log::info!("Waiting 60s before restarting JVM...");
+                        for _ in 0..30 { self.process_queries().await; tokio::time::sleep(std::time::Duration::from_secs(2)).await; }
+                        return Ok(State::Restarting);
+                    }
                 }
 
                 let _ = self.handler_registry.dispatch(&self.agent_client, win).await;
@@ -916,6 +1061,16 @@ impl StateMachine {
     }
 
     async fn do_restart(&mut self) -> Result<State, StateMachineError> {
+        let delay = self.config.timing.restart_delay_secs;
+        if delay > 0 {
+            log::info!("Waiting {}s before restarting Gateway (giving time to self-recover)", delay);
+            let start = std::time::Instant::now();
+            while start.elapsed().as_secs() < delay {
+                self.process_queries().await;
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+
         log::info!("Restarting IB Gateway");
 
         self.abort_client_id_task();
@@ -953,8 +1108,9 @@ impl StateMachine {
     async fn do_waiting_for_ib(&mut self) -> Result<State, StateMachineError> {
         log::info!("Waiting for IB system to become available ({})", self.ib_status.reason);
 
-        // Process queries so STATUS requests still return
+        // Process queries and commands so dashboard stays responsive
         self.process_queries().await;
+        self.process_commands_nonblocking().await;
 
         // Check if IB became available
         if self.ib_status.available {
@@ -965,8 +1121,12 @@ impl StateMachine {
             return Ok(State::Init);
         }
 
-        // Sleep and check again
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        // Poll with query processing so dashboard stays responsive
+        for _ in 0..5 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            self.process_queries().await;
+            self.process_commands_nonblocking().await;
+        }
         Ok(State::WaitingForIB)
     }
 
@@ -992,6 +1152,20 @@ impl StateMachine {
     // check_interrupts() removed — signal/command/cold-restart handling is now
     // done directly in the tokio::select! loop in run(), giving immediate
     // responsiveness instead of polling between transitions.
+
+    /// Dismiss any open menus by pressing Escape on the main Gateway window.
+    /// Open menus (Configure > Settings) cover dialogs and interfere with detection.
+    async fn dismiss_menus(&self) {
+        if let Ok(windows) = self.agent_client.list_windows().await {
+            for w in &windows {
+                let t = w.title.to_lowercase();
+                if t.contains("ib gateway") || t.contains("ibkr gateway") {
+                    let _ = self.agent_client.send_key(w.id, "escape").await;
+                    return;
+                }
+            }
+        }
+    }
 
     /// Check if any visible window is a blocking dialog that requires a state change.
     /// Clicks the appropriate button to dismiss the dialog, then returns the next state.
@@ -1139,9 +1313,7 @@ impl StateMachine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cold_restart::ColdRestartSignal;
-    use crate::command_server::Command;
-    use crate::signals::Signal;
+    use crate::types::{ColdRestartSignal, Command, Signal};
 
     #[test]
     fn test_relogin_dialog_detected() {

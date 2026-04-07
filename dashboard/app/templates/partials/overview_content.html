@@ -1,3 +1,17 @@
+<!-- Site configuration banner -->
+{% if site_config %}
+<div class="site-banner">
+    <div class="site-role">
+        <span class="instance-badge-sm {% if site_config.role == 'primary' %}badge-live{% else %}badge-paper{% endif %}">
+            {{ site_config.role | upper }}
+        </span>
+        <span style="color: #888; font-size: 12px; margin-left: 8px;">
+            {% if site_config.auto_launch %}Auto-launch enabled{% else %}Waiting for START command{% endif %}
+        </span>
+    </div>
+</div>
+{% endif %}
+
 {% set ib_enabled = ib_status is defined and ib_status is not none %}
 
 <!-- IB Status accordion — expanded by default, only if IB status feature is enabled -->
@@ -270,6 +284,19 @@
     .controls-bar { gap: 4px; }
     .ctrl-btn { padding: 4px 8px; font-size: 10px; }
 }
+
+/* Site configuration banner */
+.site-banner {
+    background: #0d1b3e;
+    border: 1px solid #16213e;
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.site-role { display: flex; align-items: center; }
 </style>
 
 <script>
@@ -283,8 +310,38 @@ function toggleAccordion(header) {
     if (!wasOpen) card.classList.add('open');
 }
 
-// Open default cards on load
+// Preserve accordion state across HTMX swaps
 (function() {
+    var container = document.getElementById('overview-content');
+    if (!container) return;
+
+    // Before swap: save which accordions are open
+    container.addEventListener('htmx:beforeSwap', function() {
+        var openIds = [];
+        document.querySelectorAll('.accordion-card.open').forEach(function(c) {
+            var id = c.getAttribute('data-accordion');
+            if (id) openIds.push(id);
+        });
+        container._openAccordions = openIds;
+    });
+
+    // After swap: restore open state
+    container.addEventListener('htmx:afterSwap', function() {
+        var openIds = container._openAccordions || [];
+        if (openIds.length > 0) {
+            openIds.forEach(function(id) {
+                var card = document.querySelector('.accordion-card[data-accordion="' + id + '"]');
+                if (card) card.classList.add('open');
+            });
+        } else {
+            // First load: open defaults
+            document.querySelectorAll('.accordion-card[data-default-open="true"]').forEach(function(c) {
+                c.classList.add('open');
+            });
+        }
+    });
+
+    // Initial load: open defaults
     document.querySelectorAll('.accordion-card[data-default-open="true"]').forEach(function(c) {
         c.classList.add('open');
     });
@@ -293,7 +350,7 @@ function toggleAccordion(header) {
 // Controls
 function sendCmd(command, mode) {
     var result = document.getElementById('cmd-result-' + mode);
-    fetch('/api/v1/command', {
+    fetch(ROOT_PATH + '/api/v1/command', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({command: command, mode: mode})

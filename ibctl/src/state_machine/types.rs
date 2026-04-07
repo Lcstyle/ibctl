@@ -7,11 +7,10 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 
 use crate::agent_client::AgentClient;
-use crate::cold_restart::ColdRestartSignal;
-use crate::command_server::{Command, Query};
+use crate::types::{ColdRestartSignal, Command, Query};
 use crate::config::ValidConfig;
 use crate::handlers::DialogHandlerRegistry;
-use crate::signals::Signal;
+use crate::types::Signal;
 use crate::supervisor::Supervisor;
 
 #[derive(Debug, Error)]
@@ -29,6 +28,8 @@ pub enum StateMachineError {
 /// All possible states in the ibctl lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum State {
+    /// Standby mode: process running, JVM not launched. Awaiting START command.
+    WaitingForLaunch,
     /// Initial state: parse config, validate environment
     Init,
     /// Launching the JVM with -javaagent
@@ -63,6 +64,7 @@ impl State {
     /// Parse a state name from a string (for SETSTATE command).
     pub fn from_name(name: &str) -> Option<State> {
         match name {
+            "WaitingForLaunch" => Some(State::WaitingForLaunch),
             "Init" => Some(State::Init),
             "Launching" => Some(State::Launching),
             "WaitingForAgent" => Some(State::WaitingForAgent),
@@ -187,6 +189,8 @@ pub struct StateMachine {
     pub(super) client_id_task: Option<tokio::task::JoinHandle<()>>,
     /// Watch receiver for client IDs from the background refresh task.
     pub(super) client_id_rx: Option<tokio::sync::watch::Receiver<Vec<String>>>,
+    /// Tracks consecutive re-login dialog appearances. Reset on Connected.
+    pub(super) relogin_attempts: u32,
     pub stats: Stats,
 }
 
@@ -219,6 +223,7 @@ impl StateMachine {
             warm_restart_pending: None,
             client_id_task: None,
             client_id_rx: None,
+            relogin_attempts: 0,
             stats: Stats::default(),
         }
     }
@@ -243,6 +248,7 @@ impl StateMachine {
 /// Returns (should_connect, should_wait, wait_reason, client_id_likely_stale).
 pub(crate) fn client_advisory(state: &State) -> (bool, bool, Option<&'static str>, bool) {
     let (should_connect, should_wait, wait_reason) = match state {
+        State::WaitingForLaunch => (false, false, Some("standby")),
         State::Init | State::Launching | State::WaitingForAgent => (false, true, Some("launching")),
         State::WaitingForLogin | State::Authenticating => (false, true, Some("logging_in")),
         State::WaitingFor2fa => (false, true, Some("2fa_pending")),
@@ -327,8 +333,17 @@ mod tests {
     }
 
     #[test]
+    fn test_waiting_for_launch_standby() {
+        let (should_connect, should_wait, reason, _) = client_advisory(&State::WaitingForLaunch);
+        assert!(!should_connect);
+        assert!(!should_wait);
+        assert_eq!(reason, Some("standby"));
+    }
+
+    #[test]
     fn test_all_states_covered() {
         let states = vec![
+            State::WaitingForLaunch,
             State::Init, State::Launching, State::WaitingForAgent,
             State::WaitingForLogin, State::Authenticating,
             State::WaitingFor2fa, State::HandlingSessionConflict,

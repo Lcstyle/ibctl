@@ -1,6 +1,6 @@
 //! Query handling and JSON response builders for the command server.
 
-use crate::command_server::Query;
+use crate::types::Query;
 
 use super::types::{client_advisory, State, StateMachine};
 
@@ -99,6 +99,10 @@ impl StateMachine {
                     ttl.saturating_sub(t.elapsed().as_secs())
                 }),
             },
+            "site": {
+                "role": self.config.site.role.to_string(),
+                "auto_launch": self.config.site.auto_launch,
+            },
             "paused": self.pause.paused,
             "ceiling_state": self.pause.ceiling_state.as_ref().map(|s| s.to_string()),
             "stats": self.stats,
@@ -151,6 +155,10 @@ impl StateMachine {
             },
             "agent": {
                 "socket_path": self.config.agent.socket_path,
+            },
+            "site": {
+                "role": self.config.site.role.to_string(),
+                "auto_launch": self.config.site.auto_launch,
             },
         }).to_string()
     }

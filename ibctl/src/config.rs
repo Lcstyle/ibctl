@@ -117,6 +117,42 @@ impl fmt::Display for AcceptIncoming {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SiteRole {
+    Primary,
+    Standby,
+}
+
+impl Default for SiteRole {
+    fn default() -> Self { Self::Primary }
+}
+
+impl fmt::Display for SiteRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Primary => write!(f, "primary"),
+            Self::Standby => write!(f, "standby"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct SiteConfig {
+    pub role: SiteRole,
+    pub auto_launch: bool,
+}
+
+impl Default for SiteConfig {
+    fn default() -> Self {
+        Self {
+            role: SiteRole::Primary,
+            auto_launch: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LogLevel {
@@ -166,6 +202,7 @@ pub struct Config {
     pub agent: AgentConfig,
     pub logging: LoggingConfig,
     pub timing: TimingConfig,
+    pub site: SiteConfig,
     /// Catch-all for unknown sections (e.g., \[dashboard\]) — silently ignored.
     #[serde(flatten)]
     _extra: std::collections::HashMap<String, toml::Value>,
@@ -327,6 +364,15 @@ pub struct TimingConfig {
     /// 0 = wait indefinitely (useful for headless servers during IB maintenance).
     /// Default: 120
     pub login_dialog_timeout_secs: u64,
+    /// Seconds to wait before restarting the JVM after an error or failure.
+    /// Gives Gateway time to self-recover from transient connection losses.
+    /// Default: 90
+    pub restart_delay_secs: u64,
+    /// Max re-login attempts before cancelling and restarting JVM.
+    /// On first attempt, waits 30s then clicks Re-login. If it fails again
+    /// (up to this limit), clicks Cancel, waits 60s, restarts JVM.
+    /// Default: 1
+    pub relogin_max_attempts: u32,
 }
 
 // --- Default implementations ---
@@ -342,6 +388,8 @@ impl Default for TimingConfig {
             login_radio_delay_ms: 100,
             jvm_shutdown_timeout_secs: 5,
             login_dialog_timeout_secs: 120,
+            restart_delay_secs: 90,
+            relogin_max_attempts: 1,
         }
     }
 }
@@ -596,6 +644,12 @@ impl Config {
         if let Some(v) = std::env::var("IBCTL_LOGIN_TIMEOUT").ok().and_then(|s| s.parse().ok()) {
             self.timing.login_dialog_timeout_secs = v;
         }
+        if let Some(v) = std::env::var("IBCTL_RESTART_DELAY").ok().and_then(|s| s.parse().ok()) {
+            self.timing.restart_delay_secs = v;
+        }
+        if let Some(v) = std::env::var("IBCTL_RELOGIN_ATTEMPTS").ok().and_then(|s| s.parse().ok()) {
+            self.timing.relogin_max_attempts = v;
+        }
 
         // Agent
         if let Ok(v) = std::env::var("IBCTL_AGENT_SOCKET") {
@@ -611,6 +665,18 @@ impl Config {
                 "error" => self.logging.level = LogLevel::Error,
                 other => log::warn!("Unknown IBCTL_LOG_LEVEL '{}', keeping default", other),
             }
+        }
+
+        // Site
+        if let Ok(v) = std::env::var("IBCTL_SITE_ROLE") {
+            match v.to_lowercase().as_str() {
+                "primary" => self.site.role = SiteRole::Primary,
+                "standby" => self.site.role = SiteRole::Standby,
+                other => log::warn!("Unknown IBCTL_SITE_ROLE '{}', keeping default", other),
+            }
+        }
+        if let Ok(v) = std::env::var("IBCTL_AUTO_LAUNCH") {
+            self.site.auto_launch = matches!(v.to_lowercase().as_str(), "true" | "yes" | "1");
         }
     }
 
@@ -873,5 +939,32 @@ key = "value"
         let mut config = Config::default();
         config.auth.password = SecretString::from("mypass".to_string());
         assert_eq!(config.auth.password.expose_secret(), "mypass");
+    }
+
+    // --- Site config tests ---
+
+    #[test]
+    fn test_site_config_defaults() {
+        let config = Config::default();
+        assert_eq!(config.site.role, SiteRole::Primary);
+        assert!(config.site.auto_launch);
+    }
+
+    #[test]
+    fn test_site_config_from_toml() {
+        let toml_str = r#"
+[site]
+role = "standby"
+auto_launch = false
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.site.role, SiteRole::Standby);
+        assert!(!config.site.auto_launch);
+    }
+
+    #[test]
+    fn test_site_role_display() {
+        assert_eq!(SiteRole::Primary.to_string(), "primary");
+        assert_eq!(SiteRole::Standby.to_string(), "standby");
     }
 }
