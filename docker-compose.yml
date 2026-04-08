@@ -60,6 +60,12 @@ services:
       IBCTL_COMMAND_HOST_PAPER: ${IBCTL_COMMAND_HOST_PAPER:-127.0.0.1}
       IBCTL_COMMAND_PORT_PAPER: ${IBCTL_COMMAND_PORT_PAPER:-7463}
 
+      # --- Notifications (ntfy.sh) ---
+      IBCTL_NOTIFICATIONS_ENABLED: ${IBCTL_NOTIFICATIONS_ENABLED:-false}
+      IBCTL_NTFY_URL: ${IBCTL_NTFY_URL:-}
+      IBCTL_NTFY_TOPIC: ${IBCTL_NTFY_TOPIC:-}
+      IBCTL_NTFY_TOKEN: ${IBCTL_NTFY_TOKEN:-}
+
       # --- IB System Status Scraper ---
       IB_STATUS_CHECK_INTERVAL: ${IB_STATUS_CHECK_INTERVAL:-300}
       IB_STATUS_REGION: ${IB_STATUS_REGION:-NA}
@@ -76,8 +82,8 @@ services:
     #   - ./bin:/opt/ibctl/bin:ro
     #   - ./dashboard/app:/opt/ibctl/dashboard/app:ro
     ports:
-      - "${IBCTL_API_BIND:-127.0.0.1}:${IBCTL_LIVE_API_PORT:-4001}:4003"    # Live API
-      - "${IBCTL_API_BIND:-127.0.0.1}:${IBCTL_PAPER_API_PORT:-4002}:4004"   # Paper API
+      - "${IBCTL_LIVE_API_BIND:-127.0.0.1}:${IBCTL_LIVE_API_PORT:-4001}:4003"     # Live API
+      - "${IBCTL_PAPER_API_BIND:-127.0.0.1}:${IBCTL_PAPER_API_PORT:-4002}:4004"  # Paper API
       - "${IBCTL_VNC_BIND:-127.0.0.1}:5900:5900"                            # VNC
       - "${IBCTL_VNC_BIND:-127.0.0.1}:6080:6080"                            # noVNC websocket
       - "127.0.0.1:7462:7462"                                               # Live command server

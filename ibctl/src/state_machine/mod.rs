@@ -916,6 +916,19 @@ impl StateMachine {
     async fn do_connected(&mut self) -> Result<State, StateMachineError> {
         log::info!("Gateway connected — monitoring loop tick");
 
+        // Record the main window class on first entry — used to detect silent session loss
+        if self.connected_window_class.is_none() {
+            if let Ok(windows) = self.agent_client.list_windows().await {
+                if let Some(main) = windows.iter().find(|w| {
+                    let t = w.title.to_lowercase();
+                    t.contains("ib gateway") || t.contains("ibkr gateway")
+                }) {
+                    log::info!("Recording connected window class: {}", main.class);
+                    self.connected_window_class = Some(main.class.clone());
+                }
+            }
+        }
+
         let (api_port, socat_port) = if self.config.auth.trading_mode == crate::config::TradingMode::Paper {
             (self.config.gateway.paper_api_port, self.config.gateway.paper_socat_port)
         } else {
@@ -986,8 +999,45 @@ impl StateMachine {
             self.start_socat(api_port, socat_port);
         }
 
-        // Check windows for re-login dialogs and dismiss popups
+        // Check windows for session loss and re-login dialogs
         if let Ok(windows) = self.agent_client.list_windows().await {
+            // Detect silent session loss: if the main Gateway window's class changed
+            // since we entered Connected, the UI reverted (likely to login form).
+            // Confirm with text field check before transitioning.
+            if let Some(ref expected_class) = self.connected_window_class {
+                if let Some(main) = windows.iter().find(|w| {
+                    let t = w.title.to_lowercase();
+                    t.contains("ib gateway") || t.contains("ibkr gateway")
+                }) {
+                    if main.class != *expected_class {
+                        // Class changed — confirm it's a login form by checking for text fields
+                        use crate::types::WindowId;
+                        if let Ok(components) = self.agent_client.dump_components(WindowId(main.id.0)).await {
+                            let has_textfields = components.get("textfields")
+                                .and_then(|t| t.as_array())
+                                .map(|a| !a.is_empty())
+                                .unwrap_or(false);
+                            if has_textfields {
+                                log::warn!(
+                                    "Session lost — login form detected (class changed: {} → {}, text fields present)",
+                                    expected_class, main.class
+                                );
+                                self.connected_window_class = None;
+                                self.handler_registry.reset();
+                                self.abort_client_id_task();
+                                return Ok(State::WaitingForLogin);
+                            } else {
+                                log::info!(
+                                    "Window class changed {} → {} (no login form — benign UI update)",
+                                    expected_class, main.class
+                                );
+                                self.connected_window_class = Some(main.class.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
             for win in &windows {
                 let title_lower = win.title.to_lowercase();
 

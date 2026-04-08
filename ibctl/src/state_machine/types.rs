@@ -189,6 +189,10 @@ pub struct StateMachine {
     pub(super) client_id_rx: Option<tokio::sync::watch::Receiver<Vec<String>>>,
     /// Tracks consecutive re-login dialog appearances. Reset on Connected.
     pub(super) relogin_attempts: u32,
+    /// Window class recorded when entering Connected state. Used to detect silent
+    /// session loss: if the main window's class changes (e.g. ibgateway.ay → ibgateway.az),
+    /// Gateway reverted to the login form without showing a RE-LOGIN dialog.
+    pub(super) connected_window_class: Option<String>,
     pub stats: Stats,
 }
 
@@ -222,6 +226,7 @@ impl StateMachine {
             client_id_task: None,
             client_id_rx: None,
             relogin_attempts: 0,
+            connected_window_class: None,
             stats: Stats::default(),
         }
     }
