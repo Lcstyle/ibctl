@@ -352,6 +352,7 @@ impl StateMachine {
             State::DismissingPopups => self.do_dismiss_popups().await,
             State::ConfiguringApi => self.do_configure_api().await,
             State::Connected => self.do_connected().await,
+            State::ReconnectingSession => self.do_reconnecting_session().await,
             State::Restarting => self.do_restart().await,
             State::WaitingForIB => self.do_waiting_for_ib().await,
             State::Shutdown => Ok(State::Shutdown),
@@ -857,7 +858,7 @@ impl StateMachine {
     }
 
     async fn do_configure_api(&mut self) -> Result<State, StateMachineError> {
-        const MAX_CONFIG_RETRIES: u32 = 10;
+        const MAX_CONFIG_RETRIES: u32 = 3;
 
         // Close any stale Configure menu from a previous failed attempt.
         // An open menu covers dialogs and interferes with detection.
@@ -875,6 +876,60 @@ impl StateMachine {
             log::warn!("JVM not running — cannot configure API");
             self.config_retries = 0;
             return Ok(State::Restarting);
+        }
+
+        // Guard: check if Gateway is actually connected by inspecting the main window.
+        // If the window class changed from what we recorded at Connected (e.g. login form
+        // reappeared) or text fields are present, skip config — Gateway lost its session.
+        if let Ok(windows) = self.agent_client.list_windows().await {
+            if let Some(main) = windows.iter().find(|w| {
+                let t = w.title.to_lowercase();
+                t.contains("ib gateway") || t.contains("ibkr gateway")
+            }) {
+                // Check 1: window class changed from connected state
+                let class_changed = self.connected_window_class.as_ref()
+                    .map(|expected| main.class != *expected)
+                    .unwrap_or(false);
+
+                if class_changed {
+                    // Check 2: confirm with text field check (login form has text fields)
+                    use crate::types::WindowId;
+                    if let Ok(components) = self.agent_client.dump_components(WindowId(main.id.0)).await {
+                        let has_textfields = components.get("textfields")
+                            .and_then(|t| t.as_array())
+                            .map(|a| !a.is_empty())
+                            .unwrap_or(false);
+                        if has_textfields {
+                            log::warn!("Gateway disconnected — login form detected during ConfiguringApi, skipping config");
+                            self.config_retries = 0;
+                            self.connected_window_class = None;
+                            return Ok(State::WaitingForLogin);
+                        }
+                    }
+                }
+
+                // Check 3: if config dialog can't open after first failure, check for
+                // "disconnected" by looking at window count — a disconnected Gateway
+                // has only 1 window (main) with no sub-dialogs and Settings won't open.
+                if self.config_retries > 0 {
+                    // We already failed at least once. Check if there are text fields
+                    // (login form) even without class change — Gateway may have reconnected
+                    // to the same window class but in a disconnected state.
+                    use crate::types::WindowId;
+                    if let Ok(components) = self.agent_client.dump_components(WindowId(main.id.0)).await {
+                        let has_textfields = components.get("textfields")
+                            .and_then(|t| t.as_array())
+                            .map(|a| !a.is_empty())
+                            .unwrap_or(false);
+                        if has_textfields {
+                            log::warn!("Gateway has login form text fields — session lost during config retries");
+                            self.config_retries = 0;
+                            self.connected_window_class = None;
+                            return Ok(State::WaitingForLogin);
+                        }
+                    }
+                }
+            }
         }
 
         self.config_retries += 1;
@@ -1042,52 +1097,10 @@ impl StateMachine {
                 let title_lower = win.title.to_lowercase();
 
                 if title_lower.contains("re-login") || title_lower.contains("login is required") {
-                    self.relogin_attempts += 1;
-                    log::info!(
-                        "RE-LOGIN dialog detected (attempt {}) — connection lost",
-                        self.relogin_attempts
-                    );
-
-                    if self.relogin_attempts <= self.config.timing.relogin_max_attempts {
-                        // First occurrence: wait 30s for transient recovery, then click Re-login
-                        log::info!("Waiting 30s before attempting re-login...");
-                        for _ in 0..15 { self.process_queries().await; tokio::time::sleep(std::time::Duration::from_secs(2)).await; }
-
-                        // Check if dialog is still there (Gateway may have self-recovered)
-                        if let Ok(current_windows) = self.agent_client.list_windows().await {
-                            let still_showing = current_windows.iter().any(|w| {
-                                let t = w.title.to_lowercase();
-                                t.contains("re-login") || t.contains("login is required")
-                            });
-                            if !still_showing {
-                                log::info!("RE-LOGIN dialog disappeared during wait — Gateway self-recovered");
-                                continue;
-                            }
-                            // Still showing — click Re-login to attempt reconnection
-                            if let Some(dialog) = current_windows.iter().find(|w| {
-                                let t = w.title.to_lowercase();
-                                t.contains("re-login") || t.contains("login is required")
-                            }) {
-                                log::info!("Clicking Re-login to attempt reconnection");
-                                let _ = self.agent_client.click_button(dialog.id, "Re-login").await;
-                                self.handler_registry.reset();
-                                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                                return Ok(State::WaitingForLogin);
-                            }
-                        }
-                    } else {
-                        // Second+ occurrence: re-login failed, cancel and restart JVM
-                        log::warn!(
-                            "RE-LOGIN failed after {} attempts — cancelling and restarting JVM",
-                            self.relogin_attempts
-                        );
-                        let _ = self.agent_client.click_button(win.id, "Cancel").await;
-                        self.handler_registry.reset();
-                        self.abort_client_id_task();
-                        log::info!("Waiting 60s before restarting JVM...");
-                        for _ in 0..30 { self.process_queries().await; tokio::time::sleep(std::time::Duration::from_secs(2)).await; }
-                        return Ok(State::Restarting);
-                    }
+                    log::info!("RE-LOGIN dialog detected in Connected — transitioning to ReconnectingSession");
+                    self.abort_client_id_task();
+                    self.stop_socat();
+                    return Ok(State::ReconnectingSession);
                 }
 
                 let _ = self.handler_registry.dispatch(&self.agent_client, win).await;
@@ -1109,6 +1122,89 @@ impl StateMachine {
 
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         Ok(State::Connected)
+    }
+
+    /// Graduated session recovery: handles RE-LOGIN dialogs with configurable
+    /// attempts before falling back to a full JVM restart.
+    ///
+    /// Flow:
+    ///   1. Wait 30s (transient recovery window — Gateway may self-recover)
+    ///   2. If dialog gone → return to Connected
+    ///   3. If dialog still present → click "Re-login"
+    ///   4. If re-login succeeds → WaitingForLogin → auth flow → Connected
+    ///   5. If re-login fails (dialog reappears) → increment attempts
+    ///   6. After max attempts → click Cancel, wait 60s, restart JVM
+    async fn do_reconnecting_session(&mut self) -> Result<State, StateMachineError> {
+        self.relogin_attempts += 1;
+        let max = self.config.timing.relogin_max_attempts;
+        log::info!(
+            "ReconnectingSession: attempt {}/{} — connection lost",
+            self.relogin_attempts, max
+        );
+
+        if self.relogin_attempts > max {
+            // Exhausted attempts — cancel dialog and restart JVM
+            log::warn!(
+                "Re-login failed after {} attempts — cancelling and restarting JVM",
+                self.relogin_attempts
+            );
+            // Find and click Cancel on the re-login dialog
+            if let Ok(windows) = self.agent_client.list_windows().await {
+                for w in &windows {
+                    let t = w.title.to_lowercase();
+                    if t.contains("re-login") || t.contains("login is required") {
+                        let _ = self.agent_client.click_button(w.id, "Cancel").await;
+                    }
+                }
+            }
+            self.handler_registry.reset();
+            self.abort_client_id_task();
+            self.relogin_attempts = 0;
+            // Wait before restart to avoid rapid cycling
+            log::info!("Waiting 60s before restarting JVM...");
+            for _ in 0..30 {
+                self.process_queries().await;
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+            return Ok(State::Restarting);
+        }
+
+        // Wait 30s for transient recovery — Gateway may self-recover
+        log::info!("Waiting 30s for transient recovery...");
+        for _ in 0..15 {
+            self.process_queries().await;
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+
+        // Check if dialog is still there
+        if let Ok(windows) = self.agent_client.list_windows().await {
+            let dialog = windows.iter().find(|w| {
+                let t = w.title.to_lowercase();
+                t.contains("re-login") || t.contains("login is required")
+            });
+
+            if dialog.is_none() {
+                // Dialog disappeared — Gateway self-recovered
+                log::info!("RE-LOGIN dialog disappeared — Gateway self-recovered");
+                self.relogin_attempts = 0;
+                return Ok(State::Connected);
+            }
+
+            // Still showing — click Re-login
+            if let Some(d) = dialog {
+                log::info!("Clicking Re-login to attempt reconnection (attempt {})", self.relogin_attempts);
+                let _ = self.agent_client.click_button(d.id, "Re-login").await;
+                self.handler_registry.reset();
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                // Auth flow will pick up from here. If it fails and we get another
+                // RE-LOGIN dialog, check_blocking_dialog routes back here with
+                // relogin_attempts incremented.
+                return Ok(State::WaitingForLogin);
+            }
+        }
+
+        // Couldn't check windows — try again next tick
+        Ok(State::ReconnectingSession)
     }
 
     async fn do_restart(&mut self) -> Result<State, StateMachineError> {
@@ -1224,11 +1320,12 @@ impl StateMachine {
         if let Ok(windows) = self.agent_client.list_windows().await {
             for w in &windows {
                 if let Some(state) = Self::classify_blocking_dialog(&w.title) {
-                    // Dismiss the blocking dialog before transitioning
+                    // Re-login dialogs: route to ReconnectingSession for graduated recovery.
+                    // Do NOT click Cancel here — ReconnectingSession owns the re-login flow.
                     let t = w.title.to_lowercase();
                     if t.contains("re-login") || t.contains("relogin") || t.contains("login is required") {
-                        log::info!("Connection lost — clicking Cancel to return to login form");
-                        let _ = self.agent_client.click_button(w.id, "Cancel").await;
+                        log::info!("RE-LOGIN dialog detected — transitioning to ReconnectingSession");
+                        return Some(State::ReconnectingSession);
                     }
                     return Some(state);
                 }
@@ -1242,8 +1339,9 @@ impl StateMachine {
     fn classify_blocking_dialog(title: &str) -> Option<State> {
         let t = title.to_lowercase();
         // Re-login dialog: "RE-LOGIN IS REQUIRED" / "Your connection was lost"
+        // Routes to ReconnectingSession for graduated recovery (wait → re-login → retry → restart)
         if t.contains("re-login") || t.contains("relogin") || t.contains("login is required") {
-            return Some(State::WaitingForLogin);
+            return Some(State::ReconnectingSession);
         }
         // 2FA dialog: "Second Factor Authentication" / "IB Key Authentication"
         if t.contains("second factor") || t.contains("ib key authenticat") {
@@ -1371,7 +1469,7 @@ mod tests {
         // The exact title from the screenshot
         assert_eq!(
             StateMachine::classify_blocking_dialog("RE-LOGIN IS REQUIRED"),
-            Some(State::WaitingForLogin),
+            Some(State::ReconnectingSession),
         );
     }
 
@@ -1379,7 +1477,7 @@ mod tests {
     fn test_relogin_dialog_lowercase() {
         assert_eq!(
             StateMachine::classify_blocking_dialog("re-login is required"),
-            Some(State::WaitingForLogin),
+            Some(State::ReconnectingSession),
         );
     }
 
@@ -1387,7 +1485,7 @@ mod tests {
     fn test_login_is_required_variant() {
         assert_eq!(
             StateMachine::classify_blocking_dialog("Login is required"),
-            Some(State::WaitingForLogin),
+            Some(State::ReconnectingSession),
         );
     }
 

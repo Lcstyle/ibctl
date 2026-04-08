@@ -48,6 +48,9 @@ pub enum State {
     ConfiguringApi,
     /// Fully connected and monitoring for new dialogs
     Connected,
+    /// Recovering from connection loss — graduated re-login flow.
+    /// Waits 30s, clicks Re-login, tracks attempts. If failed, restarts JVM.
+    ReconnectingSession,
     /// Restarting the Gateway JVM
     Restarting,
     /// Waiting for IB system to become available (maintenance/outage/no internet)
@@ -73,6 +76,7 @@ impl State {
             "DismissingPopups" => Some(State::DismissingPopups),
             "ConfiguringApi" => Some(State::ConfiguringApi),
             "Connected" => Some(State::Connected),
+            "ReconnectingSession" => Some(State::ReconnectingSession),
             "Restarting" => Some(State::Restarting),
             "WaitingForIB" => Some(State::WaitingForIB),
             "Shutdown" => Some(State::Shutdown),
@@ -258,6 +262,7 @@ pub(crate) fn client_advisory(state: &State) -> (bool, bool, Option<&'static str
         State::HandlingSessionConflict => (false, true, Some("session_conflict")),
         State::DismissingPopups | State::ConfiguringApi => (false, true, Some("configuring")),
         State::Connected => (true, false, None),
+        State::ReconnectingSession => (false, true, Some("reconnecting")),
         State::Restarting => (false, true, Some("restarting")),
         State::WaitingForIB => (false, true, Some("ib_maintenance")),
         State::Shutdown => (false, false, None),
