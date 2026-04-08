@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Notifications</h2>
+
+<div id="notifications-content">
+    <div class="card" style="margin-bottom: 12px;">
+        <div class="card-label">ntfy.sh Configuration</div>
+        <div style="margin-top: 8px;">
+            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px;">
+                <label style="color: #a1a1aa; font-size: 12px; min-width: 60px;">Enabled</label>
+                <input type="checkbox" id="notif-enabled">
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+                <label style="color: #a1a1aa; font-size: 12px; min-width: 60px;">URL</label>
+                <input type="text" id="notif-url" placeholder="https://ntfy.sh" style="flex: 1; background: #0a1630; border: 1px solid #27272a; border-radius: 3px; color: #e2e8f0; padding: 4px 8px; font-size: 12px; font-family: 'SF Mono', monospace;">
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+                <label style="color: #a1a1aa; font-size: 12px; min-width: 60px;">Topic</label>
+                <input type="text" id="notif-topic" placeholder="ibctl" style="flex: 1; background: #0a1630; border: 1px solid #27272a; border-radius: 3px; color: #e2e8f0; padding: 4px 8px; font-size: 12px; font-family: 'SF Mono', monospace;">
+            </div>
+            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px;">
+                <label style="color: #a1a1aa; font-size: 12px; min-width: 60px;">Token</label>
+                <input type="password" id="notif-token" placeholder="Bearer token (optional)" style="flex: 1; background: #0a1630; border: 1px solid #27272a; border-radius: 3px; color: #e2e8f0; padding: 4px 8px; font-size: 12px; font-family: 'SF Mono', monospace;">
+            </div>
+            <div style="display: flex; gap: 6px;">
+                <button class="ctrl-btn" onclick="saveConfig()">Save</button>
+                <button class="ctrl-btn" onclick="testNotification()">Send Test</button>
+                <span id="notif-result" style="font-size: 10px; margin-left: auto;"></span>
+            </div>
+        </div>
+    </div>
+
+    <div class="card" style="margin-bottom: 12px;">
+        <div class="card-label">Event Configuration</div>
+        <div style="margin-top: 8px;" id="events-config">
+            <div class="loading">Loading...</div>
+        </div>
+    </div>
+
+    <div class="card">
+        <div class="card-label" style="display: flex; align-items: center; gap: 8px;">
+            Notification History
+            <button class="ctrl-btn" onclick="loadHistory()" style="font-size: 9px; padding: 2px 6px;">Refresh</button>
+        </div>
+        <div id="notif-history" style="margin-top: 8px; max-height: 400px; overflow-y: auto;">
+            <div style="color: #555; font-size: 11px;">Loading...</div>
+        </div>
+    </div>
+</div>
+
+<script>
+var currentConfig = {};
+
+var EVENT_LABELS = {
+    'no_clients': {label: 'No API Clients', desc: 'Alert when an instance is Connected but has 0 clients', hasTimeout: true},
+    'session_lost': {label: 'Session Lost', desc: 'Alert when state leaves Connected unexpectedly', hasTimeout: false},
+    'relogin_failed': {label: 'Re-login Failed', desc: 'Alert when re-login attempts exhausted', hasTimeout: false},
+    'warm_restart': {label: 'Warm Restart', desc: 'Alert when daily warm restart completes', hasTimeout: false},
+    'ib_maintenance': {label: 'IB Maintenance', desc: 'Alert when IB status changes to maintenance', hasTimeout: false},
+};
+
+function loadConfig() {
+    fetch(ROOT_PATH + '/api/v1/notifications/config')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+        if (!d.ok) return;
+        currentConfig = d.config;
+        document.getElementById('notif-enabled').checked = d.config.enabled;
+        document.getElementById('notif-url').value = d.config.ntfy.url || '';
+        document.getElementById('notif-topic').value = d.config.ntfy.topic || '';
+        document.getElementById('notif-token').value = d.config.ntfy.token || '';
+        renderEvents(d.config.events || {});
+    });
+}
+
+function renderEvents(events) {
+    var container = document.getElementById('events-config');
+    var html = '';
+    for (var key in EVENT_LABELS) {
+        var info = EVENT_LABELS[key];
+        var evt = events[key] || {};
+        var checked = evt.enabled ? 'checked' : '';
+        html += '<div style="display: flex; align-items: center; gap: 10px; padding: 6px 0; border-bottom: 1px solid #1a1a2e;">';
+        html += '<input type="checkbox" data-event="' + key + '" ' + checked + ' onchange="markDirty()">';
+        html += '<div style="flex: 1;">';
+        html += '<div style="color: #e2e8f0; font-size: 12px; font-weight: 600;">' + info.label + '</div>';
+        html += '<div style="color: #71717a; font-size: 10px;">' + info.desc + '</div>';
+        html += '</div>';
+        if (info.hasTimeout) {
+            var timeout = evt.timeout_minutes || 30;
+            html += '<div style="display: flex; align-items: center; gap: 4px;">';
+            html += '<label style="color: #71717a; font-size: 10px;">Timeout</label>';
+            html += '<input type="number" data-timeout="' + key + '" value="' + timeout + '" min="1" max="1440" style="width: 50px; background: #0a1630; border: 1px solid #27272a; border-radius: 3px; color: #e2e8f0; padding: 2px 4px; font-size: 11px; text-align: center;" onchange="markDirty()">';
+            html += '<span style="color: #71717a; font-size: 10px;">min</span>';
+            html += '</div>';
+        }
+        html += '</div>';
+    }
+    container.innerHTML = html;
+}
+
+function markDirty() {
+    document.getElementById('notif-result').innerHTML = '<span style="color: #fbbf24;">Unsaved changes</span>';
+}
+
+function gatherConfig() {
+    var events = {};
+    for (var key in EVENT_LABELS) {
+        var cb = document.querySelector('[data-event="' + key + '"]');
+        var entry = {enabled: cb ? cb.checked : false};
+        var timeout = document.querySelector('[data-timeout="' + key + '"]');
+        if (timeout) entry.timeout_minutes = parseInt(timeout.value) || 30;
+        events[key] = entry;
+    }
+    return {
+        enabled: document.getElementById('notif-enabled').checked,
+        ntfy_url: document.getElementById('notif-url').value,
+        ntfy_topic: document.getElementById('notif-topic').value,
+        ntfy_token: document.getElementById('notif-token').value,
+        events: events,
+    };
+}
+
+function saveConfig() {
+    var result = document.getElementById('notif-result');
+    fetch(ROOT_PATH + '/api/v1/notifications/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(gatherConfig())
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+        result.innerHTML = '<span style="color:' + (d.ok ? '#4ade80' : '#ef4444') + '">' +
+            (d.ok ? 'Saved' : (d.error || 'Failed')) + '</span>';
+        setTimeout(function() { result.innerHTML = ''; }, 3000);
+    })
+    .catch(function() {
+        result.innerHTML = '<span style="color:#ef4444">Request failed</span>';
+    });
+}
+
+function testNotification() {
+    var result = document.getElementById('notif-result');
+    result.innerHTML = '<span style="color: #a1a1aa;">Sending...</span>';
+    fetch(ROOT_PATH + '/api/v1/notifications/test', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+        result.innerHTML = '<span style="color:' + (d.ok ? '#4ade80' : '#ef4444') + '">' +
+            (d.ok ? 'Test sent!' : (d.message || 'Failed')) + '</span>';
+        setTimeout(function() { result.innerHTML = ''; loadHistory(); }, 3000);
+    })
+    .catch(function() {
+        result.innerHTML = '<span style="color:#ef4444">Request failed</span>';
+    });
+}
+
+function loadHistory() {
+    var container = document.getElementById('notif-history');
+    fetch(ROOT_PATH + '/api/v1/notifications/history')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+        if (!d.ok || !d.events || d.events.length === 0) {
+            container.innerHTML = '<div style="color: #555; font-size: 11px;">No notifications sent</div>';
+            return;
+        }
+        var html = '<table style="width: 100%; font-size: 11px; border-collapse: collapse;">';
+        html += '<thead><tr>';
+        html += '<th style="text-align:left; color:#52525b; font-size:10px; padding:3px 6px; border-bottom:1px solid #27272a;">Time</th>';
+        html += '<th style="text-align:left; color:#52525b; font-size:10px; padding:3px 6px; border-bottom:1px solid #27272a;">Event</th>';
+        html += '<th style="text-align:left; color:#52525b; font-size:10px; padding:3px 6px; border-bottom:1px solid #27272a;">Title</th>';
+        html += '<th style="text-align:left; color:#52525b; font-size:10px; padding:3px 6px; border-bottom:1px solid #27272a;">Status</th>';
+        html += '</tr></thead><tbody>';
+        d.events.forEach(function(e) {
+            var statusColor = e.success ? '#4ade80' : '#ef4444';
+            html += '<tr>';
+            html += '<td style="padding:3px 6px; color:#a1a1aa; white-space:nowrap; font-family:SF Mono,monospace;">' + e.timestamp + '</td>';
+            html += '<td style="padding:3px 6px; color:#fbbf24;">' + e.event_type + '</td>';
+            html += '<td style="padding:3px 6px; color:#e2e8f0;">' + e.title + '</td>';
+            html += '<td style="padding:3px 6px; color:' + statusColor + ';">' + (e.success ? 'Sent' : 'Failed') + '</td>';
+            html += '</tr>';
+        });
+        html += '</tbody></table>';
+        container.innerHTML = html;
+    })
+    .catch(function() {
+        container.innerHTML = '<div style="color: #ef4444; font-size: 11px;">Failed to load</div>';
+    });
+}
+
+loadConfig();
+loadHistory();
+</script>
+{% endblock %}

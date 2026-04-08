@@ -60,6 +60,12 @@ async def ib_status_page(request: Request):
     return templates.TemplateResponse(request, "ib_status.html", {"active_tab": "ib-status"})
 
 
+@router.get("/notifications", response_class=HTMLResponse)
+async def notifications_page(request: Request):
+    templates = request.app.state.templates
+    return templates.TemplateResponse(request, "notifications.html", {"active_tab": "notifications"})
+
+
 @router.get("/vnc", response_class=HTMLResponse)
 async def vnc_page(request: Request):
     templates = request.app.state.templates
