@@ -13,10 +13,14 @@
     import RFB from '{{ root_path }}/static/novnc/core/rfb.js';
 
     let rfb;
-    const host = '{{ request.headers.get("host", "localhost").split(":")[0] }}';
-    const port = {{ novnc_port }};
-    const url = 'ws://' + host + ':' + port;
     const statusEl = document.getElementById('vnc-status');
+
+    // When loaded over HTTPS, route WebSocket through nginx (wss://)
+    // to avoid mixed-content blocking. Falls back to direct ws:// otherwise.
+    const isSecure = location.protocol === 'https:';
+    const url = isSecure
+        ? 'wss://' + location.host + ROOT_PATH + '/websockify'
+        : 'ws://' + location.hostname + ':' + {{ novnc_port }};
 
     function connect() {
         if (rfb) {

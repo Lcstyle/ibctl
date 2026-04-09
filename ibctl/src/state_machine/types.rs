@@ -44,6 +44,10 @@ pub enum State {
     HandlingSessionConflict,
     /// Dismissing startup popups (tip of day, version notice, paper warning)
     DismissingPopups,
+    /// Waiting for Gateway's API port to accept connections before configuring.
+    /// Prevents ConfiguringApi from running while Gateway is still authenticating
+    /// or shows "API Server: disconnected" in the Connection Status dialog.
+    WaitingForApiReady,
     /// Applying post-login API configuration (master client ID, read-only, etc.)
     ConfiguringApi,
     /// Fully connected and monitoring for new dialogs
@@ -74,6 +78,7 @@ impl State {
             "WaitingFor2fa" => Some(State::WaitingFor2fa),
             "HandlingSessionConflict" => Some(State::HandlingSessionConflict),
             "DismissingPopups" => Some(State::DismissingPopups),
+            "WaitingForApiReady" => Some(State::WaitingForApiReady),
             "ConfiguringApi" => Some(State::ConfiguringApi),
             "Connected" => Some(State::Connected),
             "ReconnectingSession" => Some(State::ReconnectingSession),
@@ -197,6 +202,10 @@ pub struct StateMachine {
     /// session loss: if the main window's class changes (e.g. ibgateway.ay → ibgateway.az),
     /// Gateway reverted to the login form without showing a RE-LOGIN dialog.
     pub(super) connected_window_class: Option<String>,
+    /// 2FA device selection state — survives tokio::select! cancellation.
+    /// Set true after device is selected and OK clicked. Reset on state transitions
+    /// that start a new login cycle.
+    pub(super) twofa_device_selected: bool,
     pub stats: Stats,
 }
 
@@ -231,6 +240,7 @@ impl StateMachine {
             client_id_rx: None,
             relogin_attempts: 0,
             connected_window_class: None,
+            twofa_device_selected: false,
             stats: Stats::default(),
         }
     }
@@ -260,7 +270,7 @@ pub(crate) fn client_advisory(state: &State) -> (bool, bool, Option<&'static str
         State::WaitingForLogin | State::Authenticating => (false, true, Some("logging_in")),
         State::WaitingFor2fa => (false, true, Some("2fa_pending")),
         State::HandlingSessionConflict => (false, true, Some("session_conflict")),
-        State::DismissingPopups | State::ConfiguringApi => (false, true, Some("configuring")),
+        State::DismissingPopups | State::WaitingForApiReady | State::ConfiguringApi => (false, true, Some("configuring")),
         State::Connected => (true, false, None),
         State::ReconnectingSession => (false, true, Some("reconnecting")),
         State::Restarting => (false, true, Some("restarting")),

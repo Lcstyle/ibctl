@@ -181,6 +181,11 @@ impl StateMachine {
             self.connected_since = None;
         }
 
+        // Reset 2FA device state when starting a new login cycle
+        if matches!(next, State::WaitingForLogin | State::Launching | State::Restarting) {
+            self.twofa_device_selected = false;
+        }
+
         self.process_queries().await;
 
         if next == State::Shutdown {
@@ -350,6 +355,7 @@ impl StateMachine {
             State::WaitingFor2fa => self.do_wait_for_2fa().await,
             State::HandlingSessionConflict => self.do_handle_session_conflict().await,
             State::DismissingPopups => self.do_dismiss_popups().await,
+            State::WaitingForApiReady => self.do_wait_for_api_ready().await,
             State::ConfiguringApi => self.do_configure_api().await,
             State::Connected => self.do_connected().await,
             State::ReconnectingSession => self.do_reconnecting_session().await,
@@ -648,7 +654,6 @@ impl StateMachine {
         let poll_interval = std::time::Duration::from_secs(1);
         let start = std::time::Instant::now();
         let mut twofa_seen = false;
-        let mut device_selected = false;
         let grace_period = std::time::Duration::from_secs(10);
         let mut consecutive_agent_failures: u32 = 0;
 
@@ -688,7 +693,7 @@ impl StateMachine {
                             log::info!("2FA dialog detected: {}", win.title);
                         }
 
-                        if !device_selected {
+                        if !self.twofa_device_selected {
                             let twofa_device = &self.config.twofa.device;
                             if !twofa_device.is_empty() {
                                 log::info!("Selecting 2FA device: {}", twofa_device);
@@ -698,17 +703,17 @@ impl StateMachine {
                                         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                                         let _ = self.agent_client.click_button(win.id, "OK").await;
                                         log::info!("Clicked OK on device selection — waiting for 2FA challenge");
-                                        device_selected = true;
+                                        self.twofa_device_selected = true;
                                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                                         continue;
                                     }
                                     _ => {
                                         log::debug!("No device list found — this is the actual 2FA challenge");
-                                        device_selected = true;
+                                        self.twofa_device_selected = true;
                                     }
                                 }
                             } else {
-                                device_selected = true;
+                                self.twofa_device_selected = true;
                             }
                         }
 
@@ -827,7 +832,12 @@ impl StateMachine {
             // Check for blocking dialogs that require state changes (re-login, 2FA)
             if let Some(next_state) = self.check_blocking_dialog().await {
                 log::info!("Blocking dialog detected during popup dismissal — transitioning to {}", next_state);
-                self.handler_registry.reset();
+                // Only reset handlers for states that start a new login cycle.
+                // WaitingFor2fa is part of the current login flow — resetting would
+                // clear LoginHandler's login_submitted flag and cause a double login.
+                if !matches!(next_state, State::WaitingFor2fa) {
+                    self.handler_registry.reset();
+                }
                 return Ok(next_state);
             }
 
@@ -844,16 +854,86 @@ impl StateMachine {
             }
 
             if !found_popup && last_popup.elapsed() > quiet_threshold {
-                log::info!("No popups for {:?} — proceeding to API configuration", quiet_threshold);
-                return Ok(State::ConfiguringApi);
+                log::info!("No popups for {:?} — waiting for API readiness", quiet_threshold);
+                return Ok(State::WaitingForApiReady);
             }
 
             if start.elapsed() > max_wait {
-                log::info!("Max popup dismissal time reached, proceeding to API configuration");
-                return Ok(State::ConfiguringApi);
+                log::info!("Max popup dismissal time reached, waiting for API readiness");
+                return Ok(State::WaitingForApiReady);
             }
 
             tokio::time::sleep(poll_interval).await;
+        }
+    }
+
+    async fn do_wait_for_api_ready(&mut self) -> Result<State, StateMachineError> {
+        let timeout = std::time::Duration::from_secs(90);
+        let poll = std::time::Duration::from_secs(2);
+        let start = std::time::Instant::now();
+
+        log::info!("Waiting for Gateway to reach connected state (via agent window inspection)");
+
+        loop {
+            // Guard: JVM must still be running
+            if !self.supervisor.is_running() {
+                log::warn!("JVM exited while waiting for API readiness");
+                return Ok(State::Restarting);
+            }
+
+            // Guard: check for blocking dialogs (re-login, 2FA, session conflict)
+            if let Some(next_state) = self.check_blocking_dialog().await {
+                log::info!("Blocking dialog detected while waiting for API — transitioning to {}", next_state);
+                return Ok(next_state);
+            }
+
+            // Check window state via the Java agent
+            if let Ok(windows) = self.agent_client.list_windows().await {
+                let main_window = windows.iter().find(|w| {
+                    let t = w.title.to_lowercase();
+                    t.contains("ib gateway") || t.contains("ibkr gateway")
+                });
+
+                if let Some(main) = main_window {
+                    let class_lower = main.class.to_lowercase();
+
+                    // Login form still present — not ready
+                    if class_lower.contains("login") {
+                        log::debug!("WaitingForApiReady: login form still present (class={})", main.class);
+                    } else {
+                        // Main window class is not a login form.
+                        // Confirm no text fields (login forms have username/password fields)
+                        use crate::types::WindowId;
+                        let has_login_fields = if let Ok(components) = self.agent_client.dump_components(WindowId(main.id.0)).await {
+                            components.get("textfields")
+                                .and_then(|t| t.as_array())
+                                .map(|a| !a.is_empty())
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        };
+
+                        if has_login_fields {
+                            log::debug!("WaitingForApiReady: text fields present — login/auth in progress");
+                        } else {
+                            // No login class, no text fields — Gateway appears connected
+                            log::info!("Gateway window ready (class={}) — proceeding to configure", main.class);
+                            return Ok(State::ConfiguringApi);
+                        }
+                    }
+                } else {
+                    log::debug!("WaitingForApiReady: no main window found yet");
+                }
+            }
+
+            if start.elapsed() > timeout {
+                log::warn!("Gateway not ready after {:?} — proceeding to ConfiguringApi anyway", timeout);
+                return Ok(State::ConfiguringApi);
+            }
+
+            // Process commands/queries while waiting
+            self.process_queries().await;
+            tokio::time::sleep(poll).await;
         }
     }
 
@@ -876,60 +956,6 @@ impl StateMachine {
             log::warn!("JVM not running — cannot configure API");
             self.config_retries = 0;
             return Ok(State::Restarting);
-        }
-
-        // Guard: check if Gateway is actually connected by inspecting the main window.
-        // If the window class changed from what we recorded at Connected (e.g. login form
-        // reappeared) or text fields are present, skip config — Gateway lost its session.
-        if let Ok(windows) = self.agent_client.list_windows().await {
-            if let Some(main) = windows.iter().find(|w| {
-                let t = w.title.to_lowercase();
-                t.contains("ib gateway") || t.contains("ibkr gateway")
-            }) {
-                // Check 1: window class changed from connected state
-                let class_changed = self.connected_window_class.as_ref()
-                    .map(|expected| main.class != *expected)
-                    .unwrap_or(false);
-
-                if class_changed {
-                    // Check 2: confirm with text field check (login form has text fields)
-                    use crate::types::WindowId;
-                    if let Ok(components) = self.agent_client.dump_components(WindowId(main.id.0)).await {
-                        let has_textfields = components.get("textfields")
-                            .and_then(|t| t.as_array())
-                            .map(|a| !a.is_empty())
-                            .unwrap_or(false);
-                        if has_textfields {
-                            log::warn!("Gateway disconnected — login form detected during ConfiguringApi, skipping config");
-                            self.config_retries = 0;
-                            self.connected_window_class = None;
-                            return Ok(State::WaitingForLogin);
-                        }
-                    }
-                }
-
-                // Check 3: if config dialog can't open after first failure, check for
-                // "disconnected" by looking at window count — a disconnected Gateway
-                // has only 1 window (main) with no sub-dialogs and Settings won't open.
-                if self.config_retries > 0 {
-                    // We already failed at least once. Check if there are text fields
-                    // (login form) even without class change — Gateway may have reconnected
-                    // to the same window class but in a disconnected state.
-                    use crate::types::WindowId;
-                    if let Ok(components) = self.agent_client.dump_components(WindowId(main.id.0)).await {
-                        let has_textfields = components.get("textfields")
-                            .and_then(|t| t.as_array())
-                            .map(|a| !a.is_empty())
-                            .unwrap_or(false);
-                        if has_textfields {
-                            log::warn!("Gateway has login form text fields — session lost during config retries");
-                            self.config_retries = 0;
-                            self.connected_window_class = None;
-                            return Ok(State::WaitingForLogin);
-                        }
-                    }
-                }
-            }
         }
 
         self.config_retries += 1;
@@ -969,7 +995,7 @@ impl StateMachine {
     }
 
     async fn do_connected(&mut self) -> Result<State, StateMachineError> {
-        log::info!("Gateway connected — monitoring loop tick");
+        log::debug!("Gateway connected — monitoring loop tick");
 
         // Record the main window class on first entry — used to detect silent session loss
         if self.connected_window_class.is_none() {
