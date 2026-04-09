@@ -48,6 +48,7 @@ services:
       TZ: ${TZ:-America/New_York}
       VNC_SERVER_PASSWORD: ${VNC_SERVER_PASSWORD:-}
       RUST_LOG: ${RUST_LOG:-ibctl=info}
+      IBCTL_LOG_DIR: /opt/ibctl/persist/logs
 
       # --- Dashboard (disabled by default — set to true to enable) ---
       IBCTL_DASHBOARD_ENABLED: ${IBCTL_DASHBOARD_ENABLED:-false}
@@ -77,10 +78,11 @@ services:
       IBCTL_AUTO_UPDATE: ${IBCTL_AUTO_UPDATE:-false}
       IBCTL_VERSION: ${IBCTL_VERSION:-latest}
 
-    # Optional: mount pre-downloaded binaries + dashboard templates for fast updates
-    # volumes:
-    #   - ./bin:/opt/ibctl/bin:ro
-    #   - ./dashboard/app:/opt/ibctl/dashboard/app:ro
+    volumes:
+      - ibctl-persist:/opt/ibctl/persist  # Persistent state: config/, logs/
+      # Optional: mount pre-downloaded binaries + dashboard templates for fast updates
+      # - ./bin:/opt/ibctl/bin:ro
+      # - ./dashboard/app:/opt/ibctl/dashboard/app:ro
     ports:
       - "${IBCTL_LIVE_API_BIND:-127.0.0.1}:${IBCTL_LIVE_API_PORT:-4001}:4003"     # Live API
       - "${IBCTL_PAPER_API_BIND:-127.0.0.1}:${IBCTL_PAPER_API_PORT:-4002}:4004"  # Paper API
@@ -90,3 +92,6 @@ services:
       - "127.0.0.1:7463:7463"                                               # Paper command server
       - "${IBCTL_DASHBOARD_BIND:-127.0.0.1}:${IBCTL_DASHBOARD_PORT:-3080}:${IBCTL_DASHBOARD_PORT:-3080}" # Dashboard
     tty: true
+
+volumes:
+  ibctl-persist:

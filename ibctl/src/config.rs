@@ -338,6 +338,8 @@ pub struct AgentConfig {
 #[serde(default)]
 pub struct LoggingConfig {
     pub level: LogLevel,
+    /// Directory for persistent log files. Empty = no file logging (stdout only).
+    pub log_dir: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -662,6 +664,9 @@ impl Config {
                 "error" => self.logging.level = LogLevel::Error,
                 other => log::warn!("Unknown IBCTL_LOG_LEVEL '{}', keeping default", other),
             }
+        }
+        if let Ok(v) = std::env::var("IBCTL_LOG_DIR") {
+            self.logging.log_dir = v;
         }
 
         // Site

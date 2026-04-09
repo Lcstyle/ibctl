@@ -39,6 +39,7 @@ class TcpIbctlClient:
         self.host = host
         self.port = port
         self.timeout = timeout
+        logger.debug("TCP client initialized: %s:%d (timeout=%.1fs)", host, port, timeout)
 
     async def status(self) -> GatewayStatus:
         data = await self._query("STATUS")
@@ -78,6 +79,7 @@ class TcpIbctlClient:
         try:
             return json.loads(raw)
         except json.JSONDecodeError as e:
+            logger.error("Invalid JSON from ibctl for '%s': %s (raw: %.100s)", command, e, raw)
             raise IbctlCommandError(command, f"Invalid JSON response: {e}")
 
     async def _send(self, command: str) -> str:
@@ -88,8 +90,10 @@ class TcpIbctlClient:
                 timeout=self.timeout,
             )
         except (ConnectionRefusedError, OSError) as e:
+            logger.warning("Connection refused: %s:%d — %s", self.host, self.port, e)
             raise IbctlConnectionError(self.host, self.port, str(e))
         except asyncio.TimeoutError:
+            logger.warning("Connection timeout: %s:%d after %.1fs for '%s'", self.host, self.port, self.timeout, command)
             raise IbctlTimeoutError(command, self.timeout)
 
         try:
@@ -107,16 +111,18 @@ class TcpIbctlClient:
             if line.startswith("OK "):
                 return line[3:]  # Strip "OK " prefix
             elif line.startswith("ERROR "):
+                logger.error("ibctl command '%s' returned error: %s", command, line[6:])
                 raise IbctlCommandError(command, line[6:])
             elif line == "OK":
                 return ""
             else:
                 raise IbctlCommandError(command, f"Unexpected response: {line}")
         except asyncio.TimeoutError:
+            logger.warning("Response timeout for '%s' after %.1fs", command, self.timeout)
             raise IbctlTimeoutError(command, self.timeout)
         finally:
             writer.close()
             try:
                 await writer.wait_closed()
             except Exception:
-                pass
+                pass  # Connection cleanup errors are not actionable

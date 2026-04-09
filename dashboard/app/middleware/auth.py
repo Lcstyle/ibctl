@@ -7,9 +7,13 @@ When the token is empty, all requests pass through (open access).
 
 from __future__ import annotations
 
+import logging
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+
+logger = logging.getLogger("dashboard.auth")
 
 
 class TokenAuthMiddleware(BaseHTTPMiddleware):
@@ -31,6 +35,8 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
         if auth_header == f"Bearer {token}":
             return await call_next(request)
 
+        client_ip = request.headers.get("X-Real-IP", request.client.host if request.client else "unknown")
+        logger.warning("Unauthorized request: %s %s from %s", request.method, request.url.path, client_ip)
         return JSONResponse(
             status_code=401,
             content={"detail": "Unauthorized"},

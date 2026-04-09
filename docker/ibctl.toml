@@ -59,8 +59,14 @@ ttl_seconds = 600          # fail-open TTL: if no status push within this period
 # backend_hosts = "cdc1-hb1.ibllc.com,cdc1-hb2.ibllc.com"  # IB backend servers (checked via ICMP ping)
 # fallback_host = "interactivebrokers.com"  # CDN fallback for internet ping check
 
+# Alert classification overrides (comma-separated, added to built-in lists):
+# extra_exchange_keywords = ""   # e.g., "PAXOS,COINBASE" — alerts mentioning these are non-blocking
+# extra_benign_phrases = ""      # e.g., "is resolved" — alerts matching these are non-blocking
+# extra_blocking_keywords = ""   # e.g., "emergency" — alerts matching these force CRITICAL severity
+
 [logging]
 level = "info"             # "debug", "info", "warn", or "error"
+log_dir = ""               # directory for persistent log files (set via IBCTL_LOG_DIR)
 
 [timing]
 ui_tick_ms = 100           # delay between UI actions in config dialog

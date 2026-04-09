@@ -56,7 +56,7 @@ class DashboardSettings:
     @classmethod
     def from_env(cls) -> DashboardSettings:
         """Load settings from environment variables."""
-        return cls(
+        settings = cls(
             port=int(os.environ.get("IBCTL_DASHBOARD_PORT", "8080")),
             token=os.environ.get("IBCTL_DASHBOARD_TOKEN", ""),
             debug_mode=os.environ.get("IBCTL_DEBUG_MODE", "").lower() in ("true", "yes", "1"),
@@ -67,3 +67,10 @@ class DashboardSettings:
             ibctl_paper_host=os.environ.get("IBCTL_COMMAND_HOST_PAPER", "127.0.0.1"),
             ibctl_paper_port=int(os.environ.get("IBCTL_COMMAND_PORT_PAPER", "7463")),
         )
+        logger.info(
+            "Config loaded: port=%d mode=%s auth=%s debug=%s log_level=%s",
+            settings.port, settings.trading_mode,
+            "token" if settings.token else "open",
+            settings.debug_mode, settings.log_level,
+        )
+        return settings

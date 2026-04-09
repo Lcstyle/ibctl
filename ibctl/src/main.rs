@@ -9,6 +9,7 @@ mod cold_restart;
 mod command_server;
 mod config;
 mod handlers;
+mod logging;
 mod signals;
 mod state_machine;
 mod supervisor;
@@ -42,22 +43,41 @@ fn main() -> ExitCode {
     }
     std::env::set_var("IBCTL_AGENT_TICK_MS", config.timing.agent_tick_ms.to_string());
 
-    // Initialize logging — JSON Lines format for structured log aggregation
-    env_logger::Builder::from_default_env()
-        .format(|buf, record| {
-            use std::io::Write;
-            writeln!(
-                buf,
-                r#"{{"ts":"{}","level":"{}","target":"{}","msg":{}}}"#,
-                buf.timestamp_millis(),
-                record.level(),
-                record.target(),
-                serde_json::to_string(&format!("{}", record.args())).unwrap_or_default(),
-            )
-        })
-        .init();
+    // Initialize logging — JSON Lines format for structured log aggregation.
+    // When log_dir is configured, tee output to both stdout and a market-day
+    // dated log file (ibctl-YYYY-MM-DD.log, rotates at 6 PM ET).
+    let mut builder = env_logger::Builder::from_default_env();
+    builder.format(|buf, record| {
+        use std::io::Write;
+        writeln!(
+            buf,
+            r#"{{"ts":"{}","level":"{}","target":"{}","msg":{}}}"#,
+            buf.timestamp_millis(),
+            record.level(),
+            record.target(),
+            serde_json::to_string(&format!("{}", record.args())).unwrap_or_default(),
+        )
+    });
 
-    log::info!("ibctl v{} starting", env!("IBCTL_VERSION"));
+    if !config.logging.log_dir.is_empty() {
+        // In dual mode, separate log files: ibctl-live-{date}.log / ibctl-paper-{date}.log
+        // In single mode: ibctl-{date}.log
+        let prefix = format!("ibctl-{}", config.auth.trading_mode);
+        match logging::TeeWriter::new(&config.logging.log_dir, &prefix) {
+            Ok(tee) => {
+                builder.target(env_logger::Target::Pipe(Box::new(tee)));
+            }
+            Err(e) => {
+                eprintln!("Failed to open log directory '{}': {}", config.logging.log_dir, e);
+            }
+        }
+    }
+    builder.init();
+
+    log::info!("ibctl v{} ({} mode) starting", env!("IBCTL_VERSION"), config.auth.trading_mode);
+    if !config.logging.log_dir.is_empty() {
+        log::info!("File logging to {}/ibctl-{}-{}.log", config.logging.log_dir, config.auth.trading_mode, logging::market_day_date());
+    }
 
     // Build the tokio runtime and run the async main
     let rt = tokio::runtime::Builder::new_multi_thread()

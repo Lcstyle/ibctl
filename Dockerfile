@@ -137,6 +137,8 @@ RUN apt-get update -y \
     && useradd -ms /bin/bash --uid ${USER_ID} --gid ${USER_GID} ibgateway \
     && mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix \
     && mkdir -p /opt/ibctl \
+    && mkdir -p /opt/ibctl/persist/config \
+    && mkdir -p /opt/ibctl/persist/logs \
     && mkdir -p /run/ibctl && chmod 700 /run/ibctl
 
 # Copy ibctl binaries — prefer pre-built, fall back to source

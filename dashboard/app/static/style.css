@@ -124,13 +124,15 @@ main {
     border-radius: 8px;
     padding: 16px;
     font-family: 'JetBrains Mono', monospace;
-    font-size: 13px;
-    line-height: 1.6;
-    max-height: 400px;
+    font-size: 12px;
+    line-height: 1.5;
+    max-height: 70vh;
     overflow-y: auto;
 }
 
-.log-line { white-space: pre-wrap; }
+.log-line { white-space: pre-wrap; word-break: break-word; }
+.log-ts { color: #52525b; }
+.log-lvl { font-weight: 600; }
 .log-level-ERROR { color: #ef4444; }
 .log-level-WARN { color: #fbbf24; }
 .log-level-INFO { color: #4ade80; }

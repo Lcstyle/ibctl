@@ -134,7 +134,7 @@
                 this.value = '';
                 return;
             }
-            htmx.ajax('POST', '/api/v1/command', {
+            htmx.ajax('POST', ROOT_PATH + '/api/v1/command', {
                 target: '#command-result',
                 values: {command: 'SETSTATE ' + state, mode: mode}
             });

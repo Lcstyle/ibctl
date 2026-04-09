@@ -2,6 +2,9 @@
 {% block content %}
 <h2>Notifications</h2>
 
+<div id="persist-warning" style="display: none; background: #422006; border: 1px solid #92400e; border-radius: 6px; padding: 10px 14px; margin-bottom: 12px; font-size: 12px; color: #fbbf24;">
+    <strong>Warning:</strong> No persistent volume mounted at <code>/opt/ibctl/persist</code>. Settings saved here will be lost on container restart. Mount a volume or use environment variables (IBCTL_NTFY_TOKEN, etc.) for durable configuration.
+</div>
 <div id="notifications-content">
     <div class="card" style="margin-bottom: 12px;">
         <div class="card-label">ntfy.sh Configuration</div>
@@ -21,6 +24,7 @@
             <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px;">
                 <label style="color: #a1a1aa; font-size: 12px; min-width: 60px;">Token</label>
                 <input type="password" id="notif-token" placeholder="Bearer token (optional)" style="flex: 1; background: #0a1630; border: 1px solid #27272a; border-radius: 3px; color: #e2e8f0; padding: 4px 8px; font-size: 12px; font-family: 'SF Mono', monospace;">
+                <span id="token-env-badge" style="display: none; font-size: 10px; color: #fbbf24; white-space: nowrap;">🔒 Set via env var</span>
             </div>
             <div style="display: flex; gap: 6px;">
                 <button class="ctrl-btn" onclick="saveConfig()">Save</button>
@@ -50,6 +54,7 @@
 
 <script>
 var currentConfig = {};
+var envLocked = {};
 
 var EVENT_LABELS = {
     'no_clients': {label: 'No API Clients', desc: 'Alert when an instance is Connected but has 0 clients', hasTimeout: true},
@@ -65,12 +70,56 @@ function loadConfig() {
     .then(function(d) {
         if (!d.ok) return;
         currentConfig = d.config;
+        envLocked = d.env_locked || {};
+
+        // Show volume warning if persist dir is not mounted
+        var warning = document.getElementById('persist-warning');
+        if (d.persist_mounted === false) {
+            warning.style.display = '';
+        } else {
+            warning.style.display = 'none';
+        }
+
         document.getElementById('notif-enabled').checked = d.config.enabled;
         document.getElementById('notif-url').value = d.config.ntfy.url || '';
         document.getElementById('notif-topic').value = d.config.ntfy.topic || '';
-        document.getElementById('notif-token').value = d.config.ntfy.token || '';
+
+        // Handle env-locked token
+        var tokenInput = document.getElementById('notif-token');
+        var tokenBadge = document.getElementById('token-env-badge');
+        if (envLocked.ntfy_token) {
+            tokenInput.value = '';
+            tokenInput.placeholder = 'Injected via IBCTL_NTFY_TOKEN';
+            tokenInput.disabled = true;
+            tokenInput.style.opacity = '0.5';
+            tokenBadge.style.display = '';
+        } else {
+            tokenInput.disabled = false;
+            tokenInput.style.opacity = '1';
+            tokenBadge.style.display = 'none';
+            tokenInput.value = d.config.ntfy.token || '';
+        }
+
+        // Lock other env-injected fields
+        applyEnvLock('notif-url', envLocked.ntfy_url, 'IBCTL_NTFY_URL');
+        applyEnvLock('notif-topic', envLocked.ntfy_topic, 'IBCTL_NTFY_TOPIC');
+
         renderEvents(d.config.events || {});
     });
+}
+
+function applyEnvLock(fieldId, locked, envVar) {
+    var el = document.getElementById(fieldId);
+    if (!el) return;
+    if (locked) {
+        el.disabled = true;
+        el.style.opacity = '0.5';
+        el.title = 'Set via ' + envVar + ' environment variable';
+    } else {
+        el.disabled = false;
+        el.style.opacity = '1';
+        el.title = '';
+    }
 }
 
 function renderEvents(events) {

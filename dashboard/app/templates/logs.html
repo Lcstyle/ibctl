@@ -1,28 +1,103 @@
 {% extends "base.html" %}
 {% block content %}
 <h2>Logs</h2>
-<div style="margin-bottom: 12px;">
-    <select id="log-level" onchange="updateLogFilter()">
-        <option value="">All Levels</option>
-        <option value="ERROR">ERROR</option>
-        <option value="WARN">WARN</option>
-        <option value="INFO">INFO</option>
-        <option value="DEBUG">DEBUG</option>
-    </select>
+<div style="margin-bottom: 12px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+    <div>
+        <label for="log-source" style="font-size: 12px; color: #a1a1aa;">Source</label>
+        <select id="log-source" onchange="refreshLogs()">
+            <option value="ibctl-live">ibctl (Live)</option>
+            <option value="ibctl-paper">ibctl (Paper)</option>
+            <option value="dashboard">Dashboard</option>
+        </select>
+    </div>
+    <div>
+        <label for="log-date" style="font-size: 12px; color: #a1a1aa;">Date</label>
+        <select id="log-date" onchange="refreshLogs()">
+            <option value="">Current</option>
+        </select>
+    </div>
+    <div>
+        <label for="log-level" style="font-size: 12px; color: #a1a1aa;">Level</label>
+        <select id="log-level" onchange="refreshLogs()">
+            <option value="">All</option>
+            <option value="ERROR">ERROR</option>
+            <option value="WARN">WARN</option>
+            <option value="INFO">INFO</option>
+            <option value="DEBUG">DEBUG</option>
+        </select>
+    </div>
+    <div style="margin-left: auto;">
+        <label style="font-size: 12px; color: #a1a1aa; cursor: pointer;">
+            <input type="checkbox" id="log-autoscroll" checked style="vertical-align: middle;"> Auto-scroll
+        </label>
+    </div>
 </div>
 <div id="log-content"
      class="log-viewer"
      hx-get="{{ root_path }}/partials/logs"
-     hx-trigger="load, every 2s"
+     hx-trigger="load"
      hx-swap="innerHTML">
     <div class="loading">Loading logs...</div>
 </div>
 <script>
-function updateLogFilter() {
-    const level = document.getElementById('log-level').value;
-    const el = document.getElementById('log-content');
-    el.setAttribute('hx-get', ROOT_PATH + '/partials/logs' + (level ? '?level=' + level : ''));
-    htmx.trigger(el, 'load');
+var logRefreshTimer = null;
+
+function buildLogUrl() {
+    var source = document.getElementById('log-source').value;
+    var date = document.getElementById('log-date').value;
+    var level = document.getElementById('log-level').value;
+    var params = '?source=' + source;
+    if (date) params += '&date=' + date;
+    if (level) params += '&level=' + level;
+    return ROOT_PATH + '/partials/logs' + params;
 }
+
+function refreshLogs() {
+    var el = document.getElementById('log-content');
+    htmx.ajax('GET', buildLogUrl(), {target: '#log-content', swap: 'innerHTML'});
+    // Load available dates for this source
+    loadDates();
+}
+
+function loadDates() {
+    var source = document.getElementById('log-source').value;
+    fetch(ROOT_PATH + '/api/v1/logs/dates?source=' + source)
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            var sel = document.getElementById('log-date');
+            var current = sel.value;
+            sel.innerHTML = '<option value="">Current</option>';
+            (data.dates || []).forEach(function(d) {
+                var opt = document.createElement('option');
+                opt.value = d;
+                opt.textContent = d;
+                if (d === current) opt.selected = true;
+                sel.appendChild(opt);
+            });
+        })
+        .catch(function() {});
+}
+
+function startAutoRefresh() {
+    if (logRefreshTimer) clearInterval(logRefreshTimer);
+    logRefreshTimer = setInterval(function() {
+        // Only auto-refresh if viewing current date (no specific date selected)
+        if (!document.getElementById('log-date').value) {
+            htmx.ajax('GET', buildLogUrl(), {target: '#log-content', swap: 'innerHTML'});
+        }
+    }, 5000);
+}
+
+// Auto-scroll to bottom after content loads
+document.body.addEventListener('htmx:afterSwap', function(evt) {
+    if (evt.detail.target.id === 'log-content' && document.getElementById('log-autoscroll').checked) {
+        var el = document.getElementById('log-content');
+        el.scrollTop = el.scrollHeight;
+    }
+});
+
+// Initial load
+loadDates();
+startAutoRefresh();
 </script>
 {% endblock %}

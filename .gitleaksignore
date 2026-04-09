@@ -1,0 +1,3 @@
+# False positive: "secret_env" is a config field name for the env var that holds the TOTP secret.
+# It's the NAME of the env var, not a secret value.
+ibctl/src/config.rs:secret_env

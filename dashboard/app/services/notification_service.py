@@ -20,10 +20,37 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pydantic import SecretStr
+
 logger = logging.getLogger("dashboard.services.notifications")
 
 # Default config file location (next to the dashboard app)
-DEFAULT_CONFIG_PATH = "/opt/ibctl/dashboard/notifications.json"
+DEFAULT_CONFIG_PATH = "/opt/ibctl/persist/config/notifications.json"
+
+
+def _unescape_mountinfo_path(s: str) -> str:
+    """Unescape octal sequences in /proc/self/mountinfo paths."""
+    return (
+        s.replace("\\040", " ")
+         .replace("\\011", "\t")
+         .replace("\\012", "\n")
+         .replace("\\134", "\\")
+    )
+
+
+def _read_mount_points() -> list[Path]:
+    """Read mount points from /proc/self/mountinfo, longest path first."""
+    points: set[Path] = set()
+    try:
+        with open("/proc/self/mountinfo", "r", encoding="utf-8") as f:
+            for line in f:
+                left, _right = line.rstrip("\n").split(" - ", 1)
+                fields = left.split()
+                mount_point = _unescape_mountinfo_path(fields[4])
+                points.add(Path(mount_point).resolve(strict=False))
+    except FileNotFoundError:
+        pass  # Not on Linux (dev machine, macOS, etc.)
+    return sorted(points, key=lambda p: len(str(p)), reverse=True)
 
 
 @dataclass
@@ -44,7 +71,7 @@ class NotificationConfig:
     enabled: bool = False
     ntfy_url: str = "https://ntfy.sh"
     ntfy_topic: str = "ibctl"
-    ntfy_token: str = ""
+    ntfy_token: SecretStr = field(default_factory=lambda: SecretStr(""))
     events: dict[str, dict[str, Any]] = field(default_factory=lambda: {
         "no_clients": {"enabled": True, "timeout_minutes": 30},
         "session_lost": {"enabled": True},
@@ -53,16 +80,47 @@ class NotificationConfig:
         "ib_maintenance": {"enabled": False},
     })
 
-    def to_dict(self) -> dict:
+    def to_dict(self, mask_token: bool = True) -> dict:
         return {
             "enabled": self.enabled,
             "ntfy": {
                 "url": self.ntfy_url,
                 "topic": self.ntfy_topic,
-                "token": self.ntfy_token,
+                "token": "••••••••" if (mask_token and self.ntfy_token.get_secret_value()) else "",
             },
             "events": self.events,
         }
+
+    @staticmethod
+    def env_locked_fields() -> dict[str, bool]:
+        """Return which fields are locked by environment variables."""
+        return {
+            "ntfy_url": bool(os.environ.get("IBCTL_NTFY_URL")),
+            "ntfy_topic": bool(os.environ.get("IBCTL_NTFY_TOPIC")),
+            "ntfy_token": bool(os.environ.get("IBCTL_NTFY_TOKEN")),
+            "enabled": os.environ.get("IBCTL_NOTIFICATIONS_ENABLED", "").lower() in ("true", "1", "yes"),
+        }
+
+    @staticmethod
+    def persist_volume_mounted() -> bool:
+        """Check if the persistent config directory is on a mounted volume.
+
+        Reads /proc/self/mountinfo (the canonical in-container mount view)
+        and checks whether the config dir or any ancestor is a mount point.
+        This correctly detects Docker named volumes, bind mounts, and tmpfs.
+        """
+        target = Path(DEFAULT_CONFIG_PATH).parent.resolve(strict=False)
+        try:
+            mount_points = _read_mount_points()
+            for mp in mount_points:
+                if target == mp or mp in target.parents:
+                    # Ignore the root mount — everything is "under /"
+                    if str(mp) == "/":
+                        continue
+                    return True
+            return False
+        except Exception:
+            return False
 
     @classmethod
     def from_dict(cls, data: dict) -> NotificationConfig:
@@ -71,7 +129,7 @@ class NotificationConfig:
             enabled=data.get("enabled", False),
             ntfy_url=ntfy.get("url", "https://ntfy.sh"),
             ntfy_topic=ntfy.get("topic", "ibctl"),
-            ntfy_token=ntfy.get("token", ""),
+            ntfy_token=SecretStr(ntfy.get("token", "")),
             events=data.get("events", cls().events),
         )
 
@@ -101,16 +159,20 @@ class NotificationConfig:
         if topic := os.environ.get("IBCTL_NTFY_TOPIC"):
             config.ntfy_topic = topic
         if token := os.environ.get("IBCTL_NTFY_TOKEN"):
-            config.ntfy_token = token
+            config.ntfy_token = SecretStr(token)
 
         return config
 
     def save(self, path: str | None = None):
-        """Persist config to JSON file."""
+        """Persist config to JSON file (writes actual token, not masked)."""
         config_path = path or os.environ.get("IBCTL_NOTIFICATIONS_CONFIG", DEFAULT_CONFIG_PATH)
         try:
+            data = self.to_dict(mask_token=False)
+            # Write actual token value for persistence
+            data["ntfy"]["token"] = self.ntfy_token.get_secret_value()
+            Path(config_path).parent.mkdir(parents=True, exist_ok=True)
             with open(config_path, "w") as f:
-                json.dump(self.to_dict(), f, indent=2)
+                json.dump(data, f, indent=2)
             logger.info("Saved notification config to %s", config_path)
         except Exception as e:
             logger.error("Failed to save notification config to %s: %s", config_path, e)
@@ -119,10 +181,10 @@ class NotificationConfig:
 class NtfyClient:
     """Async HTTP client for ntfy.sh push notifications."""
 
-    def __init__(self, url: str, topic: str, token: str = ""):
+    def __init__(self, url: str, topic: str, token: SecretStr | str = ""):
         self._url = url.rstrip("/")
         self._topic = topic
-        self._token = token
+        self._token = token if isinstance(token, SecretStr) else SecretStr(token)
 
     async def send(self, title: str, body: str, priority: str = "default", tags: str = "") -> bool:
         """Send a notification. Returns True on success."""
@@ -130,8 +192,9 @@ class NtfyClient:
 
         url = f"{self._url}/{self._topic}"
         headers = {"X-Title": title}
-        if self._token:
-            headers["Authorization"] = f"Bearer {self._token}"
+        token_value = self._token.get_secret_value()
+        if token_value:
+            headers["Authorization"] = f"Bearer {token_value}"
         if priority and priority != "default":
             headers["X-Priority"] = priority
         if tags:

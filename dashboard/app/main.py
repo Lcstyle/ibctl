@@ -20,6 +20,7 @@ from app.api.router import api_router
 from app.config import DashboardSettings
 from app.instance_registry import InstanceRegistry
 from app.middleware.auth import TokenAuthMiddleware
+from app.services.market_day_logging import setup_dashboard_logging
 
 logger = logging.getLogger("dashboard")
 
@@ -74,6 +75,12 @@ def create_app(settings: DashboardSettings | None = None) -> FastAPI:
     """
     if settings is None:
         settings = DashboardSettings.from_env()
+
+    # Set up file logging if IBCTL_LOG_DIR is configured
+    log_dir = os.environ.get("IBCTL_LOG_DIR", "")
+    if log_dir:
+        setup_dashboard_logging(log_dir=log_dir, log_level=settings.log_level)
+        logger.info("Dashboard file logging to %s/dashboard-*.log", log_dir)
 
     # IBCTL_ROOT_PATH is used for URL generation in templates only.
     # Do NOT pass it as FastAPI root_path — nginx strips the prefix with

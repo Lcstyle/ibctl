@@ -1,6 +1,14 @@
 {% for entry in logs %}
-<div class="log-line log-level-{{ entry.level }}">{{ entry.timestamp }} [{{ entry.level }}] {{ entry.message }}</div>
+<div class="log-line log-level-{{ entry.level }}"><span class="log-ts">{{ entry.timestamp }}</span> <span class="log-lvl">[{{ entry.level }}]</span> {{ entry.message }}</div>
 {% endfor %}
 {% if not logs %}
-<div style="color: #666;">No log entries (log buffer not yet implemented in ibctl)</div>
+<div style="color: #666; padding: 20px; text-align: center;">
+    {% if source == "ibctl" %}
+    No ibctl log entries for {{ date }}. File logging requires IBCTL_LOG_DIR to be set.
+    {% elif source == "dashboard" %}
+    No dashboard log entries for {{ date }}.
+    {% else %}
+    No log entries found.
+    {% endif %}
+</div>
 {% endif %}

@@ -220,20 +220,98 @@ async def config_partial(request: Request):
 
 
 @router.get("/partials/logs", response_class=HTMLResponse)
-async def logs_partial(request: Request, level: str | None = None):
-    client = request.app.state.ibctl_client
-    templates = request.app.state.templates
+async def logs_partial(
+    request: Request,
+    source: str = "ibctl",
+    date: str | None = None,
+    level: str | None = None,
+):
+    import json as jsonlib
+    import os
+    from pathlib import Path
+    from app.services.market_day_logging import get_market_day_date
 
+    templates = request.app.state.templates
+    log_dir = os.environ.get("IBCTL_LOG_DIR", "/opt/ibctl/persist/logs")
+    prefixes = {
+        "ibctl-live": "ibctl-live-",
+        "ibctl-paper": "ibctl-paper-",
+        "ibctl": "ibctl-",
+        "dashboard": "dashboard-",
+    }
+    prefix = prefixes.get(source, "ibctl-")
+
+    if date is None:
+        date = get_market_day_date()
+
+    log_path = Path(log_dir) / f"{prefix}{date}.log"
+    lines = []
+    if log_path.exists():
+        try:
+            with open(log_path, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                chunk = min(size, 200 * 512)
+                f.seek(max(0, size - chunk))
+                data = f.read().decode("utf-8", errors="replace")
+                lines = data.splitlines()[-200:]
+        except Exception:
+            lines = []
+
+    # Parse JSON log lines into structured entries.
+    # Convert UTC timestamps to local time (display layer — Axiom 3).
+    from datetime import datetime as dt
+    from zoneinfo import ZoneInfo
+    tz_name = os.environ.get("TZ", "America/New_York")
     try:
-        entries = await client.logs(limit=50)
-        if level:
-            entries = [e for e in entries if e.level.upper() == level.upper()]
-        logs = [asdict(e) for e in entries]
-    except DashboardError:
-        logs = []
+        local_tz = ZoneInfo(tz_name)
+    except Exception:
+        local_tz = ZoneInfo("America/New_York")
+
+    def utc_to_local(ts_str: str) -> str:
+        """Convert a UTC ISO timestamp to local time for display."""
+        if not ts_str:
+            return ts_str
+        try:
+            # Handle both "2026-04-09T13:41:34.842Z" and "2026-04-09T13:41:34"
+            clean = ts_str.rstrip("Z")
+            parsed = dt.fromisoformat(clean).replace(tzinfo=ZoneInfo("UTC"))
+            local = parsed.astimezone(local_tz)
+            return local.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return ts_str
+
+    logs = []
+    for line in lines:
+        try:
+            entry = jsonlib.loads(line)
+            lvl = entry.get("level", "INFO")
+            if level and lvl.upper() != level.upper():
+                continue
+            logs.append({
+                "timestamp": utc_to_local(entry.get("ts", "")),
+                "level": lvl,
+                "message": entry.get("msg", line),
+            })
+        except (jsonlib.JSONDecodeError, ValueError):
+            if level:
+                continue
+            logs.append({"timestamp": "", "level": "INFO", "message": line})
+
+    # Get available dates for the date picker
+    dates = []
+    dir_path = Path(log_dir)
+    if dir_path.exists():
+        for f in sorted(dir_path.glob(f"{prefix}*.log"), reverse=True):
+            name = f.stem
+            if name.startswith(prefix):
+                dates.append(name[len(prefix):])
 
     return templates.TemplateResponse(request, "partials/logs_content.html", {
         "logs": logs,
+        "source": source,
+        "date": date,
+        "dates": dates,
     })
 
 

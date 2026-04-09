@@ -456,12 +456,12 @@ function setMode(m) {
     document.querySelectorAll('.tp7-mode-btn').forEach(function(b) {
         b.classList.toggle('active', b.dataset.mode === m);
     });
-    htmx.ajax('GET', '/partials/state-history?mode=' + m, {target: '#state-content', swap: 'innerHTML'});
+    htmx.ajax('GET', ROOT_PATH + '/partials/state-history?mode=' + m, {target: '#state-content', swap: 'innerHTML'});
 }
 
 function sendCmd(command, needsConfirm, confirmMsg) {
     if (needsConfirm && !confirm(confirmMsg)) return;
-    htmx.ajax('POST', '/api/v1/command', {target: '#command-result', values: {command: command, mode: getMode()}});
+    htmx.ajax('POST', ROOT_PATH + '/api/v1/command', {target: '#command-result', values: {command: command, mode: getMode()}});
     if (command === 'PAUSE') {
         isPaused = true;
         document.getElementById('inner-reel').classList.remove('spinning');
@@ -631,7 +631,7 @@ window.addEventListener('ibctl-status', function(e) {
 });
 
 document.addEventListener('htmx:configRequest', function(evt) {
-    if (evt.detail.elt.id === 'state-content') evt.detail.path = '/partials/state-history?mode=' + getMode();
+    if (evt.detail.elt.id === 'state-content') evt.detail.path = ROOT_PATH + '/partials/state-history?mode=' + getMode();
 });
 document.body.addEventListener('htmx:afterSwap', function(evt) {
     var tgt = evt.detail.target.id;
