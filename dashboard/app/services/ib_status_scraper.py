@@ -49,15 +49,33 @@ class SystemAlert:
     message: str
     message_id: str = ""
 
-    # Exchange names that indicate exchange-specific (non-blocking) outages
+    # Exchange/venue names that indicate venue-specific (non-blocking) outages.
+    # These alerts affect a single exchange or crypto venue, not IB's core systems.
     EXCHANGE_KEYWORDS: ClassVar[list[str]] = [
+        # Major futures/options exchanges
         "CME", "CBOE", "CBOT", "COMEX", "NYMEX", "NYSE", "NASDAQ", "ISE",
         "ICE", "EUREX", "LSE", "TSE", "ASX", "SGX", "HKEX",
+        # Crypto venues
+        "PAXOS", "COINBASE",
+        # Other venues
+        "ARCA", "BATS", "IEX", "MEMX", "MIAX", "PEARL", "AMEX",
+        "TSX", "VENTURE", "IDEAL", "IBKRATS",
+    ]
+
+    # Phrases in alert text that indicate the alert is NOT about an outage
+    BENIGN_PHRASES: ClassVar[list[str]] = [
+        "IS AVAILABLE",
+        "SYSTEMS ARE AVAILABLE",
+        "OPERATING NORMALLY",
+        "HAS BEEN RESOLVED",
+        "IS NOW AVAILABLE",
     ]
 
     def is_blocking(self) -> bool:
-        """Is this a system-wide outage (not exchange-specific)?"""
+        """Is this a system-wide outage (not exchange-specific, not benign)?"""
         if self._is_exchange_specific():
+            return False
+        if self._is_benign():
             return False
         return self.severity in (AlertSeverity.CRITICAL, AlertSeverity.WARNING)
 
@@ -68,9 +86,19 @@ class SystemAlert:
                 return True
             if f"{exchange} IS CURRENTLY UNAVAILABLE" in msg_upper:
                 return True
+            if f"{exchange} IS UNAVAILABLE" in msg_upper:
+                return True
         if "TECHNICAL PROBLEMS AT THE EXCHANGE" in msg_upper:
             return True
+        # "at the exch" pattern (IB truncates "exchange" in some alerts)
+        if "AT THE EXCH" in msg_upper:
+            return True
         return False
+
+    def _is_benign(self) -> bool:
+        """Return True if this alert indicates a healthy/resolved state."""
+        msg_upper = self.message.upper()
+        return any(phrase in msg_upper for phrase in self.BENIGN_PHRASES)
 
 
 @dataclass(frozen=True)
@@ -228,6 +256,7 @@ class IBStatusScraper:
                     delay *= 2
 
         # All retries failed
+        logger.error("IB status scrape failed after %d retries", self.config.max_retries + 1)
         if self._last_status:
             self._last_status.fetch_error = "Using cached status (scrape failed)"
             return self._last_status
@@ -260,6 +289,23 @@ class IBStatusScraper:
         status.last_updated = datetime.now(ZoneInfo("UTC"))
         status.status = self._determine_status(status)
         self._last_status = status
+
+        if status.alerts:
+            blocking = [a for a in status.alerts if a.is_blocking()]
+            exchange = [a for a in status.alerts if a._is_exchange_specific()]
+            benign = [a for a in status.alerts if a._is_benign()]
+            logger.info(
+                "IB status: %s (%d alerts: %d blocking, %d exchange-specific, %d benign)",
+                status.status.value, len(status.alerts),
+                len(blocking), len(exchange), len(benign),
+            )
+            for a in blocking:
+                logger.warning("Blocking alert: [%s] %s", a.severity.value, a.message[:150])
+            for a in exchange:
+                logger.debug("Exchange alert (non-blocking): %s", a.message[:150])
+        else:
+            logger.debug("IB status: %s (no alerts)", status.status.value)
+
         return status
 
     def _parse_alerts(self, soup: BeautifulSoup) -> list[SystemAlert]:
@@ -287,6 +333,9 @@ class IBStatusScraper:
 
     def _classify_severity(self, message: str) -> AlertSeverity:
         lower = message.lower()
+        # Check benign phrases first — "is available" should not escalate
+        if any(p.lower() in lower for p in SystemAlert.BENIGN_PHRASES):
+            return AlertSeverity.INFO
         if "scheduled" in lower:
             return AlertSeverity.SCHEDULED
         if any(kw in lower for kw in ["unavailable", "outage", "disruption", "unable"]):

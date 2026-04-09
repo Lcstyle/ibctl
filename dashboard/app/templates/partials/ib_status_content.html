@@ -75,6 +75,16 @@
                 {% endif %}
             </div>
 
+            <!-- Alert Classification Config (collapsible) -->
+            <div style="margin-top: 12px; padding-top: 8px; border-top: 1px solid #1a1a2e;">
+                <details id="scraper-config-details">
+                    <summary class="card-label" style="font-size: 10px; cursor: pointer; user-select: none;">Alert Rules <span style="color: #52525b; font-size: 9px;">(click to expand)</span></summary>
+                    <div id="scraper-config-panel" style="margin-top: 8px;">
+                        <div style="color: #555; font-size: 11px;">Loading...</div>
+                    </div>
+                </details>
+            </div>
+
             <!-- Manual Override -->
             <div style="margin-top: 12px; padding-top: 8px; border-top: 1px solid #1a1a2e;">
                 <span class="card-label" style="font-size: 10px;">Manual Override</span>
@@ -216,4 +226,73 @@ function loadAuditLog() {
 }
 
 loadAuditLog();
+
+// Scraper config panel
+document.getElementById('scraper-config-details').addEventListener('toggle', function(e) {
+    if (e.target.open) loadScraperConfig();
+});
+
+function loadScraperConfig() {
+    var panel = document.getElementById('scraper-config-panel');
+    if (!panel) return;
+
+    fetch(ROOT_PATH + '/api/v1/ib-status/scraper-config')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+        if (!d.ok) { panel.innerHTML = '<span style="color:#ef4444">Failed</span>'; return; }
+
+        var html = '';
+        // Built-in exchange keywords (read-only)
+        html += '<div style="margin-bottom: 8px;">';
+        html += '<label style="color: #71717a; font-size: 10px;">Exchange Keywords (non-blocking)</label>';
+        html += '<div style="font-size: 10px; color: #52525b; margin: 2px 0; line-height: 1.4;">' + d.builtin_exchange_keywords.join(', ') + '</div>';
+        html += '</div>';
+
+        // Custom exchange keywords (editable)
+        html += '<div style="margin-bottom: 8px;">';
+        html += '<label style="color: #a1a1aa; font-size: 10px;">Custom Exchange Keywords</label>';
+        html += '<input type="text" id="custom-exchanges" placeholder="e.g., PAXOS, COINBASE" value="' + (d.custom_exchange_keywords || []).join(', ') + '" style="width: 100%; background: #0a1630; border: 1px solid #27272a; border-radius: 3px; color: #e2e8f0; padding: 4px 8px; font-size: 11px; font-family: SF Mono, monospace; margin-top: 2px;">';
+        html += '</div>';
+
+        // Built-in benign phrases (read-only)
+        html += '<div style="margin-bottom: 8px;">';
+        html += '<label style="color: #71717a; font-size: 10px;">Benign Phrases (non-blocking)</label>';
+        html += '<div style="font-size: 10px; color: #52525b; margin: 2px 0; line-height: 1.4;">' + d.builtin_benign_phrases.join(', ') + '</div>';
+        html += '</div>';
+
+        // Custom benign phrases (editable)
+        html += '<div style="margin-bottom: 8px;">';
+        html += '<label style="color: #a1a1aa; font-size: 10px;">Custom Benign Phrases</label>';
+        html += '<input type="text" id="custom-benign" placeholder="e.g., IS RESOLVED, BACK TO NORMAL" value="' + (d.custom_benign_phrases || []).join(', ') + '" style="width: 100%; background: #0a1630; border: 1px solid #27272a; border-radius: 3px; color: #e2e8f0; padding: 4px 8px; font-size: 11px; font-family: SF Mono, monospace; margin-top: 2px;">';
+        html += '</div>';
+
+        html += '<div style="display: flex; gap: 6px; align-items: center;">';
+        html += '<button class="ctrl-btn" onclick="saveScraperConfig()">Save Overrides</button>';
+        html += '<span id="scraper-config-result" style="font-size: 10px;"></span>';
+        html += '</div>';
+
+        panel.innerHTML = html;
+    })
+    .catch(function() {
+        panel.innerHTML = '<span style="color:#ef4444">Failed to load</span>';
+    });
+}
+
+function saveScraperConfig() {
+    var result = document.getElementById('scraper-config-result');
+    var exchanges = document.getElementById('custom-exchanges').value.split(',').map(function(s) { return s.trim(); }).filter(Boolean);
+    var benign = document.getElementById('custom-benign').value.split(',').map(function(s) { return s.trim(); }).filter(Boolean);
+
+    fetch(ROOT_PATH + '/api/v1/ib-status/scraper-config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({extra_exchange_keywords: exchanges, extra_benign_phrases: benign})
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+        result.innerHTML = '<span style="color:' + (d.ok ? '#4ade80' : '#ef4444') + '">' + (d.ok ? 'Saved — active immediately' : 'Failed') + '</span>';
+        setTimeout(function() { result.innerHTML = ''; }, 3000);
+    })
+    .catch(function() { result.innerHTML = '<span style="color:#ef4444">Request failed</span>'; });
+}
 </script>

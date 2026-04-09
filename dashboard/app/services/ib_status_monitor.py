@@ -11,11 +11,13 @@ override status is pushed to all instances on every interval.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from app.services.ib_status_scraper import IBStatusScraper, ScraperConfig, SystemStatus
 
@@ -36,6 +38,8 @@ class IBStatusMonitor:
     """Background monitor that scrapes IB status and pushes to ibctl."""
 
     MAX_AUDIT_LOG = 200
+    PERSIST_DIR = "/opt/ibctl/persist/config"
+    AUDIT_LOG_FILE = "ib_status_audit.json"
 
     def __init__(
         self,
@@ -52,6 +56,7 @@ class IBStatusMonitor:
         self._audit_log: deque[StatusEvent] = deque(maxlen=self.MAX_AUDIT_LOG)
         self._override_status: str | None = None  # None = scraper active
         self._override_reason: str = ""
+        self._load_audit_log()
 
     @property
     def audit_log(self) -> list[StatusEvent]:
@@ -91,7 +96,7 @@ class IBStatusMonitor:
             logger.info("IB status override CLEARED — scraper re-enabled")
 
     def _record_event(self, from_status: str, to_status: str, reason: str, source: str = "scraper"):
-        """Record a status transition in the audit log."""
+        """Record a status transition in the audit log and persist to disk."""
         if from_status == to_status:
             return
         event = StatusEvent(
@@ -103,6 +108,50 @@ class IBStatusMonitor:
         )
         self._audit_log.append(event)
         logger.info("IB status event: %s → %s (%s) [%s]", from_status, to_status, reason, source)
+        self._save_audit_log()
+
+    def _audit_log_path(self) -> Path:
+        return Path(self.PERSIST_DIR) / self.AUDIT_LOG_FILE
+
+    def _load_audit_log(self):
+        """Load persisted audit log from disk on startup."""
+        path = self._audit_log_path()
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text())
+            for entry in data:
+                self._audit_log.append(StatusEvent(
+                    timestamp=entry["timestamp"],
+                    from_status=entry["from_status"],
+                    to_status=entry["to_status"],
+                    reason=entry["reason"],
+                    source=entry.get("source", "scraper"),
+                ))
+            if self._audit_log:
+                self._last_pushed_status = self._audit_log[-1].to_status
+            logger.info("Loaded %d audit log entries from disk", len(self._audit_log))
+        except Exception as e:
+            logger.warning("Failed to load audit log from %s: %s", path, e)
+
+    def _save_audit_log(self):
+        """Persist audit log to disk."""
+        path = self._audit_log_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            data = [
+                {
+                    "timestamp": e.timestamp,
+                    "from_status": e.from_status,
+                    "to_status": e.to_status,
+                    "reason": e.reason,
+                    "source": e.source,
+                }
+                for e in self._audit_log
+            ]
+            path.write_text(json.dumps(data, indent=2))
+        except Exception as e:
+            logger.warning("Failed to save audit log to %s: %s", path, e)
 
     async def start(self):
         """Start the background monitoring task."""
@@ -160,7 +209,10 @@ class IBStatusMonitor:
                     reason = "Scheduled maintenance"
             elif status.status == SystemStatus.OUTAGE:
                 blocking = [a for a in status.alerts if a.is_blocking()]
-                reason = blocking[0].message[:200] if blocking else "System outage"
+                if blocking:
+                    reason = "; ".join(a.message[:100] for a in blocking[:3])
+                else:
+                    reason = "System outage (no specific blocking alerts)"
             elif status.status == SystemStatus.NO_INTERNET:
                 reason = status.fetch_error or "Internet connectivity lost"
             elif status.status == SystemStatus.UNKNOWN:
@@ -203,6 +255,39 @@ def create_monitor(registry, config: dict | None = None) -> IBStatusMonitor:
         backend_hosts=backend_hosts,
         fallback_host=os.environ.get("IB_STATUS_FALLBACK_HOST", "interactivebrokers.com"),
     )
+
+    # Alert classification overrides — layer 1: persisted JSON from dashboard UI
+    from app.services.ib_status_scraper import SystemAlert
+    overrides_path = Path("/opt/ibctl/persist/config/scraper_overrides.json")
+    if overrides_path.exists():
+        try:
+            overrides = json.loads(overrides_path.read_text())
+            for kw in overrides.get("extra_exchange_keywords", []):
+                if kw not in SystemAlert.EXCHANGE_KEYWORDS:
+                    SystemAlert.EXCHANGE_KEYWORDS = list(SystemAlert.EXCHANGE_KEYWORDS) + [kw]
+            for phrase in overrides.get("extra_benign_phrases", []):
+                if phrase not in SystemAlert.BENIGN_PHRASES:
+                    SystemAlert.BENIGN_PHRASES = list(SystemAlert.BENIGN_PHRASES) + [phrase]
+            logger.info("Loaded scraper overrides from disk: %s", overrides_path)
+        except Exception as e:
+            logger.warning("Failed to load scraper overrides: %s", e)
+
+    # Alert classification overrides — layer 2: env vars (highest precedence)
+    extra_exchanges = os.environ.get("IB_STATUS_EXTRA_EXCHANGE_KEYWORDS", "")
+    if extra_exchanges:
+        extras = [k.strip().upper() for k in extra_exchanges.split(",") if k.strip()]
+        for kw in extras:
+            if kw not in SystemAlert.EXCHANGE_KEYWORDS:
+                SystemAlert.EXCHANGE_KEYWORDS = list(SystemAlert.EXCHANGE_KEYWORDS) + [kw]
+        logger.info("Added exchange keywords from env: %s", extras)
+
+    extra_benign = os.environ.get("IB_STATUS_EXTRA_BENIGN_PHRASES", "")
+    if extra_benign:
+        extras = [p.strip().upper() for p in extra_benign.split(",") if p.strip()]
+        for phrase in extras:
+            if phrase not in SystemAlert.BENIGN_PHRASES:
+                SystemAlert.BENIGN_PHRASES = list(SystemAlert.BENIGN_PHRASES) + [phrase]
+        logger.info("Added benign phrases from env: %s", extras)
 
     return IBStatusMonitor(
         registry=registry,

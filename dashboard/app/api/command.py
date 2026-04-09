@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter, Request
 from pydantic import BaseModel
@@ -33,6 +35,7 @@ async def send_command(request: Request, body: CommandRequest):
 
     is_prefixed = any(command.startswith(p) for p in PREFIXED_COMMANDS)
     if command not in ALLOWED_COMMANDS and not is_prefixed:
+        logger.warning("Rejected unknown command: '%s'", command)
         return {"ok": False, "error": f"Unknown command: {command}"}
 
     registry = request.app.state.instance_registry
@@ -72,6 +75,7 @@ async def set_ib_status_override(request: Request, body: OverrideRequest):
         return {"ok": False, "error": f"Invalid status: {body.status} (must be 'available' or 'maintenance')"}
 
     monitor.set_override(body.status, body.reason)
+    logger.info("IB status override set: %s (reason: %s)", body.status, body.reason or "none")
     # Push immediately so ibctl instances get the update
     await monitor._check_and_push()
     return {"ok": True, "status": body.status, "reason": body.reason}
@@ -85,6 +89,7 @@ async def clear_ib_status_override(request: Request):
         return {"ok": False, "error": "IB status monitor not running"}
 
     monitor.clear_override()
+    logger.info("IB status override cleared — scraper re-enabled")
     # Scraper will pick up on next interval; do an immediate check
     await monitor._check_and_push()
     return {"ok": True, "message": "Override cleared — scraper re-enabled"}
@@ -124,3 +129,67 @@ async def get_ib_status_audit_log(request: Request):
         "override_status": monitor.override_status,
         "events": events,
     }
+
+
+# --- Scraper Alert Configuration ---
+
+SCRAPER_OVERRIDES_PATH = Path("/opt/ibctl/persist/config/scraper_overrides.json")
+
+
+class ScraperOverridesRequest(BaseModel):
+    extra_exchange_keywords: list[str] = []
+    extra_benign_phrases: list[str] = []
+
+
+def _load_scraper_overrides() -> dict:
+    if SCRAPER_OVERRIDES_PATH.exists():
+        try:
+            return json.loads(SCRAPER_OVERRIDES_PATH.read_text())
+        except Exception:
+            pass
+    return {"extra_exchange_keywords": [], "extra_benign_phrases": []}
+
+
+def _save_scraper_overrides(data: dict):
+    SCRAPER_OVERRIDES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SCRAPER_OVERRIDES_PATH.write_text(json.dumps(data, indent=2))
+
+
+@router.get("/api/v1/ib-status/scraper-config")
+async def get_scraper_config(request: Request):
+    """Return current scraper alert classification rules."""
+    from app.services.ib_status_scraper import SystemAlert
+
+    overrides = _load_scraper_overrides()
+    return {
+        "ok": True,
+        "builtin_exchange_keywords": list(SystemAlert.EXCHANGE_KEYWORDS),
+        "builtin_benign_phrases": list(SystemAlert.BENIGN_PHRASES),
+        "custom_exchange_keywords": overrides.get("extra_exchange_keywords", []),
+        "custom_benign_phrases": overrides.get("extra_benign_phrases", []),
+    }
+
+
+@router.post("/api/v1/ib-status/scraper-config")
+async def save_scraper_config(request: Request, body: ScraperOverridesRequest):
+    """Save custom alert classification overrides (persisted to volume)."""
+    from app.services.ib_status_scraper import SystemAlert
+
+    # Normalize
+    extra_exchanges = [k.strip().upper() for k in body.extra_exchange_keywords if k.strip()]
+    extra_benign = [p.strip().upper() for p in body.extra_benign_phrases if p.strip()]
+
+    # Save to disk
+    data = {"extra_exchange_keywords": extra_exchanges, "extra_benign_phrases": extra_benign}
+    _save_scraper_overrides(data)
+
+    # Apply immediately (extend the class-level lists)
+    for kw in extra_exchanges:
+        if kw not in SystemAlert.EXCHANGE_KEYWORDS:
+            SystemAlert.EXCHANGE_KEYWORDS = list(SystemAlert.EXCHANGE_KEYWORDS) + [kw]
+    for phrase in extra_benign:
+        if phrase not in SystemAlert.BENIGN_PHRASES:
+            SystemAlert.BENIGN_PHRASES = list(SystemAlert.BENIGN_PHRASES) + [phrase]
+
+    logger.info("Scraper overrides saved: %d exchange keywords, %d benign phrases", len(extra_exchanges), len(extra_benign))
+    return {"ok": True}
