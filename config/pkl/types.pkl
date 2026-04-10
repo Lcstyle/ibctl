@@ -173,8 +173,8 @@ class DashboardConfig {
 
 /// IB system status scraper settings (consumed by dashboard daemon).
 class IbSystemStatusConfig {
-  /// Enable status monitoring
-  enabled: Boolean = true
+  /// Enable status monitoring (requires dashboard)
+  enabled: Boolean = false
   /// Fail-open TTL: assume available if no update within this period
   ttlSeconds: UInt = 600
   /// Seconds between IB status page scrapes

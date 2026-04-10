@@ -49,7 +49,7 @@ accept_incoming = "accept"
 tws_cold_restart = ""
 
 [command_server]
-enabled = true
+enabled = false
 # live instance command server port
 port = 7462
 # paper instance command server port
@@ -70,7 +70,7 @@ token = ""
 debug_mode = false
 
 [ib_system_status]
-enabled = true
+enabled = false
 # fail-open TTL: if no status push within this period, assume available
 ttl_seconds = 600
 # Scraper settings (read by dashboard daemon, configurable via env vars too):

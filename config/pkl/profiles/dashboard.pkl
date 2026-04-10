@@ -5,9 +5,15 @@ amends "both.pkl"
 profile = "dashboard"
 
 runtime {
+  commandServer {
+    enabled = true
+  }
   dashboard {
     enabled = true
     port = 8080
+  }
+  ibSystemStatus {
+    enabled = true
   }
 }
 

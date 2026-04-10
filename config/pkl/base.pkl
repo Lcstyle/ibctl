@@ -51,9 +51,7 @@ runtime = new RuntimeConfig {
   }
 
   commandServer = new CommandServerConfig {
-    // Docker deployment enables command server (dashboard needs it).
-    // Bare-metal code default is false.
-    enabled = true
+    enabled = false
     port = 7462
     paperPort = 7463
     bindAddress = "0.0.0.0"
@@ -72,7 +70,7 @@ runtime = new RuntimeConfig {
   }
 
   ibSystemStatus = new IbSystemStatusConfig {
-    enabled = true
+    enabled = false
     ttlSeconds = 600
   }
 

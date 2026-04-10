@@ -146,7 +146,7 @@ class IbSystemStatusConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool = True
+    enabled: bool = False
     ttl_seconds: int = Field(default=600, ge=0)
     check_interval: int = Field(default=300, ge=0)
     url: str = "https://www.interactivebrokers.com/en/software/systemStatus.php"
@@ -207,6 +207,13 @@ class IbctlConfig(BaseModel):
             raise ValueError(
                 "dashboard.enabled=true requires command_server.enabled=true — "
                 "the dashboard connects to ibctl via the command server"
+            )
+
+        # IB system status scraper requires dashboard
+        if self.ib_system_status.enabled and not self.dashboard.enabled:
+            raise ValueError(
+                "ib_system_status.enabled=true requires dashboard.enabled=true — "
+                "the status scraper runs inside the dashboard daemon"
             )
 
         # Dual mode credential warning (env check happens in validator.py)
