@@ -52,7 +52,7 @@ def render_compose(cfg) -> str:
         f"${{TWOFA_TIMEOUT_ACTION:-{rt.twofa.timeoutAction}}}"
     )
     env["TWOFA_EXIT_INTERVAL"] = (
-        f"${{TWOFA_EXIT_INTERVAL:-{int(rt.twofa.timeoutSeconds)}}}"
+        f"${{TWOFA_EXIT_INTERVAL:-{int(rt.twofa.exitInterval)}}}"
     )
     env["RELOGIN_AFTER_TWOFA_TIMEOUT"] = "${RELOGIN_AFTER_TWOFA_TIMEOUT:-yes}"
 
@@ -70,7 +70,7 @@ def render_compose(cfg) -> str:
     env["TWS_COLD_RESTART"] = "${TWS_COLD_RESTART:-}"
 
     # Gateway
-    env["JAVA_HEAP_SIZE"] = f"${{JAVA_HEAP_SIZE:-{int(rt.gateway.javaHeapMb)}}}"
+    env["JAVA_HEAP_SIZE"] = f"${{JAVA_HEAP_SIZE:-{int(rt.gateway.javaHeapSize)}}}"
     env["TZ"] = f"${{TZ:-{dep.timezone}}}"
     env["VNC_SERVER_PASSWORD"] = "${VNC_SERVER_PASSWORD:-}"
     env["RUST_LOG"] = "${RUST_LOG:-ibctl=info}"

@@ -16,10 +16,10 @@ deployment = new Deployment {
 
 runtime = new RuntimeConfig {
   auth = new AuthConfig {
-    username = ""
+    twsUserid = ""
     tradingMode = deployment.tradingMode
     paper = new PaperAuthConfig {
-      username = ""
+      twsUserid = ""
     }
   }
 
@@ -27,17 +27,17 @@ runtime = new RuntimeConfig {
     secretEnv = "TWOFACTOR_CODE"
     provider = "oathtool"
     timeoutAction = "restart"
-    timeoutSeconds = 120
+    exitInterval = 120
     device = ""
     reloginAfterTimeout = false
   }
 
   gateway = new GatewayConfig {
     twsPath = "/home/ibgateway/Jts"
-    settingsPath = ""
-    version = ""
-    javaHeapMb = 768
-    program = "gateway"
+    twsSettingsPath = ""
+    twsMajorVrsn = ""
+    javaHeapSize = 768
+    gatewayOrTws = "gateway"
     liveApiPort = 4001
     paperApiPort = 4002
     liveSocatPort = 4003
@@ -47,7 +47,7 @@ runtime = new RuntimeConfig {
   session = new SessionConfig {
     action = "primary"
     acceptIncoming = "accept"
-    coldRestartTime = ""
+    twsColdRestart = ""
   }
 
   commandServer = new CommandServerConfig {

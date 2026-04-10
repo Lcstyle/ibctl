@@ -208,6 +208,7 @@ pub struct Config {
 #[derive(Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
+    #[serde(rename = "tws_userid")]
     pub username: String,
     /// Password is env-only (TWS_PASSWORD / TWS_PASSWORD_FILE). Never in config file.
     #[serde(skip)]
@@ -241,6 +242,7 @@ impl fmt::Debug for AuthConfig {
 #[derive(Deserialize)]
 #[serde(default)]
 pub struct PaperAuthConfig {
+    #[serde(rename = "tws_userid")]
     pub username: String,
     /// Paper password is env-only (TWS_PASSWORD_PAPER / TWS_PASSWORD_PAPER_FILE).
     #[serde(skip)]
@@ -281,6 +283,7 @@ pub struct TwoFaConfig {
     pub secret_env: String,
     pub provider: TotpProvider,
     pub timeout_action: TwoFaTimeoutAction,
+    #[serde(rename = "exit_interval")]
     pub timeout_seconds: u64,
     /// 2FA device name for device selection dialog (empty = skip)
     #[serde(default)]
@@ -297,9 +300,13 @@ pub struct TwoFaConfig {
 #[serde(default)]
 pub struct GatewayConfig {
     pub tws_path: String,
+    #[serde(rename = "tws_settings_path")]
     pub settings_path: String,
+    #[serde(rename = "tws_major_vrsn")]
     pub version: String,
+    #[serde(rename = "java_heap_size")]
     pub java_heap_mb: u32,
+    #[serde(rename = "gateway_or_tws")]
     pub program: GatewayProgram,
     /// Gateway API port (live: 4001, paper: 4002)
     pub live_api_port: u16,
@@ -315,7 +322,7 @@ pub struct SessionConfig {
     pub action: SessionAction,
     pub accept_incoming: AcceptIncoming,
     /// Cold restart time in "HH:MM" 24h format (e.g., "09:00"). Empty = disabled.
-    #[serde(default)]
+    #[serde(default, rename = "tws_cold_restart")]
     pub cold_restart_time: String,
 }
 
@@ -808,11 +815,11 @@ mod tests {
     #[test]
     fn test_gateway_program_deserialize() {
         assert_eq!(
-            toml::from_str::<GatewayConfig>("program = \"gateway\"").unwrap().program,
+            toml::from_str::<GatewayConfig>("gateway_or_tws = \"gateway\"").unwrap().program,
             GatewayProgram::Gateway
         );
         assert_eq!(
-            toml::from_str::<GatewayConfig>("program = \"tws\"").unwrap().program,
+            toml::from_str::<GatewayConfig>("gateway_or_tws = \"tws\"").unwrap().program,
             GatewayProgram::Tws
         );
     }
@@ -832,7 +839,7 @@ mod tests {
     #[test]
     fn test_invalid_enum_value_fails() {
         assert!(toml::from_str::<AuthConfig>("trading_mode = \"invalid\"").is_err());
-        assert!(toml::from_str::<GatewayConfig>("program = \"something\"").is_err());
+        assert!(toml::from_str::<GatewayConfig>("gateway_or_tws = \"something\"").is_err());
     }
 
     // --- Display tests (used in JSON serialization) ---
@@ -893,7 +900,7 @@ login_dialog_timeout_secs = 300
 trading_mode = "paper"
 
 [gateway]
-program = "tws"
+gateway_or_tws = "tws"
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.auth.trading_mode, TradingMode::Paper);

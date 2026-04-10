@@ -64,10 +64,11 @@ class RuntimeConfig {
 }
 
 /// Auth config. Passwords are env-only (TWS_PASSWORD, TWS_PASSWORD_FILE).
-/// Only username and trading_mode appear in generated TOML.
+/// Only tws_userid and trading_mode appear in generated TOML.
 class AuthConfig {
-  /// IB login username (env: TWS_USERID)
-  username: String = ""
+  /// IB login username
+  /// @env TWS_USERID
+  twsUserid: String = ""
   /// Trading mode — also set via TRADING_MODE env var
   tradingMode: TradingMode = "live"
   /// Paper account sub-config (for dual mode)
@@ -75,8 +76,9 @@ class AuthConfig {
 }
 
 class PaperAuthConfig {
-  /// Paper account username (env: TWS_USERID_PAPER)
-  username: String = ""
+  /// Paper account username
+  /// @env TWS_USERID_PAPER
+  twsUserid: String = ""
 }
 
 /// Two-factor authentication settings.
@@ -87,9 +89,10 @@ class TwoFaConfig {
   provider: TotpProvider = "oathtool"
   /// Action on 2FA timeout (env: TWOFA_TIMEOUT_ACTION)
   timeoutAction: TwoFaTimeoutAction = "restart"
-  /// Max seconds to wait for 2FA approval (env: TWOFA_EXIT_INTERVAL).
+  /// Max seconds to wait for 2FA approval.
   /// Rust code default is 180; base.pkl overrides to 120 for Docker deployment.
-  timeoutSeconds: UInt = 180
+  /// @env TWOFA_EXIT_INTERVAL
+  exitInterval: UInt = 180
   /// 2FA device name for selection dialog, empty = skip (env: TWOFA_DEVICE)
   device: String = ""
   /// Force re-login after 2FA timeout (env: RELOGIN_AFTER_TWOFA_TIMEOUT)
@@ -100,14 +103,18 @@ class TwoFaConfig {
 class GatewayConfig {
   /// Path to TWS/Gateway installation (env: TWS_PATH)
   twsPath: String = "/home/ibgateway/Jts"
-  /// Settings storage path, empty = use twsPath (env: TWS_SETTINGS_PATH)
-  settingsPath: String = ""
-  /// Gateway version, auto-detected if empty (env: TWS_MAJOR_VRSN)
-  version: String = ""
-  /// JVM heap size in MB (env: JAVA_HEAP_SIZE)
-  javaHeapMb: UInt = 768
-  /// Program type (env: GATEWAY_OR_TWS)
-  program: GatewayProgram = "gateway"
+  /// Settings storage path, empty = use twsPath
+  /// @env TWS_SETTINGS_PATH
+  twsSettingsPath: String = ""
+  /// Gateway version, auto-detected if empty
+  /// @env TWS_MAJOR_VRSN
+  twsMajorVrsn: String = ""
+  /// JVM heap size in MB
+  /// @env JAVA_HEAP_SIZE
+  javaHeapSize: UInt = 768
+  /// Program type
+  /// @env GATEWAY_OR_TWS
+  gatewayOrTws: GatewayProgram = "gateway"
   /// Gateway API port for live (Gateway listens here)
   liveApiPort: UInt16 = 4001
   /// Gateway API port for paper
@@ -124,8 +131,9 @@ class SessionConfig {
   action: SessionAction = "primary"
   /// Incoming API connection policy (env: IBCTL_ACCEPT_INCOMING)
   acceptIncoming: AcceptIncoming = "accept"
-  /// Cold restart time "HH:MM" 24h format, empty = disabled (env: TWS_COLD_RESTART)
-  coldRestartTime: String = ""
+  /// Cold restart time "HH:MM" 24h format, empty = disabled
+  /// @env TWS_COLD_RESTART
+  twsColdRestart: String = ""
 }
 
 /// TCP command server (IBC-compatible).

@@ -13,13 +13,13 @@
 
 [auth]
 # IB login username (env: TWS_USERID)
-username = ""
+tws_userid = ""
 # Trading mode: live | paper | both (env: TRADING_MODE)
 trading_mode = "live"
 
 [auth.paper]
 # Paper account username, only needed for dual mode (env: TWS_USERID_PAPER)
-username = ""
+tws_userid = ""
 
 
 [twofa]
@@ -28,19 +28,19 @@ provider = "oathtool"
 # Action on 2FA timeout: restart | exit (env: TWOFA_TIMEOUT_ACTION)
 timeout_action = "restart"
 # Seconds to wait for 2FA completion (env: TWOFA_EXIT_INTERVAL)
-timeout_seconds = 180
+exit_interval = 180
 
 [gateway]
 # Path to TWS/Gateway installation (env: TWS_PATH)
 tws_path = "/home/ibgateway/Jts"
 # Settings storage path, defaults to tws_path (env: TWS_SETTINGS_PATH)
-settings_path = ""
+tws_settings_path = ""
 # Gateway version, auto-detected if empty (env: TWS_MAJOR_VRSN)
-version = ""
+tws_major_vrsn = ""
 # JVM heap size in MB (env: JAVA_HEAP_SIZE)
-java_heap_mb = 768
+java_heap_size = 768
 # Program type: gateway | tws (env: GATEWAY_OR_TWS)
-program = "gateway"
+gateway_or_tws = "gateway"
 
 [session]
 # Session conflict action: primary | secondary | primaryoverride (env: IBCTL_SESSION_ACTION)

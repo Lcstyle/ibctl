@@ -5,11 +5,11 @@
 
 [auth]
 # set via TWS_USERID env var
-username = ""
+tws_userid = ""
 # "live", "paper", or "both"
 trading_mode = "live"
 # Paper credentials (for TRADING_MODE=both):
-# paper.username = ""      # set via TWS_USERID_PAPER env var
+# paper.tws_userid = ""    # set via TWS_USERID_PAPER env var
 
 [twofa]
 # "oathtool" (shells out) or "builtin" (not yet implemented)
@@ -19,7 +19,7 @@ secret_env = "TWOFACTOR_CODE"
 # "restart" (re-login) or "exit" (shutdown)
 timeout_action = "restart"
 # max wait for 2FA approval before timeout_action
-timeout_seconds = 120
+exit_interval = 120
 # 2FA device name for device selection dialog (empty = skip)
 device = ""
 # force re-login even if timeout_action != restart
@@ -28,12 +28,12 @@ relogin_after_timeout = false
 [gateway]
 tws_path = "/home/ibgateway/Jts"
 # empty = use tws_path
-settings_path = ""
+tws_settings_path = ""
 # auto-detected from TWS_MAJOR_VRSN env var
-version = ""
-java_heap_mb = 768
+tws_major_vrsn = ""
+java_heap_size = 768
 # "gateway" or "tws"
-program = "gateway"
+gateway_or_tws = "gateway"
 # API and socat port mappings (Gateway listens on api port, socat forwards from socat port)
 live_api_port = 4001
 paper_api_port = 4002
@@ -46,7 +46,7 @@ action = "primary"
 # "accept", "reject", or "manual"
 accept_incoming = "accept"
 # "HH:MM" 24h format for Sunday cold restart (empty = disabled)
-cold_restart_time = ""
+tws_cold_restart = ""
 
 [command_server]
 enabled = true

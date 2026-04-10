@@ -17,6 +17,15 @@ if [ -f /opt/ibctl/bin/ibctl ] && [ -f /opt/ibctl/bin/ibctl-agent.jar ]; then
     cp /opt/ibctl/bin/ibctl-agent.jar /opt/ibctl/ibctl-agent.jar
 fi
 
+# --- Pre-flight config validation ---
+# Validates TOML + env vars against Pydantic models before starting anything.
+# Uses the dashboard's Python venv (Pydantic is already installed via FastAPI).
+echo "Validating configuration..."
+if ! PYTHONPATH=/opt/ibctl/dashboard /opt/ibctl/dashboard/.venv/bin/python -m app.preflight 2>&1; then
+    echo "ERROR: Config validation failed. Fix the errors above and restart."
+    exit 1
+fi
+
 echo "=========================================="
 echo "  ibctl starting (mode=${TRADING_MODE:-live})"
 echo "=========================================="

@@ -46,11 +46,11 @@ def render_docker_toml(cfg) -> str:
     # [auth]
     auth = tomlkit.table()
     auth.add(tomlkit.comment("set via TWS_USERID env var"))
-    auth.add("username", rt.auth.username)
+    auth.add("tws_userid", rt.auth.twsUserid)
     auth.add(tomlkit.comment('"live", "paper", or "both"'))
     auth.add("trading_mode", rt.auth.tradingMode)
     auth.add(tomlkit.comment("Paper credentials (for TRADING_MODE=both):"))
-    auth.add(tomlkit.comment('paper.username = ""      # set via TWS_USERID_PAPER env var'))
+    auth.add(tomlkit.comment('paper.tws_userid = ""    # set via TWS_USERID_PAPER env var'))
     doc.add("auth", auth)
     doc.add(tomlkit.nl())
 
@@ -67,7 +67,7 @@ def render_docker_toml(cfg) -> str:
     twofa.add(tomlkit.comment('"restart" (re-login) or "exit" (shutdown)'))
     twofa.add("timeout_action", rt.twofa.timeoutAction)
     twofa.add(tomlkit.comment("max wait for 2FA approval before timeout_action"))
-    twofa.add("timeout_seconds", int(rt.twofa.timeoutSeconds))
+    twofa.add("exit_interval", int(rt.twofa.exitInterval))
     twofa.add(tomlkit.comment("2FA device name for device selection dialog (empty = skip)"))
     twofa.add("device", rt.twofa.device)
     twofa.add(tomlkit.comment("force re-login even if timeout_action != restart"))
@@ -79,12 +79,12 @@ def render_docker_toml(cfg) -> str:
     gw = tomlkit.table()
     gw.add("tws_path", rt.gateway.twsPath)
     gw.add(tomlkit.comment("empty = use tws_path"))
-    gw.add("settings_path", rt.gateway.settingsPath)
+    gw.add("tws_settings_path", rt.gateway.twsSettingsPath)
     gw.add(tomlkit.comment("auto-detected from TWS_MAJOR_VRSN env var"))
-    gw.add("version", rt.gateway.version)
-    gw.add("java_heap_mb", int(rt.gateway.javaHeapMb))
+    gw.add("tws_major_vrsn", rt.gateway.twsMajorVrsn)
+    gw.add("java_heap_size", int(rt.gateway.javaHeapSize))
     gw.add(tomlkit.comment('"gateway" or "tws"'))
-    gw.add("program", rt.gateway.program)
+    gw.add("gateway_or_tws", rt.gateway.gatewayOrTws)
     gw.add(
         tomlkit.comment(
             "API and socat port mappings (Gateway listens on api port, socat forwards from socat port)"
@@ -104,7 +104,7 @@ def render_docker_toml(cfg) -> str:
     sess.add(tomlkit.comment('"accept", "reject", or "manual"'))
     sess.add("accept_incoming", rt.session.acceptIncoming)
     sess.add(tomlkit.comment('"HH:MM" 24h format for Sunday cold restart (empty = disabled)'))
-    sess.add("cold_restart_time", rt.session.coldRestartTime)
+    sess.add("tws_cold_restart", rt.session.twsColdRestart)
     doc.add("session", sess)
     doc.add(tomlkit.nl())
 
@@ -298,7 +298,7 @@ def render_example_toml(cfg) -> str:
     # [auth]
     auth = tomlkit.table()
     auth.add(tomlkit.comment("IB login username (env: TWS_USERID)"))
-    auth.add("username", "")
+    auth.add("tws_userid", "")
     auth.add(tomlkit.comment("Trading mode: live | paper | both (env: TRADING_MODE)"))
     auth.add("trading_mode", rt.auth.tradingMode)
     doc.add("auth", auth)
@@ -311,7 +311,7 @@ def render_example_toml(cfg) -> str:
             "Paper account username, only needed for dual mode (env: TWS_USERID_PAPER)"
         )
     )
-    auth_paper.add("username", "")
+    auth_paper.add("tws_userid", "")
     # Use dotted key to get [auth.paper] not ["auth.paper"]
     auth["paper"] = auth_paper
     doc.add(tomlkit.nl())
@@ -330,7 +330,7 @@ def render_example_toml(cfg) -> str:
         )
     )
     # Example uses Rust code default (180), not Docker deployment default (120)
-    twofa.add("timeout_seconds", 180)
+    twofa.add("exit_interval", 180)
     doc.add("twofa", twofa)
     doc.add(tomlkit.nl())
 
@@ -341,15 +341,15 @@ def render_example_toml(cfg) -> str:
     gw.add(
         tomlkit.comment("Settings storage path, defaults to tws_path (env: TWS_SETTINGS_PATH)")
     )
-    gw.add("settings_path", "")
+    gw.add("tws_settings_path", "")
     gw.add(
         tomlkit.comment("Gateway version, auto-detected if empty (env: TWS_MAJOR_VRSN)")
     )
-    gw.add("version", "")
+    gw.add("tws_major_vrsn", "")
     gw.add(tomlkit.comment("JVM heap size in MB (env: JAVA_HEAP_SIZE)"))
-    gw.add("java_heap_mb", int(rt.gateway.javaHeapMb))
+    gw.add("java_heap_size", int(rt.gateway.javaHeapSize))
     gw.add(tomlkit.comment("Program type: gateway | tws (env: GATEWAY_OR_TWS)"))
-    gw.add("program", rt.gateway.program)
+    gw.add("gateway_or_tws", rt.gateway.gatewayOrTws)
     doc.add("gateway", gw)
     doc.add(tomlkit.nl())
 
