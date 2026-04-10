@@ -54,7 +54,11 @@ async def get_logs(
 
     if level:
         level_upper = level.upper()
-        lines = [l for l in lines if f'"level":"{level_upper}"' in l or f"[{level_upper}]" in l]
+        # Match both WARN (Rust) and WARNING (Python) for the same filter
+        if level_upper == "WARNING":
+            lines = [l for l in lines if '"level":"WARNING"' in l or '"level":"WARN"' in l or "[WARNING]" in l or "[WARN]" in l]
+        else:
+            lines = [l for l in lines if f'"level":"{level_upper}"' in l or f"[{level_upper}]" in l]
 
     return {"logs": lines, "date": date, "source": source}
 

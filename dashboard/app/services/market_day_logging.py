@@ -1,11 +1,11 @@
-"""Market-day-aware log handler for the dashboard daemon.
+"""Configurable log file rotation for the dashboard daemon.
 
-Rotates log files at the CME futures trading day boundary (6 PM US/Eastern).
-Follows the ibkr-ec convention: log files are named by the date when the
-market day ENDS (the trading session date).
+Supports two modes:
+- **Calendar mode** (default): rotates at midnight local time, files named by calendar date.
+- **Futures session mode**: rotates at the configured session reopen hour (default 6 PM ET),
+  files named by the trading session date (the date when the session ends).
 
-Example: At 7 PM ET on Dec 29, writes to dashboard-2025-12-30.log
-         At 5 PM ET on Dec 30, still writes to dashboard-2025-12-30.log
+Mode is controlled by IBCTL_FUTURES_SESSION_LOGGING env var.
 """
 
 from __future__ import annotations
@@ -17,18 +17,54 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 MARKET_TZ = ZoneInfo("America/New_York")
-MARKET_DAY_START_HOUR = 18  # 6 PM ET
 
 
-def get_market_day_date(ts: datetime | None = None) -> str:
-    """Return the market-day date as YYYY-MM-DD."""
+def _futures_session_logging() -> bool:
+    return os.environ.get("IBCTL_FUTURES_SESSION_LOGGING", "").lower() in ("true", "yes", "1")
+
+
+def _session_reopen_hour() -> int:
+    try:
+        h = int(os.environ.get("IBCTL_SESSION_REOPEN_HOUR", "18"))
+        return h if 0 <= h < 24 else 18
+    except ValueError:
+        return 18
+
+
+def get_log_date(ts: datetime | None = None) -> str:
+    """Return the log date as YYYY-MM-DD based on configured mode.
+
+    Calendar mode: today's date in local timezone.
+    Futures session mode: after reopen hour ET, returns tomorrow's date (session end date).
+    """
+    if _futures_session_logging():
+        return _futures_session_date(ts)
+    else:
+        return _calendar_date(ts)
+
+
+# Backward-compatible alias
+get_market_day_date = get_log_date
+
+
+def _calendar_date(ts: datetime | None = None) -> str:
+    """Calendar mode: today's local date."""
+    if ts is None:
+        return datetime.now().strftime("%Y-%m-%d")
+    return ts.strftime("%Y-%m-%d")
+
+
+def _futures_session_date(ts: datetime | None = None) -> str:
+    """Futures session mode: date based on session reopen boundary."""
+    reopen_hour = _session_reopen_hour()
+
     if ts is None:
         ts = datetime.now(MARKET_TZ)
     elif ts.tzinfo is None:
         ts = ts.replace(tzinfo=ZoneInfo("UTC"))
 
     eastern = ts.astimezone(MARKET_TZ)
-    if eastern.hour >= MARKET_DAY_START_HOUR:
+    if eastern.hour >= reopen_hour:
         market_date = (eastern + timedelta(days=1)).date()
     else:
         market_date = eastern.date()
@@ -36,7 +72,7 @@ def get_market_day_date(ts: datetime | None = None) -> str:
 
 
 class MarketDayFileHandler(BaseRotatingHandler):
-    """Rotating file handler that creates a new log file each market day.
+    """Rotating file handler that creates a new log file each day.
 
     Files: {log_dir}/{prefix}{YYYY-MM-DD}.log
     """
@@ -52,16 +88,16 @@ class MarketDayFileHandler(BaseRotatingHandler):
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.filename_prefix = filename_prefix
         self.max_bytes = max_bytes
-        self.current_market_day = get_market_day_date()
+        self.current_log_date = get_log_date()
         filename = self._log_path()
         super().__init__(str(filename), mode="a", encoding=encoding)
 
     def _log_path(self) -> Path:
-        return self.log_dir / f"{self.filename_prefix}{self.current_market_day}.log"
+        return self.log_dir / f"{self.filename_prefix}{self.current_log_date}.log"
 
     def shouldRollover(self, record) -> int:
-        new_day = get_market_day_date()
-        if new_day != self.current_market_day:
+        new_day = get_log_date()
+        if new_day != self.current_log_date:
             return 1
         if self.stream is None:
             self.stream = self._open()
@@ -75,14 +111,14 @@ class MarketDayFileHandler(BaseRotatingHandler):
         if self.stream:
             self.stream.close()
             self.stream = None
-        self.current_market_day = get_market_day_date()
+        self.current_log_date = get_log_date()
         self.baseFilename = str(self._log_path())
         if not self.delay:
             self.stream = self._open()
 
 
 def setup_dashboard_logging(log_dir: str | None = None, log_level: str = "INFO"):
-    """Configure the dashboard root logger with market-day file handler."""
+    """Configure the dashboard root logger with file handler."""
     import logging
 
     if not log_dir:

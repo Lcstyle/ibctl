@@ -118,7 +118,7 @@ class TcpIbctlClient:
             else:
                 raise IbctlCommandError(command, f"Unexpected response: {line}")
         except asyncio.TimeoutError:
-            logger.warning("Response timeout for '%s' after %.1fs", command, self.timeout)
+            logger.debug("Response timeout for '%s' after %.1fs", command, self.timeout)
             raise IbctlTimeoutError(command, self.timeout)
         finally:
             writer.close()

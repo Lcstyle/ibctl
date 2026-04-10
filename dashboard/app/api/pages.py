@@ -285,8 +285,12 @@ async def logs_partial(
     for line in lines:
         try:
             entry = jsonlib.loads(line)
-            lvl = entry.get("level", "INFO")
-            if level and lvl.upper() != level.upper():
+            lvl = entry.get("level", "INFO").upper()
+            filter_lvl = level.upper() if level else None
+            # Normalize WARN/WARNING mismatch (Rust uses WARN, Python uses WARNING)
+            if lvl == "WARN":
+                lvl = "WARNING"
+            if filter_lvl and lvl != filter_lvl:
                 continue
             logs.append({
                 "timestamp": utc_to_local(entry.get("ts", "")),

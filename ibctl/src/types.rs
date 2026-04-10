@@ -5,6 +5,8 @@
 //! (state_machine) depend on shared type definitions rather than on each
 //! other's implementation details.
 
+use std::time::Instant;
+
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
@@ -104,3 +106,44 @@ pub enum Signal {
 /// Consumed by: state_machine (main select loop)
 #[derive(Debug, Clone)]
 pub struct ColdRestartSignal;
+
+/// Pre-built query responses published via `watch` channel.
+///
+/// The state machine publishes a new snapshot after every state transition
+/// and observable mutation. The command server reads the latest snapshot
+/// directly — no mpsc round-trip, no blocking on the state machine loop.
+///
+/// Wrapped in `Arc` for cheap clones across watch receivers.
+#[derive(Clone, Debug)]
+pub struct QuerySnapshot {
+    /// Pre-built STATUS JSON response.
+    pub status_json: String,
+    /// Pre-built STATE JSON response.
+    pub state_json: String,
+    /// Pre-built CONFIG JSON response (immutable after init).
+    pub config_json: String,
+    /// When this snapshot was published.
+    pub published_at: Instant,
+    /// Monotonic version counter (aids debugging).
+    pub version: u64,
+    /// State machine start time — command server computes uptime at response time.
+    pub start_time: Instant,
+    /// Connected-since instant — command server computes connected uptime dynamically.
+    pub connected_since: Option<Instant>,
+}
+
+impl QuerySnapshot {
+    /// Initial snapshot before the state machine has started.
+    pub fn initializing() -> Self {
+        let now = Instant::now();
+        Self {
+            status_json: r#"{"state":"Initializing","ready":false}"#.to_string(),
+            state_json: r#"{"current":"Initializing","history":[]}"#.to_string(),
+            config_json: "{}".to_string(),
+            published_at: now,
+            version: 0,
+            start_time: now,
+            connected_since: None,
+        }
+    }
+}

@@ -59,7 +59,8 @@ impl StateMachine {
             // Pre-transition bookkeeping (cheap, no I/O)
             self.check_ib_status_ttl();
             self.check_ib_system_availability();
-            self.process_queries().await;
+            self.publish_snapshot();
+            self.process_queries().await; // WINDOWS queries only
 
             // Temporarily take receivers out of self so we can select between
             // them and self.transition() without borrow conflicts.
@@ -186,7 +187,8 @@ impl StateMachine {
             self.twofa_device_selected = false;
         }
 
-        self.process_queries().await;
+        self.publish_snapshot();
+        self.process_queries().await; // WINDOWS queries only
 
         if next == State::Shutdown {
             self.abort_client_id_task();
@@ -257,10 +259,11 @@ impl StateMachine {
                 self.state = State::Restarting;
             }
             other => {
-                log::info!("Received command {:?} in state {}", other, self.state);
+                log::debug!("Received command {:?} in state {}", other, self.state);
                 self.handle_command(other).await?;
             }
         }
+        self.publish_snapshot();
         Ok(())
     }
 
@@ -276,6 +279,7 @@ impl StateMachine {
                     match cmd {
                         Command::IbStatus(_, _) | Command::SetRestartTime(_) => {
                             let _ = self.handle_command(cmd).await;
+                            self.publish_snapshot();
                         }
                         _ => {
                             // Put it back? Can't with mpsc. Log and skip —
@@ -1382,7 +1386,10 @@ impl StateMachine {
         match cmd {
             Command::IbStatus(ref status, ref reason) => {
                 let available = status == "available";
-                log::info!("IB system status update: {} ({})", status, if reason.is_empty() { "no reason" } else { reason });
+                // Only log when status actually changes
+                if self.ib_status.status != *status || self.ib_status.reason != *reason {
+                    log::info!("IB system status update: {} ({})", status, if reason.is_empty() { "no reason" } else { reason });
+                }
                 self.ib_status.available = available;
                 self.ib_status.status = status.clone();
                 self.ib_status.reason = reason.clone();

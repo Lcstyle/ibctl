@@ -1,11 +1,42 @@
 //! Query handling and JSON response builders for the command server.
+//!
+//! Hot-path queries (STATUS, STATE, CONFIG) are served via a `watch` channel
+//! snapshot — the command server reads the latest value directly without going
+//! through the state machine's mpsc. Only WINDOWS (which requires async agent
+//! I/O) still uses the mpsc/oneshot path.
 
-use crate::types::Query;
+use std::sync::Arc;
+
+use crate::types::{Query, QuerySnapshot};
 
 use super::types::{client_advisory, State, StateMachine};
 
 impl StateMachine {
-    /// Process any pending queries from the command server (non-blocking).
+    /// Publish a fresh query snapshot to the watch channel.
+    ///
+    /// Called after state transitions, command handling, and at the top of
+    /// the main loop. The command server reads this snapshot directly for
+    /// STATUS/STATE/CONFIG — no mpsc round-trip needed.
+    pub(super) fn publish_snapshot(&mut self) {
+        self.snapshot_version += 1;
+        let snapshot = Arc::new(QuerySnapshot {
+            status_json: self.build_status_json(),
+            state_json: self.build_state_json(),
+            config_json: self.build_config_json(),
+            published_at: std::time::Instant::now(),
+            version: self.snapshot_version,
+            start_time: self.start_time,
+            connected_since: self.connected_since,
+        });
+        // Ignore error — means no receivers exist (command server not started)
+        let _ = self.snapshot_tx.send(snapshot);
+    }
+
+    /// Process pending queries that require async I/O (WINDOWS only).
+    ///
+    /// STATUS/STATE/CONFIG are handled by the command server directly
+    /// via the watch snapshot. This method drains WINDOWS and LOGS queries
+    /// that need the state machine's async capabilities or stub responses.
     pub(super) async fn process_queries(&mut self) {
         loop {
             match self.query_rx.try_recv() {
@@ -16,20 +47,21 @@ impl StateMachine {
         }
     }
 
-    /// Handle a single query by building the JSON response and sending it back.
+    /// Handle a single query. Only WINDOWS needs async processing here;
+    /// STATUS/STATE/CONFIG are answered from the watch snapshot by the
+    /// command server, but we handle them as fallback if they arrive.
     async fn handle_query(&mut self, query: Query) {
         match query {
+            // These should be served from the watch snapshot by the command
+            // server. If they arrive here, answer them directly as fallback.
             Query::Status(tx) => {
-                let json = self.build_status_json();
-                let _ = tx.send(json);
+                let _ = tx.send(self.build_status_json());
             }
             Query::State(tx) => {
-                let json = self.build_state_json();
-                let _ = tx.send(json);
+                let _ = tx.send(self.build_state_json());
             }
             Query::Config(tx) => {
-                let json = self.build_config_json();
-                let _ = tx.send(json);
+                let _ = tx.send(self.build_config_json());
             }
             Query::Logs(limit, tx) => {
                 let json = serde_json::json!({
@@ -48,7 +80,6 @@ impl StateMachine {
 
     /// Build the full STATUS JSON response for the dashboard.
     ///
-    /// This is a HOT PATH — called on every dashboard poll (3-5s).
     /// All data is read from in-memory fields, no agent I/O.
     /// Client IDs are refreshed every 30s in do_connected() and cached.
     fn build_status_json(&mut self) -> String {

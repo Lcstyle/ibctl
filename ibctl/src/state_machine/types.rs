@@ -3,11 +3,13 @@
 use std::collections::VecDeque;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+use std::sync::Arc;
+
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::agent_client::AgentClient;
-use crate::types::{ColdRestartSignal, Command, Query};
+use crate::types::{ColdRestartSignal, Command, Query, QuerySnapshot};
 use crate::config::ValidConfig;
 use crate::handlers::DialogHandlerRegistry;
 use crate::types::Signal;
@@ -207,6 +209,12 @@ pub struct StateMachine {
     /// that start a new login cycle.
     pub(super) twofa_device_selected: bool,
     pub stats: Stats,
+    /// Watch channel sender for publishing query snapshots.
+    /// Command server reads the latest snapshot directly — no mpsc round-trip.
+    /// Placed after JoinHandle fields for correct drop order (Sender before Handle).
+    pub(super) snapshot_tx: watch::Sender<Arc<QuerySnapshot>>,
+    /// Monotonic version counter for snapshots.
+    pub(super) snapshot_version: u64,
 }
 
 impl StateMachine {
@@ -216,6 +224,7 @@ impl StateMachine {
         supervisor: Supervisor,
         handler_registry: DialogHandlerRegistry,
         channels: Channels,
+        snapshot_tx: watch::Sender<Arc<QuerySnapshot>>,
     ) -> Self {
         Self {
             state: State::Init,
@@ -242,6 +251,8 @@ impl StateMachine {
             connected_window_class: None,
             twofa_device_selected: false,
             stats: Stats::default(),
+            snapshot_tx,
+            snapshot_version: 0,
         }
     }
 

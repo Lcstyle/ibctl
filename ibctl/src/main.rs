@@ -63,7 +63,12 @@ fn main() -> ExitCode {
         // In dual mode, separate log files: ibctl-live-{date}.log / ibctl-paper-{date}.log
         // In single mode: ibctl-{date}.log
         let prefix = format!("ibctl-{}", config.auth.trading_mode);
-        match logging::TeeWriter::new(&config.logging.log_dir, &prefix) {
+        match logging::TeeWriter::new(
+            &config.logging.log_dir,
+            &prefix,
+            config.logging.futures_session_logging,
+            config.logging.session_reopen_hour,
+        ) {
             Ok(tee) => {
                 builder.target(env_logger::Target::Pipe(Box::new(tee)));
             }
@@ -76,7 +81,16 @@ fn main() -> ExitCode {
 
     log::info!("ibctl v{} ({} mode) starting", env!("IBCTL_VERSION"), config.auth.trading_mode);
     if !config.logging.log_dir.is_empty() {
-        log::info!("File logging to {}/ibctl-{}-{}.log", config.logging.log_dir, config.auth.trading_mode, logging::market_day_date());
+        let date = logging::log_date(
+            config.logging.futures_session_logging,
+            config.logging.session_reopen_hour,
+        );
+        let mode_label = if config.logging.futures_session_logging {
+            format!("futures session (reopen {}:00 ET)", config.logging.session_reopen_hour)
+        } else {
+            "calendar".to_string()
+        };
+        log::info!("File logging to {}/ibctl-{}-{}.log ({})", config.logging.log_dir, config.auth.trading_mode, date, mode_label);
     }
 
     // Build the tokio runtime and run the async main
@@ -127,13 +141,20 @@ async fn async_main(config: ValidConfig) -> Result<(), Box<dyn std::error::Error
     // Create the dialog handler registry with all built-in handlers
     let handler_registry = handlers::DialogHandlerRegistry::with_defaults(&config);
 
+    // Create the watch channel for query snapshots.
+    // The state machine publishes snapshots; the command server reads them directly.
+    let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(
+        std::sync::Arc::new(types::QuerySnapshot::initializing()),
+    );
+
     // Start the TCP command server (IBC-compatible + JSON queries for dashboard)
     let (command_tx, command_rx) = tokio::sync::mpsc::channel(32);
     let (query_tx, query_rx) = tokio::sync::mpsc::channel(32);
     if config.command_server.enabled {
         let cmd_server = command_server::CommandServer::new(config.command_server.clone());
+        let snap_rx = snapshot_rx.clone();
         tasks.spawn(async move {
-            if let Err(e) = cmd_server.run(command_tx, query_tx).await {
+            if let Err(e) = cmd_server.run(command_tx, query_tx, snap_rx).await {
                 log::error!("Command server failed: {}", e);
             }
         });
@@ -170,6 +191,7 @@ async fn async_main(config: ValidConfig) -> Result<(), Box<dyn std::error::Error
         supervisor,
         handler_registry,
         channels,
+        snapshot_tx,
     );
 
     state_machine.run().await?;

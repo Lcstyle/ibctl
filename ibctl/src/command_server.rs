@@ -7,6 +7,7 @@
 //! commands like `STOP`, `RESTART`, `RECONNECTDATA` to port 7462).
 
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 
 /// Maximum concurrent TCP connections to the command server.
 const MAX_CONCURRENT_CONNECTIONS: usize = 10;
@@ -14,10 +15,10 @@ const MAX_CONCURRENT_CONNECTIONS: usize = 10;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::config::CommandServerConfig;
-use crate::types::{Command, Query};
+use crate::types::{Command, Query, QuerySnapshot};
 
 #[derive(Debug, Error)]
 pub enum CommandServerError {
@@ -130,6 +131,7 @@ impl CommandServer {
         self,
         command_tx: mpsc::Sender<Command>,
         query_tx: mpsc::Sender<Query>,
+        snapshot_rx: watch::Receiver<Arc<QuerySnapshot>>,
     ) -> Result<(), CommandServerError> {
         let addr = format!("{}:{}", self.config.bind_address, self.config.port);
         let listener = TcpListener::bind(&addr).await.map_err(|e| {
@@ -158,9 +160,10 @@ impl CommandServer {
                     let control_from = self.config.control_from.clone();
                     let cmd_tx = command_tx.clone();
                     let qry_tx = query_tx.clone();
+                    let snap_rx = snapshot_rx.clone();
                     tokio::spawn(async move {
                         if let Err(e) =
-                            handle_connection(stream, peer_addr, &control_from, cmd_tx, qry_tx).await
+                            handle_connection(stream, peer_addr, &control_from, cmd_tx, qry_tx, snap_rx).await
                         {
                             log::error!("Error handling connection from {}: {}", peer_addr, e);
                         }
@@ -183,6 +186,7 @@ async fn handle_connection(
     control_from: &[String],
     command_tx: mpsc::Sender<Command>,
     query_tx: mpsc::Sender<Query>,
+    snapshot_rx: watch::Receiver<Arc<QuerySnapshot>>,
 ) -> Result<(), CommandServerError> {
     if !is_allowed(&peer_addr.ip(), control_from) {
         log::warn!("Rejected connection from unauthorized IP: {}", peer_addr);
@@ -236,37 +240,46 @@ async fn handle_connection(
             }
         }
         Some(ParsedCommand::Query(query_type)) => {
-            // Create a oneshot channel for the response
-            let (resp_tx, resp_rx) = oneshot::channel();
-
-            let query = match query_type {
-                QueryType::Status => Query::Status(resp_tx),
-                QueryType::State => Query::State(resp_tx),
-                QueryType::Config => Query::Config(resp_tx),
-                QueryType::Logs(n) => Query::Logs(n, resp_tx),
-                QueryType::Windows => Query::Windows(resp_tx),
+            // Hot-path queries: serve directly from the watch snapshot.
+            // No mpsc round-trip, no blocking on the state machine loop.
+            let snapshot_response = match query_type {
+                QueryType::Status => Some(snapshot_rx.borrow().status_json.clone()),
+                QueryType::State => Some(snapshot_rx.borrow().state_json.clone()),
+                QueryType::Config => Some(snapshot_rx.borrow().config_json.clone()),
+                _ => None, // LOGS, WINDOWS go through mpsc
             };
 
-            match query_tx.send(query).await {
-                Ok(_) => {
-                    // Wait for response from the state machine (with timeout)
-                    match tokio::time::timeout(
-                        std::time::Duration::from_secs(10),
-                        resp_rx,
-                    ).await {
-                        Ok(Ok(json)) => {
-                            writer.write_all(format!("OK {}\n", json).as_bytes()).await?;
-                        }
-                        Ok(Err(_)) => {
-                            writer.write_all(b"ERROR query response channel dropped\n").await?;
-                        }
-                        Err(_) => {
-                            writer.write_all(b"ERROR query timeout\n").await?;
+            if let Some(json) = snapshot_response {
+                writer.write_all(format!("OK {}\n", json).as_bytes()).await?;
+            } else {
+                // Slow-path queries (WINDOWS, LOGS): go through mpsc/oneshot
+                let (resp_tx, resp_rx) = oneshot::channel();
+                let query = match query_type {
+                    QueryType::Logs(n) => Query::Logs(n, resp_tx),
+                    QueryType::Windows => Query::Windows(resp_tx),
+                    _ => unreachable!(), // STATUS/STATE/CONFIG handled above
+                };
+
+                match query_tx.send(query).await {
+                    Ok(_) => {
+                        match tokio::time::timeout(
+                            std::time::Duration::from_secs(10),
+                            resp_rx,
+                        ).await {
+                            Ok(Ok(json)) => {
+                                writer.write_all(format!("OK {}\n", json).as_bytes()).await?;
+                            }
+                            Ok(Err(_)) => {
+                                writer.write_all(b"ERROR query response channel dropped\n").await?;
+                            }
+                            Err(_) => {
+                                writer.write_all(b"ERROR query timeout\n").await?;
+                            }
                         }
                     }
-                }
-                Err(_) => {
-                    writer.write_all(b"ERROR query channel closed\n").await?;
+                    Err(_) => {
+                        writer.write_all(b"ERROR query channel closed\n").await?;
+                    }
                 }
             }
         }

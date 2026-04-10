@@ -334,12 +334,31 @@ pub struct AgentConfig {
     pub socket_path: String,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct LoggingConfig {
     pub level: LogLevel,
     /// Directory for persistent log files. Empty = no file logging (stdout only).
     pub log_dir: String,
+    /// Use futures market session dates for log filenames instead of calendar dates.
+    /// When enabled, log files roll at `session_reopen_hour` ET (default 18 = 6 PM).
+    /// When disabled (default), log files roll at midnight local time.
+    pub futures_session_logging: bool,
+    /// Hour (0-23, US/Eastern) when the futures session reopens and the next trading
+    /// day's log file begins. Only used when `futures_session_logging = true`.
+    /// Default: 18 (6 PM ET — CME futures reopen).
+    pub session_reopen_hour: u8,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: LogLevel::default(),
+            log_dir: String::new(),
+            futures_session_logging: false,
+            session_reopen_hour: 18,
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -667,6 +686,16 @@ impl Config {
         }
         if let Ok(v) = std::env::var("IBCTL_LOG_DIR") {
             self.logging.log_dir = v;
+        }
+        if let Ok(v) = std::env::var("IBCTL_FUTURES_SESSION_LOGGING") {
+            self.logging.futures_session_logging = matches!(v.to_lowercase().as_str(), "true" | "yes" | "1");
+        }
+        if let Ok(v) = std::env::var("IBCTL_SESSION_REOPEN_HOUR") {
+            if let Ok(h) = v.parse::<u8>() {
+                if h < 24 {
+                    self.logging.session_reopen_hour = h;
+                }
+            }
         }
 
         // Site
