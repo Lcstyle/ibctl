@@ -176,6 +176,75 @@ Wire protocol is identical to IBC — line-based, `COMMAND\n` → `OK message\n`
 
 See [docs/architecture.md](docs/architecture.md) for detailed design documentation.
 
+## Config validation (pre-flight)
+
+ibctl validates your configuration before anything starts. When the container launches, a Pydantic-based pre-flight check runs against your TOML config and environment variables. If anything is wrong, you get a clear error message and the container exits before wasting time on Xvfb, VNC, or JVM startup.
+
+```
+$ docker compose up
+Validating configuration...
+PRE-FLIGHT FAILED:
+  ERROR: auth.trading_mode (env: TRADING_MODE): Input should be 'live', 'paper' or 'both' [got: lve]
+ERROR: Config validation failed. Fix the errors above and restart.
+```
+
+What it catches:
+- Invalid enum values (trading mode, gateway program, log level, etc.)
+- Port conflicts (two services on the same port)
+- Missing credentials for dual mode (`trading_mode=both` without paper credentials)
+- Invalid time formats (`tws_cold_restart` must be HH:MM or empty)
+- Malformed TOML syntax
+- Out-of-range values (ports, heap size, timing knobs)
+
+The validator respects the same precedence as ibctl: env vars override TOML values, and `_FILE` variants (Docker secrets) take precedence over direct env vars.
+
+## Configuration management (for developers)
+
+ibctl uses [Pkl](https://pkl-lang.org/) as the single source of truth for configuration. The Pkl schema at `config/pkl/types.pkl` defines every config field, its type, default value, and associated environment variable.
+
+Generated artifacts (committed to the repo):
+- `docker/ibctl.toml` — Docker deployment defaults
+- `ibctl.toml.example` — User-facing template
+- `examples/docker-compose.*.yml` — Profile-specific Compose files
+- `examples/.env.example` — Documented env var template
+
+Users never need Pkl installed. The generated files are checked in and ready to use.
+
+### Profiles
+
+Profiles define deployment variants. Each inherits from a base and overrides what's different:
+
+| Profile | Mode | Dashboard | VNC | Use case |
+|---------|------|-----------|-----|----------|
+| `base` | live | no | no | Default single instance |
+| `live` | live | no | no | Live-only, no paper ports |
+| `paper` | paper | no | no | Paper-only |
+| `both` | both | no | no | Dual live + paper |
+| `dashboard` | both | yes | yes | Full deployment with web UI |
+| `standby` | live | no | no | Failover node, auto_launch=false |
+
+### Developer workflow
+
+After editing any file in `config/pkl/`:
+
+```bash
+# Install tools (first time only)
+pip install -r tools/requirements.txt
+
+# Regenerate all artifacts
+make generate-configs
+
+# Verify nothing drifted
+make check-configs
+
+# Run all tests
+make test
+```
+
+### TOML field naming convention
+
+IBC-origin fields use IBC's env var naming: `tws_userid`, `exit_interval`, `java_heap_size`, `gateway_or_tws`. ibctl-specific fields use the `IBCTL_` prefix: `IBCTL_COMMAND_PORT`, `IBCTL_LOG_LEVEL`, `IBCTL_SITE_ROLE`. TOML field names match their env var names (lowercased, under the appropriate section).
+
 ## Building from source
 
 Requires Rust 1.75+ and JDK 17+:
