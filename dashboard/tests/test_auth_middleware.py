@@ -82,9 +82,11 @@ class TestTokenConfigured:
         assert resp.status_code != 401
 
     @pytest.mark.asyncio
-    async def test_pages_reject_no_auth(self, authed_client):
+    async def test_pages_redirect_to_login_no_auth(self, authed_client):
+        """Browser GET without auth redirects to /login (not 401)."""
         resp = await authed_client.get("/")
-        assert resp.status_code == 401
+        assert resp.status_code == 303
+        assert "/login" in resp.headers.get("location", "")
 
     @pytest.mark.asyncio
     async def test_pages_accept_correct_token(self, authed_client):

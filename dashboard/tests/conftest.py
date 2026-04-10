@@ -76,10 +76,13 @@ def settings():
 async def client(fake_client, settings):
     """Async HTTP test client with fake ibctl backend."""
     app = create_app(settings=settings)
-    app.state.ibctl_client = fake_client  # Replace real client with fake
+    # Inject fake client into both legacy slot and registry
+    app.state.ibctl_client = fake_client
+    registry = app.state.instance_registry
+    for mode in registry.modes():
+        registry._clients[mode] = fake_client
 
     # Pre-populate registry cache so cache-first endpoints work in tests
-    registry = app.state.instance_registry
     from dataclasses import asdict
     from app.instance_registry import _CachedResponse
     status_dict = asdict(fake_client._status)

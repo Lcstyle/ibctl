@@ -29,9 +29,11 @@ async def test_logs_page_returns_200(client):
 
 
 @pytest.mark.asyncio
-async def test_controls_page_returns_200(client):
+async def test_controls_page_redirects_to_state(client):
+    """Controls were merged into the State page — /controls redirects."""
     response = await client.get("/controls")
-    assert response.status_code == 200
+    assert response.status_code == 307
+    assert "/state" in response.headers.get("location", "")
 
 
 @pytest.mark.asyncio

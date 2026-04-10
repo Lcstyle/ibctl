@@ -122,9 +122,11 @@ class TestFetchStatus:
 
     @patch.object(IBStatusScraper, "check_internet", return_value=True)
     @patch.object(IBStatusScraper, "check_backends", return_value=(True, ["cdc1-hb1.ibllc.com"]))
-    def test_fetch_error_returns_error_status(self, mock_backends, mock_internet, scraper):
-        """When HTTP fetch fails, return FETCH_ERROR status."""
+    def test_fetch_error_returns_unknown_status(self, mock_backends, mock_internet, scraper):
+        """When HTTP fetch fails after retries, return UNKNOWN status."""
+        import requests
         with patch.object(scraper, "_get_session") as mock_session:
-            mock_session.return_value.get.side_effect = Exception("Connection refused")
+            mock_session.return_value.get.side_effect = requests.RequestException("Connection refused")
             status = scraper.fetch_status()
-            assert status.status == SystemStatus.FETCH_ERROR
+            assert status.status == SystemStatus.UNKNOWN
+            assert status.fetch_error is not None
