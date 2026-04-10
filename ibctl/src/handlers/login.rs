@@ -2,6 +2,11 @@
 //!
 //! Recognizes the IB Gateway login window and fills in credentials.
 //! Supports both live and paper trading modes.
+//!
+//! After clicking the trading mode radio button, verifies the UI updated
+//! by inspecting button labels via dump_components. This prevents the
+//! paper-mode bug where credentials were submitted before the mode switch
+//! took effect.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -12,11 +17,16 @@ use secrecy::{ExposeSecret, SecretString};
 use crate::agent_client::{AgentClient, WindowInfo};
 use crate::config::TradingMode;
 use crate::handlers::{DialogHandler, HandlerError, HandlerResult};
+use crate::types::WindowId;
 
 /// Text field index for the username input.
 const USERNAME_FIELD: usize = 0;
 /// Text field index for the password input.
 const PASSWORD_FIELD: usize = 1;
+/// Max attempts to verify mode switch took effect.
+const MODE_VERIFY_ATTEMPTS: u32 = 5;
+/// Delay between mode verification attempts (ms).
+const MODE_VERIFY_DELAY_MS: u64 = 200;
 
 /// Handles the IB Gateway login dialog by filling username, password,
 /// and clicking the appropriate login button.
@@ -42,7 +52,6 @@ impl LoginHandler {
             login_submitted: AtomicBool::new(false),
         }
     }
-
 }
 
 impl DialogHandler for LoginHandler {
@@ -80,48 +89,82 @@ impl DialogHandler for LoginHandler {
             );
 
             // Step 1: Select API type — "IB API" (not "FIX CTCI")
-            // Matches IBC's GatewayLoginFrameHandler which checks/sets this
-            // before filling credentials
             match client.click_button(window.id, "IB API").await {
                 Ok(true) => log::info!("Selected 'IB API' mode"),
                 Ok(false) => log::debug!("'IB API' button not found (may already be selected)"),
                 Err(e) => log::debug!("Failed to click 'IB API': {}", e),
             }
 
-            // Brief pause for UI to update after radio selection
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(MODE_VERIFY_DELAY_MS)).await;
 
-            // Step 2: Select trading mode — "Paper Trading" or "Live Trading"
-            // Matches IBC's TradingModeManager which selects the mode
+            // Step 2: Select trading mode with verification.
+            // The expected login button label confirms the mode switch took effect.
             let mode_label = match self.trading_mode {
                 TradingMode::Paper => "Paper Trading",
                 _ => "Live Trading",
             };
+            let expected_button = match self.trading_mode {
+                TradingMode::Paper => "Paper Log In",
+                _ => "Log In",
+            };
+
             match client.click_button(window.id, mode_label).await {
                 Ok(true) => log::info!("Selected '{}' mode", mode_label),
                 Ok(false) => log::debug!("'{}' button not found (may already be selected)", mode_label),
                 Err(e) => log::debug!("Failed to click '{}': {}", mode_label, e),
             }
 
-            // Brief pause for UI to update after mode selection
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            // Verify the mode switch by checking button labels in the UI.
+            // The login button changes from "Log In" to "Paper Log In" (or vice versa)
+            // when the trading mode radio is toggled. This replaces the unreliable
+            // hardcoded 100ms delay that caused the paper-mode login bug.
+            let win_id = WindowId(window.id.0);
+            let mut mode_verified = false;
+            for attempt in 1..=MODE_VERIFY_ATTEMPTS {
+                tokio::time::sleep(std::time::Duration::from_millis(MODE_VERIFY_DELAY_MS)).await;
 
-            // Step 3: Fill username into the first text field
-            // Matches IBC pattern: SwingUtils.findTextField(window, 0)
+                if let Ok(components) = client.dump_components(win_id).await {
+                    let has_expected_button = components.get("buttons")
+                        .and_then(|b| b.as_array())
+                        .map(|buttons| {
+                            buttons.iter().any(|btn| {
+                                btn.get("text")
+                                    .and_then(|t| t.as_str())
+                                    .map(|t| t == expected_button)
+                                    .unwrap_or(false)
+                            })
+                        })
+                        .unwrap_or(false);
+
+                    if has_expected_button {
+                        log::info!("Mode switch verified: '{}' button present (attempt {})", expected_button, attempt);
+                        mode_verified = true;
+                        break;
+                    }
+                    log::debug!("Mode switch not yet visible (attempt {}/{})", attempt, MODE_VERIFY_ATTEMPTS);
+                }
+            }
+
+            if !mode_verified {
+                log::warn!(
+                    "Could not verify mode switch to '{}' after {} attempts — proceeding anyway",
+                    mode_label, MODE_VERIFY_ATTEMPTS
+                );
+            }
+
+            // Step 3: Fill username
             client
                 .type_text(window.id, USERNAME_FIELD, &self.username)
                 .await
                 .map_err(HandlerError::AgentError)?;
 
-            // Step 4: Fill password into the second text field
-            // Matches IBC pattern: SwingUtils.findTextField(window, 1)
+            // Step 4: Fill password
             client
                 .type_text(window.id, PASSWORD_FIELD, self.password.expose_secret())
                 .await
                 .map_err(HandlerError::AgentError)?;
 
-            // Step 5: Click the login button
-            // IBC tries multiple labels: "Log In", "Paper Log In"
+            // Step 5: Click the login button — try expected label first
             let button_labels: &[&str] = match self.trading_mode {
                 TradingMode::Paper => &["Paper Log In", "Log In"],
                 _ => &["Log In", "Paper Log In"],
@@ -144,9 +187,7 @@ impl DialogHandler for LoginHandler {
                 return Ok(HandlerResult::Error("No login button found".into()));
             }
 
-            // Mark login as submitted so we don't re-match the main window
             self.login_submitted.store(true, Ordering::Relaxed);
-
             log::info!("Login credentials submitted (mode={})", self.trading_mode);
             Ok(HandlerResult::Handled)
         })
