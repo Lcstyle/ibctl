@@ -1,0 +1,10 @@
+/// Standby site profile — primary site role disabled, no auto-launch.
+/// Used for failover nodes that wait for manual or automated promotion.
+amends "../base.pkl"
+
+profile = "standby"
+
+deployment {
+  siteRole = "standby"
+  autoLaunch = false
+}

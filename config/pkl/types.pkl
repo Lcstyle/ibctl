@@ -1,0 +1,276 @@
+/// ibctl configuration schema.
+///
+/// This is the canonical type definition for the ibctl deployment model.
+/// All generated config artifacts (TOML, Compose, .env) derive from this schema.
+///
+/// The runtime layer mirrors ibctl/src/config.rs structs exactly — the generated
+/// TOML must satisfy the Rust parser.
+module ibctl.types
+
+// --- Module-level properties (amendable by base.pkl and profiles) ---
+
+/// Human-readable project name
+name: String = "ibctl"
+
+/// Profile identifier (e.g., "live", "both", "dashboard")
+profile: String = "base"
+
+/// High-level deployment settings
+deployment: Deployment = new Deployment {}
+
+/// Runtime config — maps to ibctl.toml sections consumed by Rust
+runtime: RuntimeConfig = new RuntimeConfig {}
+
+/// Container/image settings for Docker deployment
+container: ContainerConfig = new ContainerConfig {}
+
+/// Docker Compose service definition shape
+compose: ComposeConfig = new ComposeConfig {}
+
+// --- Enums ---
+
+typealias TradingMode = "live"|"paper"|"both"
+typealias TotpProvider = "oathtool"|"builtin"
+typealias TwoFaTimeoutAction = "restart"|"exit"
+typealias GatewayProgram = "gateway"|"tws"
+typealias SessionAction = "primary"|"secondary"|"primaryoverride"
+typealias AcceptIncoming = "accept"|"reject"|"manual"
+typealias SiteRole = "primary"|"standby"
+typealias LogLevel = "debug"|"info"|"warn"|"error"
+
+// --- Deployment Layer ---
+
+/// High-level deployment identity — what kind of system is this?
+class Deployment {
+  tradingMode: TradingMode = "live"
+  siteRole: SiteRole = "primary"
+  autoLaunch: Boolean = true
+  timezone: String = "America/New_York"
+}
+
+// --- Runtime Layer (mirrors config.rs) ---
+
+class RuntimeConfig {
+  auth: AuthConfig = new AuthConfig {}
+  twofa: TwoFaConfig = new TwoFaConfig {}
+  gateway: GatewayConfig = new GatewayConfig {}
+  session: SessionConfig = new SessionConfig {}
+  commandServer: CommandServerConfig = new CommandServerConfig {}
+  agent: AgentConfig = new AgentConfig {}
+  dashboard: DashboardConfig = new DashboardConfig {}
+  ibSystemStatus: IbSystemStatusConfig = new IbSystemStatusConfig {}
+  logging: LoggingConfig = new LoggingConfig {}
+  timing: TimingConfig = new TimingConfig {}
+}
+
+/// Auth config. Passwords are env-only (TWS_PASSWORD, TWS_PASSWORD_FILE).
+/// Only username and trading_mode appear in generated TOML.
+class AuthConfig {
+  /// IB login username (env: TWS_USERID)
+  username: String = ""
+  /// Trading mode — also set via TRADING_MODE env var
+  tradingMode: TradingMode = "live"
+  /// Paper account sub-config (for dual mode)
+  paper: PaperAuthConfig = new PaperAuthConfig {}
+}
+
+class PaperAuthConfig {
+  /// Paper account username (env: TWS_USERID_PAPER)
+  username: String = ""
+}
+
+/// Two-factor authentication settings.
+class TwoFaConfig {
+  /// Name of env var holding the TOTP secret
+  secretEnv: String = "TWOFACTOR_CODE"
+  /// TOTP provider (env: TOTP_PROVIDER)
+  provider: TotpProvider = "oathtool"
+  /// Action on 2FA timeout (env: TWOFA_TIMEOUT_ACTION)
+  timeoutAction: TwoFaTimeoutAction = "restart"
+  /// Max seconds to wait for 2FA approval (env: TWOFA_EXIT_INTERVAL).
+  /// Rust code default is 180; base.pkl overrides to 120 for Docker deployment.
+  timeoutSeconds: UInt = 180
+  /// 2FA device name for selection dialog, empty = skip (env: TWOFA_DEVICE)
+  device: String = ""
+  /// Force re-login after 2FA timeout (env: RELOGIN_AFTER_TWOFA_TIMEOUT)
+  reloginAfterTimeout: Boolean = false
+}
+
+/// Gateway/TWS installation and port settings.
+class GatewayConfig {
+  /// Path to TWS/Gateway installation (env: TWS_PATH)
+  twsPath: String = "/home/ibgateway/Jts"
+  /// Settings storage path, empty = use twsPath (env: TWS_SETTINGS_PATH)
+  settingsPath: String = ""
+  /// Gateway version, auto-detected if empty (env: TWS_MAJOR_VRSN)
+  version: String = ""
+  /// JVM heap size in MB (env: JAVA_HEAP_SIZE)
+  javaHeapMb: UInt = 768
+  /// Program type (env: GATEWAY_OR_TWS)
+  program: GatewayProgram = "gateway"
+  /// Gateway API port for live (Gateway listens here)
+  liveApiPort: UInt16 = 4001
+  /// Gateway API port for paper
+  paperApiPort: UInt16 = 4002
+  /// Socat forwarding port for live (external-facing)
+  liveSocatPort: UInt16 = 4003
+  /// Socat forwarding port for paper
+  paperSocatPort: UInt16 = 4004
+}
+
+/// Session conflict handling.
+class SessionConfig {
+  /// Session conflict action (env: IBCTL_SESSION_ACTION)
+  action: SessionAction = "primary"
+  /// Incoming API connection policy (env: IBCTL_ACCEPT_INCOMING)
+  acceptIncoming: AcceptIncoming = "accept"
+  /// Cold restart time "HH:MM" 24h format, empty = disabled (env: TWS_COLD_RESTART)
+  coldRestartTime: String = ""
+}
+
+/// TCP command server (IBC-compatible).
+class CommandServerConfig {
+  /// Enable command server
+  enabled: Boolean = true
+  /// Live instance command server port (env: IBCTL_COMMAND_PORT)
+  port: UInt16 = 7462
+  /// Paper instance command server port
+  paperPort: UInt16 = 7463
+  /// Bind address
+  bindAddress: String = "0.0.0.0"
+  /// IP allow-list for command access (env: IBCTL_CONTROL_FROM, comma-separated)
+  controlFrom: Listing<String> = new Listing { "127.0.0.1"; "172.0.0.0/8" }
+}
+
+/// Java agent IPC settings.
+/// Dual-mode socket paths (agent-live.sock, agent-paper.sock) are derived
+/// by docker/entrypoint.sh at runtime, not configured here.
+class AgentConfig {
+  /// Unix domain socket path (env: IBCTL_AGENT_SOCKET)
+  socketPath: String = "/run/ibctl/agent.sock"
+}
+
+/// Web dashboard settings (consumed by entrypoint + FastAPI, not by Rust directly).
+/// Stored in TOML under [dashboard] — Rust ignores unknown sections via serde(flatten).
+class DashboardConfig {
+  /// Enable dashboard (env: IBCTL_DASHBOARD_ENABLED)
+  enabled: Boolean = false
+  /// Dashboard HTTP port (env: IBCTL_DASHBOARD_PORT)
+  port: UInt16 = 8080
+  /// Bearer token for API auth, empty = no auth (env: IBCTL_DASHBOARD_TOKEN)
+  tokenEnv: String = "IBCTL_DASHBOARD_TOKEN"
+  /// Enable debug endpoints (env: IBCTL_DEBUG_MODE)
+  debugMode: Boolean = false
+}
+
+/// IB system status scraper settings (consumed by dashboard daemon).
+class IbSystemStatusConfig {
+  /// Enable status monitoring
+  enabled: Boolean = true
+  /// Fail-open TTL: assume available if no update within this period
+  ttlSeconds: UInt = 600
+  /// Seconds between IB status page scrapes
+  checkIntervalSeconds: UInt = 300
+  /// IB status page URL
+  url: String = "https://www.interactivebrokers.com/en/software/systemStatus.php"
+  /// Region filter: "NA", "EU", or "APAC"
+  region: String = "NA"
+  /// IB backend servers for ICMP checks
+  backendHosts: Listing<String> = new Listing { "cdc1-hb1.ibllc.com"; "cdc1-hb2.ibllc.com" }
+  /// CDN fallback for internet connectivity check
+  fallbackHost: String = "interactivebrokers.com"
+  /// Additional exchange keywords (non-blocking alerts)
+  extraExchangeKeywords: Listing<String> = new Listing {}
+  /// Additional benign phrases (non-blocking alerts)
+  extraBenignPhrases: Listing<String> = new Listing {}
+  /// Additional blocking keywords (force CRITICAL severity)
+  extraBlockingKeywords: Listing<String> = new Listing {}
+}
+
+/// Log output settings.
+class LoggingConfig {
+  /// Log level (env: IBCTL_LOG_LEVEL)
+  level: LogLevel = "info"
+  /// Directory for persistent log files, empty = stdout only (env: IBCTL_LOG_DIR)
+  logDir: String = ""
+  /// Use futures market session dates for log filenames (env: IBCTL_FUTURES_SESSION_LOGGING)
+  futuresSessionLogging: Boolean = false
+  /// Hour (0-23 ET) when futures session reopens (env: IBCTL_SESSION_REOPEN_HOUR)
+  sessionReopenHour: UInt8 = 18
+}
+
+/// Timing knobs for UI automation and retry behavior.
+class TimingConfig {
+  /// Delay between UI actions in config dialog (ms)
+  uiTickMs: UInt = 100
+  /// Java agent delay after each Swing action (ms)
+  agentTickMs: UInt = 50
+  /// Wait after login button before checking for 2FA (ms)
+  postLoginDelayMs: UInt = 1000
+  /// Seconds of no popups before considering login complete
+  popupQuietSecs: UInt = 5
+  /// Max seconds to wait for popups
+  popupMaxWaitSecs: UInt = 30
+  /// Pause after selecting radio buttons on login screen (ms)
+  loginRadioDelayMs: UInt = 100
+  /// SIGTERM wait before SIGKILL (seconds)
+  jvmShutdownTimeoutSecs: UInt = 5
+  /// Seconds to wait for login window (0 = indefinite, env: IBCTL_LOGIN_TIMEOUT)
+  loginDialogTimeoutSecs: UInt = 120
+  /// Seconds to wait before restarting JVM after failure (env: IBCTL_RESTART_DELAY)
+  restartDelaySecs: UInt = 90
+  /// Max re-login attempts before cancel + restart (env: IBCTL_RELOGIN_ATTEMPTS)
+  reloginMaxAttempts: UInt = 1
+}
+
+// --- Container Layer ---
+
+/// Docker container settings (not consumed by Rust — used for Compose generation).
+class ContainerConfig {
+  /// Docker image name
+  imageName: String = "ibctl"
+  /// Docker image tag
+  imageTag: String = "latest"
+  /// Container name
+  containerName: String = "ibctl-gateway"
+  /// Restart policy
+  restartPolicy: String = "unless-stopped"
+  /// Enable VNC access
+  enableVnc: Boolean = false
+  /// VNC port
+  vncPort: UInt16 = 5900
+  /// noVNC websocket port
+  noVncPort: UInt16 = 6080
+  /// Enable dashboard in container
+  enableDashboard: Boolean = false
+  /// Dashboard port (mirrors runtime.dashboard.port)
+  dashboardPort: UInt16 = 8080
+}
+
+// --- Compose Layer ---
+
+/// Docker Compose service definition shape.
+class ComposeConfig {
+  /// Compose service name
+  serviceName: String = "ib-gateway"
+  /// Docker network name
+  networkName: String = "ibctl-net"
+  /// Expose live API port to host
+  exposeLiveApi: Boolean = true
+  /// Expose paper API port to host
+  exposePaperApi: Boolean = true
+  /// Expose live command server port
+  exposeCommandServer: Boolean = true
+  /// Expose paper command server port
+  exposePaperCommandServer: Boolean = true
+  /// Expose VNC port
+  exposeVnc: Boolean = true
+  /// Expose noVNC websocket port
+  exposeNoVnc: Boolean = true
+  /// Expose dashboard port
+  exposeDashboard: Boolean = true
+  /// Named volume for persistent state
+  persistVolumeName: String = "ibctl-persist"
+  /// Container mount point for persistent state
+  persistMountPath: String = "/opt/ibctl/persist"
+}

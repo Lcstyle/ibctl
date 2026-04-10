@@ -1,0 +1,114 @@
+/// ibctl base configuration — shared defaults for all profiles.
+///
+/// These defaults match docker/ibctl.toml (the Docker deployment defaults).
+/// Profile-specific overrides live in profiles/*.pkl.
+amends "types.pkl"
+
+name = "ibctl"
+profile = "base"
+
+deployment = new Deployment {
+  tradingMode = "live"
+  siteRole = "primary"
+  autoLaunch = true
+  timezone = "America/New_York"
+}
+
+runtime = new RuntimeConfig {
+  auth = new AuthConfig {
+    username = ""
+    tradingMode = deployment.tradingMode
+    paper = new PaperAuthConfig {
+      username = ""
+    }
+  }
+
+  twofa = new TwoFaConfig {
+    secretEnv = "TWOFACTOR_CODE"
+    provider = "oathtool"
+    timeoutAction = "restart"
+    timeoutSeconds = 120
+    device = ""
+    reloginAfterTimeout = false
+  }
+
+  gateway = new GatewayConfig {
+    twsPath = "/home/ibgateway/Jts"
+    settingsPath = ""
+    version = ""
+    javaHeapMb = 768
+    program = "gateway"
+    liveApiPort = 4001
+    paperApiPort = 4002
+    liveSocatPort = 4003
+    paperSocatPort = 4004
+  }
+
+  session = new SessionConfig {
+    action = "primary"
+    acceptIncoming = "accept"
+    coldRestartTime = ""
+  }
+
+  commandServer = new CommandServerConfig {
+    enabled = true
+    port = 7462
+    paperPort = 7463
+    bindAddress = "0.0.0.0"
+    controlFrom = new Listing { "127.0.0.1"; "172.0.0.0/8" }
+  }
+
+  agent = new AgentConfig {
+    socketPath = "/run/ibctl/agent.sock"
+  }
+
+  dashboard = new DashboardConfig {
+    enabled = false
+    port = 8080
+    tokenEnv = "IBCTL_DASHBOARD_TOKEN"
+    debugMode = false
+  }
+
+  ibSystemStatus = new IbSystemStatusConfig {
+    enabled = true
+    ttlSeconds = 600
+  }
+
+  logging = new LoggingConfig {
+    level = "info"
+    logDir = ""
+  }
+
+  timing = new TimingConfig {
+    uiTickMs = 100
+    agentTickMs = 50
+    postLoginDelayMs = 1000
+    popupQuietSecs = 5
+    popupMaxWaitSecs = 30
+    loginRadioDelayMs = 100
+    jvmShutdownTimeoutSecs = 5
+    loginDialogTimeoutSecs = 120
+    restartDelaySecs = 90
+    reloginMaxAttempts = 1
+  }
+}
+
+container = new ContainerConfig {
+  imageName = "ibctl"
+  imageTag = "latest"
+  containerName = "ibctl-gateway"
+  restartPolicy = "unless-stopped"
+  enableVnc = false
+  enableDashboard = false
+}
+
+compose = new ComposeConfig {
+  serviceName = "ib-gateway"
+  exposeLiveApi = true
+  exposePaperApi = true
+  exposeCommandServer = true
+  exposePaperCommandServer = true
+  exposeVnc = true
+  exposeNoVnc = true
+  exposeDashboard = true
+}

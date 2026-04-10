@@ -1,0 +1,24 @@
+/// Dashboard profile — dual mode with dashboard and VNC enabled.
+/// Extends the "both" profile.
+amends "both.pkl"
+
+profile = "dashboard"
+
+runtime {
+  dashboard {
+    enabled = true
+    port = 8080
+  }
+}
+
+container {
+  enableVnc = true
+  enableDashboard = true
+  dashboardPort = 8080
+}
+
+compose {
+  exposeVnc = true
+  exposeNoVnc = true
+  exposeDashboard = true
+}

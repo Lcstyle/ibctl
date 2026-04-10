@@ -1,0 +1,13 @@
+/// Live-only profile — single live trading instance.
+amends "../base.pkl"
+
+profile = "live"
+
+deployment {
+  tradingMode = "live"
+}
+
+compose {
+  exposePaperApi = false
+  exposePaperCommandServer = false
+}
