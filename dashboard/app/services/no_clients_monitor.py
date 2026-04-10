@@ -85,7 +85,7 @@ class NoClientsMonitor:
                     if mode not in self._zero_since:
                         self._zero_since[mode] = now
                         self._alerted[mode] = False
-                        logger.debug("No clients on %s — starting timer", mode)
+                        logger.warning("No API clients on %s — starting %dm alert timer", mode, timeout_minutes)
 
                     elapsed = now - self._zero_since[mode]
                     if elapsed >= timeout_secs and not self._alerted.get(mode, False):
@@ -103,7 +103,7 @@ class NoClientsMonitor:
                 else:
                     # Clients connected — reset timer
                     if mode in self._zero_since:
-                        logger.debug("Clients connected on %s — timer reset", mode)
+                        logger.info("API clients connected on %s — alert timer reset", mode)
                     self._zero_since.pop(mode, None)
                     self._alerted.pop(mode, None)
             else:

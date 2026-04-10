@@ -43,11 +43,17 @@ class _CachedResponse:
 
 
 class InstanceRegistry:
-    """Manages connections to multiple ibctl instances with response caching."""
+    """Manages connections to multiple ibctl instances with response caching.
+
+    Includes a background poller that refreshes STATUS every 5s independently
+    of browser SSE connections. This ensures monitors (no-clients, login-failure)
+    always have fresh data even if nobody has the dashboard open in a browser.
+    """
 
     # Cache TTLs in seconds
-    STATUS_TTL = 15.0   # SSE background task refreshes every 2s; 15s is a safety net
+    STATUS_TTL = 15.0   # Background poller refreshes every 5s; 15s is a safety net
     CONFIG_TTL = 300.0  # Config doesn't change at runtime (5 min)
+    POLL_INTERVAL = 5.0  # Background cache refresh interval
 
     def __init__(
         self,
@@ -57,11 +63,41 @@ class InstanceRegistry:
         self._clients: dict[str, IbctlClientProtocol] = {}
         self._endpoints: dict[str, InstanceEndpoint] = {}
         self._cache: dict[str, _CachedResponse] = {}
+        self._poller_task: asyncio.Task | None = None
 
         for ep in endpoints:
             self._endpoints[ep.mode] = ep
             self._clients[ep.mode] = client_factory(host=ep.host, port=ep.port)
             logger.info("Registered %s instance at %s:%d", ep.mode, ep.host, ep.port)
+
+    async def start_background_poller(self):
+        """Start background task that keeps the STATUS cache populated.
+
+        Monitors (no-clients, login-failure) depend on cached_all_status()
+        which reads from this cache. Without the poller, the cache is only
+        populated when a browser connects to the SSE endpoint.
+        """
+        self._poller_task = asyncio.create_task(self._poll_loop(), name="registry-poller")
+        logger.info("Background status poller started (interval=%.0fs)", self.POLL_INTERVAL)
+
+    async def stop_background_poller(self):
+        if self._poller_task:
+            self._poller_task.cancel()
+            try:
+                await self._poller_task
+            except asyncio.CancelledError:
+                pass
+            self._poller_task = None
+            logger.info("Background status poller stopped")
+
+    async def _poll_loop(self):
+        """Refresh STATUS cache for all instances every POLL_INTERVAL seconds."""
+        while True:
+            try:
+                await self.all_status()
+            except Exception as e:
+                logger.warning("Background poller error: %s", e)
+            await asyncio.sleep(self.POLL_INTERVAL)
 
     async def all_status(self) -> list[InstanceStatus]:
         """Query all instances concurrently, return status for each."""

@@ -39,6 +39,10 @@ async def lifespan(app: FastAPI):
         settings.port, modes,
     )
 
+    # Start background cache poller — keeps STATUS cache populated
+    # independently of browser SSE connections. Monitors depend on this.
+    await registry.start_background_poller()
+
     # Start IB System Status monitor
     from app.services.ib_status_monitor import create_monitor
     monitor = create_monitor(app.state.instance_registry)
@@ -64,6 +68,7 @@ async def lifespan(app: FastAPI):
     # Stop services
     await no_clients_monitor.stop()
     await monitor.stop()
+    await registry.stop_background_poller()
     logger.info("Dashboard shutting down")
 
 
