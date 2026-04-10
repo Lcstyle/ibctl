@@ -224,6 +224,16 @@ impl StateMachine {
             self.twofa_device_selected = false;
         }
 
+        // Clear stale login button flags when leaving the login phase.
+        // IB Gateway morphs the login window in place (no close/reopen),
+        // so window events may carry stale has_login_button=true during
+        // the authentication animation.
+        if matches!(next, State::DismissingPopups | State::WaitingFor2fa
+            | State::WaitingForApiReady | State::ConfiguringApi | State::Connected)
+        {
+            self.observation.clear_login_buttons();
+        }
+
         self.publish_snapshot();
         self.process_queries().await; // WINDOWS queries only
 
@@ -959,20 +969,35 @@ impl StateMachine {
                 return Ok(State::Error("JVM exited during popup dismissal".into()));
             }
 
-            // Check for blocking dialogs that require state changes (re-login, 2FA)
-            if let Some(next_state) = self.check_blocking_dialog().await {
-                log::info!("Blocking dialog detected during popup dismissal — transitioning to {}", next_state);
-                // Only reset handlers for states that start a new login cycle.
-                // WaitingFor2fa is part of the current login flow — resetting would
-                // clear LoginHandler's login_submitted flag and cause a double login.
-                if !matches!(next_state, State::WaitingFor2fa) {
-                    self.handler_registry.reset();
-                }
-                return Ok(next_state);
+            // --- Event-driven blocking dialog detection (no I/O) ---
+            if self.observation.has_2fa_dialog() {
+                log::info!("2FA dialog detected via observation during popup dismissal");
+                return Ok(State::WaitingFor2fa);
+            }
+            if self.observation.has_relogin_dialog() {
+                log::info!("Re-login dialog detected via observation during popup dismissal");
+                self.handler_registry.reset();
+                return Ok(State::ReconnectingSession);
+            }
+            if self.observation.has_session_conflict() {
+                log::info!("Session conflict detected via observation during popup dismissal");
+                self.handler_registry.reset();
+                return Ok(State::HandlingSessionConflict);
             }
 
-            let mut found_popup = false;
+            // HTTP fallback for blocking dialogs (if observation not synced)
+            if !self.observation.synced {
+                if let Some(next_state) = self.check_blocking_dialog().await {
+                    log::info!("Blocking dialog detected during popup dismissal — transitioning to {}", next_state);
+                    if !matches!(next_state, State::WaitingFor2fa) {
+                        self.handler_registry.reset();
+                    }
+                    return Ok(next_state);
+                }
+            }
 
+            // Dismiss popups via HTTP (still need agent interaction for clicking)
+            let mut found_popup = false;
             if let Ok(windows) = self.agent_client.list_windows().await {
                 for win in &windows {
                     if let Some(Ok(_)) = self.handler_registry.dispatch(&self.agent_client, win).await {
@@ -1002,7 +1027,7 @@ impl StateMachine {
         let poll = std::time::Duration::from_secs(2);
         let start = std::time::Instant::now();
 
-        log::info!("Waiting for Gateway to reach connected state (via agent window inspection)");
+        log::info!("Waiting for Gateway to reach connected state");
 
         loop {
             // Guard: JVM must still be running
@@ -1011,41 +1036,64 @@ impl StateMachine {
                 return Ok(State::Restarting);
             }
 
-            // Guard: check for blocking dialogs (re-login, 2FA, session conflict)
-            if let Some(next_state) = self.check_blocking_dialog().await {
-                log::info!("Blocking dialog detected while waiting for API — transitioning to {}", next_state);
-                return Ok(next_state);
+            // --- Event-driven fast path (observation cache, no I/O) ---
+            if self.observation.synced {
+                // Blocking dialog detection
+                if self.observation.has_2fa_dialog() {
+                    log::info!("2FA dialog detected via observation while waiting for API ready");
+                    return Ok(State::WaitingFor2fa);
+                }
+                if self.observation.has_relogin_dialog() {
+                    log::info!("Re-login detected via observation while waiting for API ready");
+                    return Ok(State::ReconnectingSession);
+                }
+                if self.observation.has_session_conflict() {
+                    log::info!("Session conflict detected via observation while waiting for API ready");
+                    return Ok(State::HandlingSessionConflict);
+                }
+
+                // API readiness: main gateway window exists with no login button
+                // (login button was cleared after credential submission).
+                // This is the IBC pattern: no login button = Gateway authenticated.
+                if let Some(main) = self.observation.main_gateway_window() {
+                    if !main.has_login_button {
+                        log::info!("Gateway ready via observation (no login button, class={}) — proceeding to configure", main.class);
+                        return Ok(State::ConfiguringApi);
+                    } else {
+                        log::debug!("WaitingForApiReady: login button still present — auth in progress");
+                    }
+                }
             }
 
-            // Check window state via the Java agent
-            if let Ok(windows) = self.agent_client.list_windows().await {
-                let main_window = windows.iter().find(|w| {
-                    let t = w.title.to_lowercase();
-                    t.contains("ib gateway") || t.contains("ibkr gateway")
-                });
+            // --- HTTP fallback (when observation not synced) ---
+            if !self.observation.synced {
+                if let Some(next_state) = self.check_blocking_dialog().await {
+                    log::info!("Blocking dialog detected while waiting for API — transitioning to {}", next_state);
+                    return Ok(next_state);
+                }
 
-                if let Some(main) = main_window {
-                    // Check for text fields (login form has username + password inputs).
-                    // Class name is unreliable — some Gateway versions use the same
-                    // class for both login and connected states.
-                    use crate::types::WindowId;
-                    let has_login_fields = if let Ok(components) = self.agent_client.dump_components(WindowId(main.id.0)).await {
-                        components.get("textfields")
-                            .and_then(|t| t.as_array())
-                            .map(|a| !a.is_empty())
-                            .unwrap_or(false)
-                    } else {
-                        false
-                    };
+                if let Ok(windows) = self.agent_client.list_windows().await {
+                    let main_window = windows.iter().find(|w| {
+                        let t = w.title.to_lowercase();
+                        t.contains("ib gateway") || t.contains("ibkr gateway")
+                    });
 
-                    if has_login_fields {
-                        log::debug!("WaitingForApiReady: text fields present — login/auth in progress");
-                    } else {
-                        log::info!("Gateway window ready (class={}) — proceeding to configure", main.class);
-                        return Ok(State::ConfiguringApi);
+                    if let Some(main) = main_window {
+                        use crate::types::WindowId;
+                        let has_login_fields = if let Ok(components) = self.agent_client.dump_components(WindowId(main.id.0)).await {
+                            components.get("textfields")
+                                .and_then(|t| t.as_array())
+                                .map(|a| !a.is_empty())
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        };
+
+                        if !has_login_fields {
+                            log::info!("Gateway ready (HTTP fallback, class={}) — proceeding to configure", main.class);
+                            return Ok(State::ConfiguringApi);
+                        }
                     }
-                } else {
-                    log::debug!("WaitingForApiReady: no main window found yet");
                 }
             }
 
