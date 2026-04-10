@@ -50,7 +50,7 @@ accept_incoming = "accept"
 
 [command_server]
 # Enable IBC-compatible TCP command server
-enabled = true
+enabled = false
 # TCP port (env: IBCTL_COMMAND_PORT)
 port = 7462
 # Bind address
