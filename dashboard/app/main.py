@@ -39,24 +39,33 @@ async def lifespan(app: FastAPI):
         settings.port, modes,
     )
 
+    registry = app.state.instance_registry
+
     # Start background cache poller — keeps STATUS cache populated
     # independently of browser SSE connections. Monitors depend on this.
     await registry.start_background_poller()
 
     # Start IB System Status monitor
     from app.services.ib_status_monitor import create_monitor
-    monitor = create_monitor(app.state.instance_registry)
+    monitor = create_monitor(registry)
     app.state.ib_status_monitor = monitor
     await monitor.start()
 
-    # Start Notification service + No-clients monitor
+    # Start Notification service
     from app.services.notification_service import NotificationService
-    from app.services.no_clients_monitor import NoClientsMonitor
     notification_service = NotificationService()
     app.state.notification_service = notification_service
-    no_clients_monitor = NoClientsMonitor(app.state.instance_registry, notification_service)
+
+    # Start background monitors (depend on registry + notification_service)
+    from app.services.no_clients_monitor import NoClientsMonitor
+    from app.services.login_failure_monitor import LoginFailureMonitor
+    no_clients_monitor = NoClientsMonitor(registry, notification_service)
+    login_failure_monitor = LoginFailureMonitor(registry, notification_service)
     app.state.no_clients_monitor = no_clients_monitor
+    app.state.login_failure_monitor = login_failure_monitor
     await no_clients_monitor.start()
+    await login_failure_monitor.start()
+
     if notification_service.config.enabled:
         logger.info("Notification service enabled (ntfy: %s/%s)",
                      notification_service.config.ntfy_url, notification_service.config.ntfy_topic)
@@ -65,7 +74,8 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Stop services
+    # Stop services (reverse order)
+    await login_failure_monitor.stop()
     await no_clients_monitor.stop()
     await monitor.stop()
     await registry.stop_background_poller()

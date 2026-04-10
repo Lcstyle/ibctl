@@ -70,14 +70,17 @@ class TestCachePopulationWithoutSSE:
 
     @pytest.mark.asyncio
     async def test_cache_populated_after_poller_runs(self):
-        """RED: after poller runs, cache should have real data."""
+        """After poller runs, cache should have real data."""
         registry = _make_registry()
 
-        # Start poller
         await registry.start_background_poller()
 
-        # Give it one cycle
-        await asyncio.sleep(0.2)
+        # Poll until cache is populated (deterministic, no fixed sleep)
+        for _ in range(50):
+            statuses = registry.cached_all_status()
+            if statuses[0].status is not None:
+                break
+            await asyncio.sleep(0.05)
 
         statuses = registry.cached_all_status()
         assert len(statuses) == 1
@@ -96,9 +99,12 @@ class TestCachePopulationWithoutSSE:
 
         registry = _make_registry()
 
-        # Start poller to populate cache
+        # Start poller to populate cache (poll until ready, no fixed sleep)
         await registry.start_background_poller()
-        await asyncio.sleep(0.2)
+        for _ in range(50):
+            if registry.cached_all_status()[0].status is not None:
+                break
+            await asyncio.sleep(0.05)
 
         # Create a mock notification service
         ns = MagicMock()

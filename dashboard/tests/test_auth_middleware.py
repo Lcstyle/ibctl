@@ -1,4 +1,11 @@
-"""Tests for dashboard authentication middleware."""
+"""Tests for dashboard authentication middleware.
+
+Verifies the auth contract:
+- Token configured → API gets 401, browser GETs redirect to /login
+- Token + correct auth → request passes through
+- No token → open access (no 401)
+- Static files always bypass auth
+"""
 
 from __future__ import annotations
 
@@ -42,15 +49,15 @@ async def open_client():
 # --- Token configured: endpoints require auth ---
 
 class TestTokenConfigured:
-    """When IBCTL_DASHBOARD_TOKEN is set, all API endpoints require Bearer auth."""
+    """When IBCTL_DASHBOARD_TOKEN is set, API endpoints require auth."""
 
     @pytest.mark.asyncio
-    async def test_command_rejects_no_auth(self, authed_client):
+    async def test_api_rejects_no_auth(self, authed_client):
         resp = await authed_client.post("/api/v1/command", json={"command": "RESTART"})
         assert resp.status_code == 401
 
     @pytest.mark.asyncio
-    async def test_command_rejects_wrong_token(self, authed_client):
+    async def test_api_rejects_wrong_token(self, authed_client):
         resp = await authed_client.post(
             "/api/v1/command",
             json={"command": "RESTART"},
@@ -59,14 +66,13 @@ class TestTokenConfigured:
         assert resp.status_code == 401
 
     @pytest.mark.asyncio
-    async def test_command_accepts_correct_token(self, authed_client):
+    async def test_api_accepts_bearer_token(self, authed_client):
         resp = await authed_client.post(
             "/api/v1/command",
             json={"command": "RESTART"},
             headers={"Authorization": "Bearer test-secret"},
         )
-        # May fail to connect to ibctl, but should NOT be 401
-        assert resp.status_code != 401
+        assert resp.status_code in (200, 502)
 
     @pytest.mark.asyncio
     async def test_status_rejects_no_auth(self, authed_client):
@@ -74,34 +80,50 @@ class TestTokenConfigured:
         assert resp.status_code == 401
 
     @pytest.mark.asyncio
-    async def test_status_accepts_correct_token(self, authed_client):
+    async def test_status_accepts_bearer_token(self, authed_client):
         resp = await authed_client.get(
             "/api/v1/status",
             headers={"Authorization": "Bearer test-secret"},
         )
-        assert resp.status_code != 401
+        assert resp.status_code == 200
 
     @pytest.mark.asyncio
-    async def test_pages_redirect_to_login_no_auth(self, authed_client):
-        """Browser GET without auth redirects to /login (not 401)."""
+    async def test_browser_redirects_to_login(self, authed_client):
+        """Browser GET without auth redirects to /login."""
         resp = await authed_client.get("/")
         assert resp.status_code == 303
         assert "/login" in resp.headers.get("location", "")
 
     @pytest.mark.asyncio
-    async def test_pages_accept_correct_token(self, authed_client):
+    async def test_pages_accept_bearer_token(self, authed_client):
         resp = await authed_client.get(
             "/",
             headers={"Authorization": "Bearer test-secret"},
         )
-        assert resp.status_code != 401
+        assert resp.status_code == 200
 
     @pytest.mark.asyncio
     async def test_static_files_bypass_auth(self, authed_client):
-        """Static assets (CSS/JS) should not require auth."""
+        """Static assets should not require auth (404 expected, not 401)."""
         resp = await authed_client.get("/static/nonexistent.css")
-        # 404 is fine — should NOT be 401
-        assert resp.status_code != 401
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_api_accepts_basic_auth(self, authed_client):
+        """HTTP Basic auth with token as password should work."""
+        import base64
+        creds = base64.b64encode(b":test-secret").decode()
+        resp = await authed_client.get(
+            "/api/v1/status",
+            headers={"Authorization": f"Basic {creds}"},
+        )
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_login_page_bypasses_auth(self, authed_client):
+        """/login must be accessible without auth."""
+        resp = await authed_client.get("/login")
+        assert resp.status_code == 200
 
 
 # --- No token configured: endpoints are open ---
@@ -110,17 +132,11 @@ class TestNoToken:
     """When IBCTL_DASHBOARD_TOKEN is empty, all endpoints are open."""
 
     @pytest.mark.asyncio
-    async def test_command_open_no_token(self, open_client):
-        resp = await open_client.post("/api/v1/command", json={"command": "RESTART"})
-        # May fail to connect, but not 401
-        assert resp.status_code != 401
-
-    @pytest.mark.asyncio
-    async def test_status_open_no_token(self, open_client):
+    async def test_api_open_no_token(self, open_client):
         resp = await open_client.get("/api/v1/status")
-        assert resp.status_code != 401
+        assert resp.status_code == 200
 
     @pytest.mark.asyncio
     async def test_pages_open_no_token(self, open_client):
         resp = await open_client.get("/")
-        assert resp.status_code != 401
+        assert resp.status_code == 200
