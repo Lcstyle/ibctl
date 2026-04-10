@@ -167,14 +167,35 @@ class TestFileSecret:
 
 
 class TestUnknownSections:
-    def test_unknown_sections_ignored(self):
+    def test_known_sections_accepted(self):
+        """All known sections (including dashboard, ib_system_status) validate."""
         path = _write_toml(
             '[auth]\ntrading_mode = "live"\n\n'
             '[dashboard]\nenabled = true\nport = 8080\n\n'
-            '[some_future_feature]\nkey = "value"\n'
+            '[ib_system_status]\nenabled = true\n'
         )
         result = validate_config(toml_path=path, check_env=False)
         assert result.ok
+        os.unlink(path)
+
+    def test_unknown_top_level_section_rejected(self):
+        """Unknown top-level sections are hard errors."""
+        path = _write_toml(
+            '[auth]\ntrading_mode = "live"\n\n'
+            '[some_future_feature]\nkey = "value"\n'
+        )
+        result = validate_config(toml_path=path, check_env=False)
+        assert not result.ok
+        os.unlink(path)
+
+    def test_unknown_field_in_section_rejected(self):
+        """Old/unknown field names inside known sections are hard errors."""
+        path = _write_toml(
+            '[auth]\nusername = "myuser"\n'  # old name, should be tws_userid
+        )
+        result = validate_config(toml_path=path, check_env=False)
+        assert not result.ok
+        assert any("username" in e.field and "not permitted" in e.message for e in result.errors)
         os.unlink(path)
 
 

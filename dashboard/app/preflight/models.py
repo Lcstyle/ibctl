@@ -28,13 +28,13 @@ LogLevel = Literal["debug", "info", "warn", "error"]
 
 
 class PaperAuthConfig(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     tws_userid: str = ""
 
 
 class AuthConfig(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     tws_userid: str = ""
     trading_mode: TradingMode = "live"
@@ -42,7 +42,7 @@ class AuthConfig(BaseModel):
 
 
 class TwoFaConfig(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     secret_env: str = "TWOFACTOR_CODE"
     provider: TotpProvider = "oathtool"
@@ -53,7 +53,7 @@ class TwoFaConfig(BaseModel):
 
 
 class GatewayConfig(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     tws_path: str = "/home/ibgateway/Jts"
     tws_settings_path: str = ""
@@ -67,7 +67,7 @@ class GatewayConfig(BaseModel):
 
 
 class SessionConfig(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     action: SessionAction = "primary"
     accept_incoming: AcceptIncoming = "accept"
@@ -84,7 +84,7 @@ class SessionConfig(BaseModel):
 
 
 class CommandServerConfig(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     enabled: bool = True
     port: int = Field(default=7462, ge=1, le=65535)
@@ -94,13 +94,13 @@ class CommandServerConfig(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     socket_path: str = "/run/ibctl/agent.sock"
 
 
 class LoggingConfig(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     level: LogLevel = "info"
     log_dir: str = ""
@@ -109,7 +109,7 @@ class LoggingConfig(BaseModel):
 
 
 class TimingConfig(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     ui_tick_ms: int = Field(default=100, ge=0)
     agent_tick_ms: int = Field(default=50, ge=0)
@@ -124,19 +124,50 @@ class TimingConfig(BaseModel):
 
 
 class SiteConfig(BaseModel):
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     role: SiteRole = "primary"
     auto_launch: bool = True
+
+
+class DashboardConfig(BaseModel):
+    """Dashboard section — consumed by entrypoint + FastAPI, not by Rust."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    port: int = Field(default=8080, ge=1, le=65535)
+    token: str = ""
+    debug_mode: bool = False
+
+
+class IbSystemStatusConfig(BaseModel):
+    """IB system status scraper — consumed by dashboard daemon."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    ttl_seconds: int = Field(default=600, ge=0)
+    check_interval: int = Field(default=300, ge=0)
+    url: str = "https://www.interactivebrokers.com/en/software/systemStatus.php"
+    region: str = "NA"
+    backend_hosts: str = "cdc1-hb1.ibllc.com,cdc1-hb2.ibllc.com"
+    fallback_host: str = "interactivebrokers.com"
+    extra_exchange_keywords: str = ""
+    extra_benign_phrases: str = ""
+    extra_blocking_keywords: str = ""
 
 
 # --- Top-level config ---
 
 
 class IbctlConfig(BaseModel):
-    """Complete ibctl config model. Validates TOML structure + cross-field rules."""
+    """Complete ibctl config model. Validates TOML structure + cross-field rules.
 
-    model_config = ConfigDict(extra="ignore")
+    All sections are validated — unknown top-level sections are rejected.
+    """
+
+    model_config = ConfigDict(extra="forbid")
 
     auth: AuthConfig = AuthConfig()
     twofa: TwoFaConfig = TwoFaConfig()
@@ -144,6 +175,8 @@ class IbctlConfig(BaseModel):
     session: SessionConfig = SessionConfig()
     command_server: CommandServerConfig = CommandServerConfig()
     agent: AgentConfig = AgentConfig()
+    dashboard: DashboardConfig = DashboardConfig()
+    ib_system_status: IbSystemStatusConfig = IbSystemStatusConfig()
     logging: LoggingConfig = LoggingConfig()
     timing: TimingConfig = TimingConfig()
     site: SiteConfig = SiteConfig()
