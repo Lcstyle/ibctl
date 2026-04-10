@@ -69,6 +69,19 @@ token = ""
 # enable debug endpoints
 debug_mode = false
 
+# OAuth/SSO (requires dashboard.enabled — secrets are env-only)
+# GitHub OAuth: set IBCTL_GITHUB_OAUTH_CLIENT_ID + _CLIENT_SECRET env vars
+github_oauth_enabled = false
+# OIDC/SSO (Authentik, Keycloak): set IBCTL_OIDC_CLIENT_ID + _CLIENT_SECRET env vars
+oidc_enabled = false
+# OIDC issuer URL (env: IBCTL_OIDC_ISSUER)
+oidc_issuer = ""
+# OIDC scopes (env: IBCTL_OIDC_SCOPES)
+oidc_scopes = "openid profile email"
+
+# Notifications (ntfy, Slack, Telegram — requires dashboard.enabled)
+notifications_enabled = false
+
 [ib_system_status]
 enabled = false
 # fail-open TTL: if no status push within this period, assume available
@@ -77,7 +90,7 @@ ttl_seconds = 600
 # check_interval = 300     # seconds between IB status page scrapes (default 5 min)
 # url = "https://www.interactivebrokers.com/en/software/systemStatus.php"
 # region = "NA"            # "NA", "EU", or "APAC" — which maintenance windows to monitor
-# backend_hosts = "cdc1-hb1.ibllc.com,cdc1-hb2.ibllc.com"  # IB backend servers (checked via ICMP ping)
+# backend_hosts = "cdc1-hb1.ibllc.com,cdc1-hb2.ibllc.com"  # IB backend servers (checked via TCP probe)
 # fallback_host = "interactivebrokers.com"  # CDN fallback for internet ping check
 
 # Alert classification overrides (comma-separated, added to built-in lists):

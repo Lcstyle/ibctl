@@ -23,10 +23,17 @@ agent/target/
 .DS_Store
 Thumbs.db
 
-# Secrets — NEVER commit credentials
+# Secrets & deployment — NEVER commit credentials or site-specific config
 .env
+.env.*
+!.env.example
 *.secret
+*.secrets
 /ibctl.toml
+.infisical-auth
+deploy.sh
+docker-compose.override.yml
+notifications.json
 
 # Build artifacts
 docker/ibctl

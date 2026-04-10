@@ -12,6 +12,8 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+import os
+
 from .env_overlay import apply_env_overrides, env_or_file
 from .models import ENV_MAP, SECRET_ENV_VARS, IbctlConfig
 
@@ -55,7 +57,14 @@ def _format_pydantic_errors(exc: ValidationError) -> list[PreflightError]:
         field_path = ".".join(loc_parts)
 
         env_var = _env_var_for_field(field_path)
-        actual = err.get("input")
+
+        # For model-level validators (cross-field rules), the "input" is the
+        # entire config dict — never show that (noisy, may contain usernames).
+        # Only show actual values for field-level errors.
+        if err["type"] == "value_error":
+            actual = None
+        else:
+            actual = err.get("input")
 
         # Redact secret values
         if _is_secret_field(field_path) and actual is not None:

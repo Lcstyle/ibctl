@@ -65,6 +65,10 @@ def _get_nested(data: dict, dotted_path: str) -> Any:
 _BOOL_FIELDS = {
     "twofa.relogin_after_timeout",
     "command_server.enabled",
+    "dashboard.enabled",
+    "dashboard.github_oauth_enabled",
+    "dashboard.oidc_enabled",
+    "dashboard.notifications_enabled",
     "logging.futures_session_logging",
     "site.auto_launch",
 }

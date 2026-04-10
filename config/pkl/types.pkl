@@ -160,6 +160,7 @@ class AgentConfig {
 
 /// Web dashboard settings (consumed by entrypoint + FastAPI, not by Rust directly).
 /// Stored in TOML under [dashboard] — Rust ignores unknown sections via serde(flatten).
+/// Auth secrets (OAuth client secrets, tokens) are env-only — never stored in TOML.
 class DashboardConfig {
   /// Enable dashboard (env: IBCTL_DASHBOARD_ENABLED)
   enabled: Boolean = false
@@ -169,6 +170,20 @@ class DashboardConfig {
   tokenEnv: String = "IBCTL_DASHBOARD_TOKEN"
   /// Enable debug endpoints (env: IBCTL_DEBUG_MODE)
   debugMode: Boolean = false
+  /// Enable GitHub OAuth login (requires IBCTL_GITHUB_OAUTH_CLIENT_ID + _CLIENT_SECRET env vars)
+  githubOauthEnabled: Boolean = false
+  /// Enable generic OIDC/SSO login (Authentik, Keycloak, etc.)
+  /// Requires IBCTL_OIDC_CLIENT_ID + _CLIENT_SECRET + oidcIssuer
+  oidcEnabled: Boolean = false
+  /// OIDC issuer URL (e.g. https://auth.example.com/application/o/ibctl/)
+  /// @env IBCTL_OIDC_ISSUER
+  oidcIssuer: String = ""
+  /// OIDC scopes (space-separated)
+  /// @env IBCTL_OIDC_SCOPES
+  oidcScopes: String = "openid profile email"
+  /// Enable notifications (ntfy, Slack, Telegram)
+  /// @env IBCTL_NOTIFICATIONS_ENABLED
+  notificationsEnabled: Boolean = false
 }
 
 /// IB system status scraper settings (consumed by dashboard daemon).

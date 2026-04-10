@@ -137,6 +137,33 @@ def render_docker_toml(cfg) -> str:
     dash.add("token", "")
     dash.add(tomlkit.comment("enable debug endpoints"))
     dash.add("debug_mode", rt.dashboard.debugMode)
+    dash.add(tomlkit.nl())
+    dash.add(
+        tomlkit.comment("OAuth/SSO (requires dashboard.enabled — secrets are env-only)")
+    )
+    dash.add(
+        tomlkit.comment(
+            "GitHub OAuth: set IBCTL_GITHUB_OAUTH_CLIENT_ID + _CLIENT_SECRET env vars"
+        )
+    )
+    dash.add("github_oauth_enabled", rt.dashboard.githubOauthEnabled)
+    dash.add(
+        tomlkit.comment(
+            "OIDC/SSO (Authentik, Keycloak): set IBCTL_OIDC_CLIENT_ID + _CLIENT_SECRET env vars"
+        )
+    )
+    dash.add("oidc_enabled", rt.dashboard.oidcEnabled)
+    dash.add(tomlkit.comment("OIDC issuer URL (env: IBCTL_OIDC_ISSUER)"))
+    dash.add("oidc_issuer", rt.dashboard.oidcIssuer)
+    dash.add(tomlkit.comment("OIDC scopes (env: IBCTL_OIDC_SCOPES)"))
+    dash.add("oidc_scopes", rt.dashboard.oidcScopes)
+    dash.add(tomlkit.nl())
+    dash.add(
+        tomlkit.comment(
+            "Notifications (ntfy, Slack, Telegram — requires dashboard.enabled)"
+        )
+    )
+    dash.add("notifications_enabled", rt.dashboard.notificationsEnabled)
     doc.add("dashboard", dash)
     doc.add(tomlkit.nl())
 
@@ -175,7 +202,7 @@ def render_docker_toml(cfg) -> str:
     ibs.add(
         tomlkit.comment(
             f'backend_hosts = "{backend_hosts_str}"'
-            "  # IB backend servers (checked via ICMP ping)"
+            "  # IB backend servers (checked via TCP probe)"
         )
     )
     ibs.add(

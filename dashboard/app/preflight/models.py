@@ -131,7 +131,10 @@ class SiteConfig(BaseModel):
 
 
 class DashboardConfig(BaseModel):
-    """Dashboard section — consumed by entrypoint + FastAPI, not by Rust."""
+    """Dashboard section — consumed by entrypoint + FastAPI, not by Rust.
+
+    Auth secrets (OAuth client secrets, tokens) are env-only — never in TOML.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -139,6 +142,11 @@ class DashboardConfig(BaseModel):
     port: int = Field(default=8080, ge=1, le=65535)
     token: str = ""
     debug_mode: bool = False
+    github_oauth_enabled: bool = False
+    oidc_enabled: bool = False
+    oidc_issuer: str = ""
+    oidc_scopes: str = "openid profile email"
+    notifications_enabled: bool = False
 
 
 class IbSystemStatusConfig(BaseModel):
@@ -216,6 +224,34 @@ class IbctlConfig(BaseModel):
                 "the status scraper runs inside the dashboard daemon"
             )
 
+        # GitHub OAuth requires dashboard
+        if self.dashboard.github_oauth_enabled and not self.dashboard.enabled:
+            raise ValueError(
+                "dashboard.github_oauth_enabled=true requires dashboard.enabled=true — "
+                "GitHub OAuth is a dashboard login method"
+            )
+
+        # OIDC/SSO requires dashboard
+        if self.dashboard.oidc_enabled and not self.dashboard.enabled:
+            raise ValueError(
+                "dashboard.oidc_enabled=true requires dashboard.enabled=true — "
+                "OIDC/SSO is a dashboard login method"
+            )
+
+        # OIDC requires an issuer URL
+        if self.dashboard.oidc_enabled and not self.dashboard.oidc_issuer:
+            raise ValueError(
+                "dashboard.oidc_enabled=true requires dashboard.oidc_issuer to be set "
+                "(e.g. https://auth.example.com/application/o/ibctl/)"
+            )
+
+        # Notifications require dashboard
+        if self.dashboard.notifications_enabled and not self.dashboard.enabled:
+            raise ValueError(
+                "dashboard.notifications_enabled=true requires dashboard.enabled=true — "
+                "the notification service runs inside the dashboard daemon"
+            )
+
         # Dual mode credential warning (env check happens in validator.py)
         # This only warns about TOML-level — env overrides are checked separately
         if (
@@ -275,6 +311,13 @@ ENV_MAP: dict[str, str] = {
     "timing.login_dialog_timeout_secs": "IBCTL_LOGIN_TIMEOUT",
     "timing.restart_delay_secs": "IBCTL_RESTART_DELAY",
     "timing.relogin_max_attempts": "IBCTL_RELOGIN_ATTEMPTS",
+    # Dashboard
+    "dashboard.enabled": "IBCTL_DASHBOARD_ENABLED",
+    "dashboard.github_oauth_enabled": "IBCTL_GITHUB_OAUTH_ENABLED",
+    "dashboard.oidc_enabled": "IBCTL_OIDC_ENABLED",
+    "dashboard.oidc_issuer": "IBCTL_OIDC_ISSUER",
+    "dashboard.oidc_scopes": "IBCTL_OIDC_SCOPES",
+    "dashboard.notifications_enabled": "IBCTL_NOTIFICATIONS_ENABLED",
     # Site
     "site.role": "IBCTL_SITE_ROLE",
     "site.auto_launch": "IBCTL_AUTO_LAUNCH",
@@ -287,4 +330,11 @@ ENV_MAP_REVERSE: dict[str, str] = {v: k for k, v in ENV_MAP.items()}
 SECRET_ENV_VARS: set[str] = {
     "TWS_PASSWORD",
     "TWS_PASSWORD_PAPER",
+    "IBCTL_DASHBOARD_TOKEN",
+    "IBCTL_DASHBOARD_AUTH_SECRET",
+    "IBCTL_GITHUB_OAUTH_CLIENT_SECRET",
+    "IBCTL_OIDC_CLIENT_SECRET",
+    "IBCTL_NTFY_TOKEN",
+    "IBCTL_TELEGRAM_BOT_TOKEN",
+    "IBCTL_SLACK_WEBHOOK_URL",
 }
