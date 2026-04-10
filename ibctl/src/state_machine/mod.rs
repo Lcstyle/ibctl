@@ -212,6 +212,10 @@ impl StateMachine {
         log::info!("State transition: {} -> {}", self.state, next);
         self.record_transition(&self.state.clone(), &next);
 
+        // Reset per-state tracking on every transition
+        self.state_entered_at = Instant::now();
+        self.consecutive_agent_failures = 0;
+
         if next == State::Connected && self.state != State::Connected {
             self.connected_since = Some(Instant::now());
             self.relogin_attempts = 0;
@@ -222,6 +226,27 @@ impl StateMachine {
         // Reset 2FA device state when starting a new login cycle
         if matches!(next, State::WaitingForLogin | State::Launching | State::Restarting) {
             self.twofa_device_selected = false;
+        }
+
+        // State-specific entry initialization
+        match &next {
+            State::Restarting | State::Launching => {
+                // JVM is being killed or started — all window data is stale.
+                // Clear observation cache so WaitingForLogin doesn't trust
+                // old "no login button" data from the dead JVM.
+                self.observation = crate::agent_events::AgentObservation::new();
+            }
+            State::WaitingFor2fa => {
+                self.twofa_seen = false;
+                self.twofa_gone_at = None;
+            }
+            State::DismissingPopups => {
+                self.popup_last_dismissed = None;
+            }
+            State::ReconnectingSession => {
+                self.relogin_attempts += 1;
+            }
+            _ => {}
         }
 
         // Clear stale login button flags when leaving the login phase.
@@ -314,34 +339,6 @@ impl StateMachine {
         Ok(())
     }
 
-    /// Drain pending commands non-blockingly. Used inside state handler loops
-    /// (like do_wait_for_login) to process IBSTATUS updates that arrive via the
-    /// command channel without waiting for the main select loop.
-    async fn process_commands_nonblocking(&mut self) {
-        loop {
-            match self.command_rx.try_recv() {
-                Ok(cmd) => {
-                    // Only handle non-state-changing commands (like IBSTATUS).
-                    // Stop/Restart/Exit are handled by the main select loop.
-                    match cmd {
-                        Command::IbStatus(_, _) | Command::SetRestartTime(_) => {
-                            let _ = self.handle_command(cmd).await;
-                            self.publish_snapshot();
-                        }
-                        _ => {
-                            // Put it back? Can't with mpsc. Log and skip —
-                            // these commands will be processed when we return
-                            // to the main loop.
-                            log::debug!("Deferring command {:?} until main loop", cmd);
-                        }
-                    }
-                }
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => break,
-            }
-        }
-    }
-
     /// Handle an interrupt received via the select loop.
     async fn handle_interrupt(&mut self, interrupt: Interrupt) -> Result<(), StateMachineError> {
         match interrupt {
@@ -398,6 +395,24 @@ impl StateMachine {
             }
             AgentEvent::Keepalive { .. } => {
                 log::debug!("Agent event keepalive");
+            }
+            // Wave 3: semantic events — log for observability, state machine
+            // uses these for richer context but core transitions still rely
+            // on window_opened + has_login_button.
+            AgentEvent::LoginFormReady { login_button, selected_mode, text_field_count, password_field_count, .. } => {
+                log::info!(
+                    "Event: login_form_ready (button={:?}, mode={:?}, fields={}/{})",
+                    login_button, selected_mode, text_field_count, password_field_count
+                );
+            }
+            AgentEvent::TwofaPrompt { prompt_type, ref devices, .. } => {
+                log::info!("Event: twofa_prompt (type={}, devices={:?})", prompt_type, devices);
+            }
+            AgentEvent::ErrorDialog { ref window_title, ref message, ref buttons, .. } => {
+                log::info!(
+                    "Event: error_dialog '{}' (message={:?}, buttons={:?})",
+                    window_title, message, buttons
+                );
             }
         }
 
@@ -463,14 +478,8 @@ impl StateMachine {
     // --- State handler methods ---
 
     /// Dormant standby mode: process is running but JVM is NOT launched.
-    /// Only processes queries. Waits for a START command to transition to Init.
+    /// Single-step: sleep and return same state. START command handled by outer select!.
     async fn do_waiting_for_launch(&mut self) -> Result<State, StateMachineError> {
-        log::info!("Standby mode — waiting for START command (JVM not launched)");
-
-        // Process any pending queries so STATUS/STATE/CONFIG still respond
-        self.process_queries().await;
-
-        // Sleep and loop — commands/signals are handled by the outer select! in run()
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         Ok(State::WaitingForLaunch)
     }
@@ -517,187 +526,149 @@ impl StateMachine {
         Ok(State::WaitingForAgent)
     }
 
+    /// Single-step: one health check per tick. Deadline tracked via state_entered_at.
     async fn do_wait_for_agent(&mut self) -> Result<State, StateMachineError> {
-        log::info!("Waiting for agent to become healthy");
-        let max_wait = std::time::Duration::from_secs(60);
-        let poll_interval = std::time::Duration::from_millis(500);
-        let start = std::time::Instant::now();
+        if !self.supervisor.is_running() {
+            return Ok(State::Error("JVM process exited before agent became ready".into()));
+        }
 
-        loop {
-            if !self.supervisor.is_running() {
-                return Ok(State::Error("JVM process exited before agent became ready".into()));
+        match self.agent_client.health().await {
+            Ok(true) => {
+                log::info!("Agent is healthy");
+                Ok(State::WaitingForLogin)
             }
-
-            match self.agent_client.health().await {
-                Ok(true) => {
-                    log::info!("Agent is healthy");
-                    return Ok(State::WaitingForLogin);
+            _ => {
+                if self.state_entered_at.elapsed() > std::time::Duration::from_secs(60) {
+                    return Ok(State::Error("Timed out waiting for agent health check".into()));
                 }
-                Ok(false) | Err(_) => {
-                    if start.elapsed() > max_wait {
-                        return Ok(State::Error("Timed out waiting for agent health check".into()));
-                    }
-                    tokio::time::sleep(poll_interval).await;
-                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                Ok(State::WaitingForAgent)
             }
         }
     }
 
+    /// Single-step: check observation cache / HTTP once, return immediately.
+    /// Deadlines tracked via state_entered_at. Events trigger re-evaluation via select!.
     async fn do_wait_for_login(&mut self) -> Result<State, StateMachineError> {
-        // Warm restart: Gateway handles its own re-authentication via -Drestart.
-        // Don't touch the login window — just wait for Gateway to reach the main
-        // trading window. This mirrors IBC's SessionManager.isRestart() behavior.
+        // --- Warm restart path ---
+        // Gateway handles its own re-authentication via -Drestart.
+        // Don't touch the login window — just wait for the main trading window.
         if self.warm_restart_pending.is_some() {
-            log::info!("Warm restart: waiting for Gateway to self-authenticate (not touching login)");
-            let max_wait = std::time::Duration::from_secs(120);
-            let poll_interval = std::time::Duration::from_secs(2);
-            let start = std::time::Instant::now();
+            if !self.supervisor.is_running() {
+                self.warm_restart_pending = None;
+                return Ok(State::Error("JVM exited during warm restart login".into()));
+            }
 
-            loop {
-                if !self.supervisor.is_running() {
-                    self.warm_restart_pending = None;
-                    return Ok(State::Error("JVM exited during warm restart login".into()));
-                }
-
-                if let Ok(windows) = self.agent_client.list_windows().await {
-                    for w in &windows {
-                        let t = w.title.to_lowercase();
-                        // Main Gateway window with API status = warm restart succeeded
-                        if (t.contains("ib gateway") || t.contains("ibkr gateway"))
-                            && !t.contains("login")
-                            && !t.contains("configuration")
-                        {
-                            // Check if it has the connection status bar (main window, not login)
-                            if w.bounds.as_ref().map(|b| b.width > 400).unwrap_or(false) {
-                                log::info!("Warm restart: Gateway self-authenticated — main window detected");
-                                self.warm_restart_pending = None;
-                                return Ok(State::DismissingPopups);
-                            }
+            // Check for authenticated main window
+            if let Ok(windows) = self.agent_client.list_windows().await {
+                for w in &windows {
+                    let t = w.title.to_lowercase();
+                    if (t.contains("ib gateway") || t.contains("ibkr gateway"))
+                        && !t.contains("login")
+                        && !t.contains("configuration")
+                    {
+                        if w.bounds.as_ref().map(|b| b.width > 400).unwrap_or(false) {
+                            log::info!("Warm restart: Gateway self-authenticated — main window detected");
+                            self.warm_restart_pending = None;
+                            return Ok(State::DismissingPopups);
                         }
                     }
                 }
+            }
 
-                self.process_queries().await;
-
-                if start.elapsed() > max_wait {
-                    log::warn!("Warm restart: Gateway did not self-authenticate within {}s — falling back to cold auth", max_wait.as_secs());
-                    self.warm_restart_pending = None;
-                    return Ok(State::WaitingForLogin); // recurse as cold
-                }
-                tokio::time::sleep(poll_interval).await;
+            if self.state_entered_at.elapsed() > std::time::Duration::from_secs(120) {
+                log::warn!("Warm restart timeout — falling back to cold auth");
+                self.warm_restart_pending = None;
+                self.state_entered_at = Instant::now(); // reset for cold auth deadline
+                // Fall through to cold auth below
+            } else {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                return Ok(State::WaitingForLogin);
             }
         }
 
-        let timeout_secs = self.config.timing.login_dialog_timeout_secs;
-        let wait_indefinitely = timeout_secs == 0;
-        if wait_indefinitely {
-            log::info!("Waiting for login window (no timeout — will wait indefinitely)");
-        } else {
-            log::info!("Waiting for login window (timeout={}s)", timeout_secs);
+        // --- Cold auth path ---
+        if !self.supervisor.is_running() {
+            return Ok(State::Error("JVM process exited while waiting for login window".into()));
         }
 
-        let max_wait = std::time::Duration::from_secs(timeout_secs);
-        let poll_interval = std::time::Duration::from_millis(500);
-        let start = std::time::Instant::now();
+        // Event-driven fast path (observation cache, no I/O)
+        if self.observation.synced {
+            if self.observation.has_session_conflict() {
+                log::info!("Session conflict detected via observation cache");
+                return Ok(State::HandlingSessionConflict);
+            }
+            if self.observation.has_2fa_dialog() {
+                log::info!("2FA dialog detected via observation cache while waiting for login");
+                return Ok(State::WaitingFor2fa);
+            }
+            if self.observation.has_relogin_dialog() {
+                log::info!("Re-login dialog detected via observation cache");
+                return Ok(State::ReconnectingSession);
+            }
+            if let Some(main) = self.observation.main_gateway_window() {
+                if main.has_login_button {
+                    log::info!("Login form detected via observation cache (has_login_button=true)");
+                    return Ok(State::Authenticating);
+                } else {
+                    log::info!("Gateway already authenticated via observation cache (no login button)");
+                    return Ok(State::DismissingPopups);
+                }
+            }
+        }
 
-        loop {
-            if !self.supervisor.is_running() {
-                return Ok(State::Error("JVM process exited while waiting for login window".into()));
+        // HTTP fallback (when observation cache is not synced)
+        if !self.observation.synced {
+            if let Some(next_state) = self.check_blocking_dialog().await {
+                log::info!("Blocking dialog detected while waiting for login — transitioning to {}", next_state);
+                return Ok(next_state);
             }
 
-            // --- Event-driven fast path (observation cache, no I/O) ---
-            // The event stream provides window_opened events with has_login_button,
-            // eliminating the need for both list_windows() AND dump_components().
-            if self.observation.synced {
-                if self.observation.has_session_conflict() {
-                    log::info!("Session conflict detected via observation cache");
-                    return Ok(State::HandlingSessionConflict);
+            if let Ok(windows) = self.agent_client.list_windows().await {
+                for w in &windows {
+                    if w.title.to_lowercase().contains("existing session") {
+                        log::info!("Session conflict dialog detected: {}", w.title);
+                        return Ok(State::HandlingSessionConflict);
+                    }
                 }
-                if self.observation.has_2fa_dialog() {
-                    log::info!("2FA dialog detected via observation cache while waiting for login");
-                    return Ok(State::WaitingFor2fa);
-                }
-                if self.observation.has_relogin_dialog() {
-                    log::info!("Re-login dialog detected via observation cache");
-                    return Ok(State::ReconnectingSession);
-                }
-                if let Some(main) = self.observation.main_gateway_window() {
-                    if main.has_login_button {
-                        log::info!("Login form detected via observation cache (has_login_button=true)");
+
+                let main_window = windows.iter().find(|w| {
+                    let t = w.title.to_lowercase();
+                    t.contains("ib gateway") || t.contains("ibkr gateway")
+                });
+
+                if let Some(main) = main_window {
+                    use crate::types::WindowId;
+                    let has_login_fields = if let Ok(components) = self.agent_client.dump_components(WindowId(main.id.0)).await {
+                        components.get("textfields")
+                            .and_then(|t| t.as_array())
+                            .map(|a| !a.is_empty())
+                            .unwrap_or(false)
+                    } else {
+                        true
+                    };
+
+                    if has_login_fields {
+                        log::info!("Login form detected (text fields present, HTTP fallback)");
                         return Ok(State::Authenticating);
                     } else {
-                        log::info!("Gateway already authenticated via observation cache (no text fields)");
+                        log::info!("Gateway already authenticated (HTTP fallback, no text fields)");
                         return Ok(State::DismissingPopups);
                     }
                 }
             }
-
-            // --- HTTP fallback (when observation cache is not synced) ---
-            if !self.observation.synced {
-                // Check for blocking dialogs (re-login, 2FA)
-                if let Some(next_state) = self.check_blocking_dialog().await {
-                    log::info!("Blocking dialog detected while waiting for login — transitioning to {}", next_state);
-                    return Ok(next_state);
-                }
-
-                match self.agent_client.list_windows().await {
-                    Ok(windows) => {
-                        for w in &windows {
-                            if w.title.to_lowercase().contains("existing session") {
-                                log::info!("Session conflict dialog detected: {}", w.title);
-                                return Ok(State::HandlingSessionConflict);
-                            }
-                        }
-
-                        let main_window = windows.iter().find(|w| {
-                            let t = w.title.to_lowercase();
-                            t.contains("ib gateway") || t.contains("ibkr gateway")
-                        });
-
-                        if let Some(main) = main_window {
-                            use crate::types::WindowId;
-                            let has_login_fields = if let Ok(components) = self.agent_client.dump_components(WindowId(main.id.0)).await {
-                                components.get("textfields")
-                                    .and_then(|t| t.as_array())
-                                    .map(|a| !a.is_empty())
-                                    .unwrap_or(false)
-                            } else {
-                                true
-                            };
-
-                            if has_login_fields {
-                                log::info!("Login form detected (text fields present, HTTP fallback)");
-                                return Ok(State::Authenticating);
-                            } else {
-                                log::info!("Gateway already authenticated (HTTP fallback, no text fields)");
-                                return Ok(State::DismissingPopups);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::debug!("Agent not ready yet: {}", e);
-                    }
-                }
-            }
-
-            if !wait_indefinitely && start.elapsed() > max_wait {
-                return Ok(State::Error("Timed out waiting for login window".into()));
-            }
-
-            // Process pending commands (IBSTATUS updates arrive via command channel)
-            // and queries (STATUS requests should still respond during wait)
-            self.process_commands_nonblocking().await;
-            self.process_queries().await;
-
-            // If dashboard scraper pushed IBSTATUS unavailable, exit to main loop
-            // which will transition to WaitingForIB
-            if !self.ib_status.available {
-                log::info!("IB system unavailable during login wait — returning to main loop");
-                return Ok(State::WaitingForLogin); // main loop will catch and go to WaitingForIB
-            }
-
-            tokio::time::sleep(poll_interval).await;
         }
+
+        // Deadline check
+        let timeout_secs = self.config.timing.login_dialog_timeout_secs;
+        if timeout_secs > 0 && self.state_entered_at.elapsed() > std::time::Duration::from_secs(timeout_secs) {
+            return Ok(State::Error("Timed out waiting for login window".into()));
+        }
+
+        // Nothing detected yet — sleep and return same state.
+        // Events interrupt this sleep via select!, providing instant wakeup.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        Ok(State::WaitingForLogin)
     }
 
     async fn do_authenticate(&mut self) -> Result<State, StateMachineError> {
@@ -776,164 +747,142 @@ impl StateMachine {
         Ok(State::WaitingFor2fa)
     }
 
+    /// Single-step: check for 2FA dialog, handle TOTP/device selection, return.
+    /// State tracked via twofa_seen, twofa_gone_at, twofa_device_selected fields.
+    /// Deadline tracked via state_entered_at.
     async fn do_wait_for_2fa(&mut self) -> Result<State, StateMachineError> {
-        let has_totp = self.config.twofa.has_secret;
+        if !self.supervisor.is_running() {
+            return Ok(State::Error("JVM exited during 2FA wait".into()));
+        }
 
-        let timeout_secs = self.config.twofa.timeout_seconds;
-        let max_wait = std::time::Duration::from_secs(timeout_secs);
-        let poll_interval = std::time::Duration::from_secs(1);
-        let start = std::time::Instant::now();
-        let mut twofa_seen = false;
-        let grace_period = std::time::Duration::from_secs(10);
-        let mut consecutive_agent_failures: u32 = 0;
+        // Observation cache checks (instant, no I/O)
+        if self.observation.has_relogin_dialog() {
+            log::info!("Re-login dialog detected via observation during 2FA wait");
+            return Ok(State::WaitingForLogin);
+        }
+        if self.observation.has_session_conflict() {
+            log::info!("Session conflict detected via observation during 2FA wait");
+            return Ok(State::HandlingSessionConflict);
+        }
 
-        log::info!("Checking for 2FA dialog (timeout={}s, totp={})",
-            timeout_secs, if has_totp { "configured" } else { "not configured (IB Key/mobile)" });
-
-        loop {
-            if !self.supervisor.is_running() {
-                return Ok(State::Error("JVM exited during 2FA wait".into()));
+        // HTTP blocking dialog check
+        if let Some(next_state) = self.check_blocking_dialog().await {
+            if next_state == State::WaitingForLogin {
+                log::info!("Blocking dialog detected during 2FA wait — transitioning to {}", next_state);
+                return Ok(next_state);
             }
+        }
 
-            // --- Event-driven fast path (observation cache, no I/O) ---
-            if self.observation.has_relogin_dialog() {
-                log::info!("Re-login dialog detected via observation during 2FA wait");
-                return Ok(State::WaitingForLogin);
-            }
-            if self.observation.has_session_conflict() {
-                log::info!("Session conflict detected via observation during 2FA wait");
-                return Ok(State::HandlingSessionConflict);
-            }
+        // One window check per tick
+        match self.agent_client.list_windows().await {
+            Ok(windows) => {
+                self.consecutive_agent_failures = 0;
 
-            // Check for blocking dialogs (re-login, authenticating splash)
-            if let Some(next_state) = self.check_blocking_dialog().await {
-                if next_state == State::WaitingForLogin {
-                    log::info!("Blocking dialog detected during 2FA wait — transitioning to {}", next_state);
-                    return Ok(next_state);
+                if windows.iter().any(|w| w.title.to_lowercase().contains("existing session")) {
+                    return Ok(State::HandlingSessionConflict);
                 }
-            }
 
-            match self.agent_client.list_windows().await {
-                Ok(windows) => {
-                    consecutive_agent_failures = 0;
-                    let has_conflict = windows.iter().any(|w| {
-                        w.title.to_lowercase().contains("existing session")
-                    });
-                    if has_conflict {
-                        return Ok(State::HandlingSessionConflict);
+                let twofa = windows.iter().find(|w| {
+                    w.title.to_lowercase().contains("second factor")
+                });
+
+                if let Some(win) = twofa {
+                    // 2FA dialog is visible — reset gone timer
+                    self.twofa_gone_at = None;
+
+                    if !self.twofa_seen {
+                        self.twofa_seen = true;
+                        log::info!("2FA dialog detected: {}", win.title);
                     }
 
-                    let twofa = windows.iter().find(|w| {
-                        w.title.to_lowercase().contains("second factor")
-                    });
-
-                    if let Some(win) = twofa {
-                        if !twofa_seen {
-                            twofa_seen = true;
-                            log::info!("2FA dialog detected: {}", win.title);
-                        }
-
-                        if !self.twofa_device_selected {
-                            let twofa_device = &self.config.twofa.device;
-                            if !twofa_device.is_empty() {
-                                log::info!("Selecting 2FA device: {}", twofa_device);
-                                match self.agent_client.select_list_item(win.id, twofa_device).await {
-                                    Ok(true) => {
-                                        log::info!("Selected '{}' in device list", twofa_device);
-                                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                                        let _ = self.agent_client.click_button(win.id, "OK").await;
-                                        log::info!("Clicked OK on device selection — waiting for 2FA challenge");
-                                        self.twofa_device_selected = true;
-                                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                                        continue;
-                                    }
-                                    _ => {
-                                        log::debug!("No device list found — this is the actual 2FA challenge");
-                                        self.twofa_device_selected = true;
-                                    }
-                                }
-                            } else {
-                                self.twofa_device_selected = true;
-                            }
-                        }
-
-                        if has_totp {
-                            match self.handler_registry.dispatch(&self.agent_client, win).await {
-                                Some(Ok(crate::handlers::HandlerResult::Handled)) => {
-                                    log::info!("TOTP code submitted, waiting for verification");
-                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                                    return Ok(State::DismissingPopups);
-                                }
-                                Some(Ok(crate::handlers::HandlerResult::Error(msg))) => {
-                                    log::error!("TOTP entry failed: {} — will retry on next loop", msg);
+                    // Device selection (one-shot action)
+                    if !self.twofa_device_selected {
+                        let twofa_device = &self.config.twofa.device.clone();
+                        if !twofa_device.is_empty() {
+                            log::info!("Selecting 2FA device: {}", twofa_device);
+                            match self.agent_client.select_list_item(win.id, twofa_device).await {
+                                Ok(true) => {
+                                    log::info!("Selected '{}' in device list", twofa_device);
+                                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                                    let _ = self.agent_client.click_button(win.id, "OK").await;
+                                    log::info!("Clicked OK on device selection — waiting for 2FA challenge");
+                                    self.twofa_device_selected = true;
                                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                                    continue;
-                                }
-                                Some(Err(e)) => {
-                                    log::error!("TOTP handler error: {} — will retry", e);
-                                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                                    continue;
+                                    return Ok(State::WaitingFor2fa);
                                 }
                                 _ => {
-                                    log::debug!("No TOTP handler matched — may be IB Key dialog");
+                                    log::debug!("No device list found — this is the actual 2FA challenge");
+                                    self.twofa_device_selected = true;
                                 }
                             }
                         } else {
-                            log::debug!("Waiting for 2FA approval on mobile device...");
+                            self.twofa_device_selected = true;
                         }
-                    } else if twofa_seen {
-                        // 2FA dialog was visible but now gone — confirm it's really gone
-                        // (not just a redraw) by waiting and re-checking
-                        log::info!("2FA dialog disappeared — confirming...");
-                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    }
 
-                        // Re-check: is the 2FA dialog really gone?
-                        let still_gone = match self.agent_client.list_windows().await {
-                            Ok(wins) => !wins.iter().any(|w| {
-                                let t = w.title.to_lowercase();
-                                t.contains("second factor") || t.contains("authentication")
-                            }),
-                            Err(_) => false, // Agent error — assume not gone
-                        };
-
-                        if still_gone {
-                            log::info!("2FA completed (confirmed — dialog gone for 3s)");
-                            return Ok(State::DismissingPopups);
-                        } else {
-                            log::warn!("2FA dialog reappeared after brief disappearance — still waiting");
-                            continue;
+                    // TOTP submission
+                    if self.config.twofa.has_secret {
+                        match self.handler_registry.dispatch(&self.agent_client, win).await {
+                            Some(Ok(crate::handlers::HandlerResult::Handled)) => {
+                                log::info!("TOTP code submitted, waiting for verification");
+                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                return Ok(State::DismissingPopups);
+                            }
+                            Some(Ok(crate::handlers::HandlerResult::Error(msg))) => {
+                                log::error!("TOTP entry failed: {} — will retry next tick", msg);
+                            }
+                            Some(Err(e)) => {
+                                log::error!("TOTP handler error: {} — will retry next tick", e);
+                            }
+                            _ => {
+                                log::debug!("No TOTP handler matched — may be IB Key dialog");
+                            }
                         }
-                    } else if !twofa_seen && start.elapsed() > grace_period {
-                        log::info!("No 2FA dialog appeared — proceeding without 2FA");
+                    }
+                } else if self.twofa_seen {
+                    // Dialog was visible but now gone — track disappearance for 3s confirmation
+                    if self.twofa_gone_at.is_none() {
+                        self.twofa_gone_at = Some(Instant::now());
+                        log::info!("2FA dialog disappeared — confirming (3s)...");
+                    } else if self.twofa_gone_at.unwrap().elapsed() > std::time::Duration::from_secs(3) {
+                        log::info!("2FA completed (confirmed — dialog gone for 3s)");
+                        return Ok(State::DismissingPopups);
+                    }
+                } else {
+                    // Never seen 2FA dialog — check grace period
+                    let grace_period = std::time::Duration::from_secs(10);
+                    if self.state_entered_at.elapsed() > grace_period {
+                        log::info!("No 2FA dialog appeared within {}s — proceeding without 2FA", grace_period.as_secs());
                         return Ok(State::DismissingPopups);
                     }
                 }
-                Err(e) => {
-                    consecutive_agent_failures += 1;
-                    if consecutive_agent_failures >= 10 {
-                        log::error!("Agent unreachable after {} consecutive failures — JVM may have crashed", consecutive_agent_failures);
-                        return Ok(State::Error("Agent unreachable during 2FA wait".into()));
-                    }
-                    log::debug!("Agent poll failed ({}x): {}", consecutive_agent_failures, e);
-                }
             }
-
-            if start.elapsed() > max_wait {
-                if self.config.twofa.relogin_after_timeout
-                    || self.config.twofa.timeout_action == crate::config::TwoFaTimeoutAction::Restart
-                {
-                    log::warn!(
-                        "2FA timed out after {}s — restarting login sequence (will retry until approved)",
-                        timeout_secs
-                    );
-                    return Ok(State::Restarting);
-                } else {
-                    log::error!("2FA timed out after {}s — shutting down", timeout_secs);
-                    return Ok(State::Shutdown);
+            Err(e) => {
+                self.consecutive_agent_failures += 1;
+                if self.consecutive_agent_failures >= 10 {
+                    log::error!("Agent unreachable after {} consecutive failures", self.consecutive_agent_failures);
+                    return Ok(State::Error("Agent unreachable during 2FA wait".into()));
                 }
+                log::debug!("Agent poll failed ({}x): {}", self.consecutive_agent_failures, e);
             }
-            tokio::time::sleep(poll_interval).await;
         }
+
+        // Timeout check
+        let timeout_secs = self.config.twofa.timeout_seconds;
+        if self.state_entered_at.elapsed() > std::time::Duration::from_secs(timeout_secs) {
+            if self.config.twofa.relogin_after_timeout
+                || self.config.twofa.timeout_action == crate::config::TwoFaTimeoutAction::Restart
+            {
+                log::warn!("2FA timed out after {}s — restarting", timeout_secs);
+                return Ok(State::Restarting);
+            } else {
+                log::error!("2FA timed out after {}s — shutting down", timeout_secs);
+                return Ok(State::Shutdown);
+            }
+        }
+
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        Ok(State::WaitingFor2fa)
     }
 
     async fn do_handle_session_conflict(&mut self) -> Result<State, StateMachineError> {
@@ -956,156 +905,143 @@ impl StateMachine {
         Ok(State::DismissingPopups)
     }
 
+    /// Single-step: dispatch popups once, check quiet period, return.
+    /// Quiet period tracked via popup_last_dismissed. Deadline via state_entered_at.
     async fn do_dismiss_popups(&mut self) -> Result<State, StateMachineError> {
-        log::info!("Dismissing startup popups");
+        if !self.supervisor.is_running() {
+            return Ok(State::Error("JVM exited during popup dismissal".into()));
+        }
+
+        // Event-driven blocking dialog detection (no I/O)
+        if self.observation.has_2fa_dialog() {
+            log::info!("2FA dialog detected via observation during popup dismissal");
+            return Ok(State::WaitingFor2fa);
+        }
+        if self.observation.has_relogin_dialog() {
+            log::info!("Re-login dialog detected via observation during popup dismissal");
+            self.handler_registry.reset();
+            return Ok(State::ReconnectingSession);
+        }
+        if self.observation.has_session_conflict() {
+            log::info!("Session conflict detected via observation during popup dismissal");
+            self.handler_registry.reset();
+            return Ok(State::HandlingSessionConflict);
+        }
+
+        // HTTP fallback for blocking dialogs (if observation not synced)
+        if !self.observation.synced {
+            if let Some(next_state) = self.check_blocking_dialog().await {
+                log::info!("Blocking dialog detected during popup dismissal — transitioning to {}", next_state);
+                if !matches!(next_state, State::WaitingFor2fa) {
+                    self.handler_registry.reset();
+                }
+                return Ok(next_state);
+            }
+        }
+
+        // One pass: dispatch popups via HTTP
+        let mut found_popup = false;
+        if let Ok(windows) = self.agent_client.list_windows().await {
+            for win in &windows {
+                if let Some(Ok(_)) = self.handler_registry.dispatch(&self.agent_client, win).await {
+                    log::info!("Dismissed popup: {}", win.title);
+                    found_popup = true;
+                    self.popup_last_dismissed = Some(Instant::now());
+                }
+            }
+        }
+
+        // Quiet period check: no popups for 5s means we're done
         let quiet_threshold = std::time::Duration::from_secs(5);
-        let max_wait = std::time::Duration::from_secs(30);
-        let poll_interval = std::time::Duration::from_millis(500);
-        let start = std::time::Instant::now();
-        let mut last_popup = std::time::Instant::now();
-
-        loop {
-            if !self.supervisor.is_running() {
-                return Ok(State::Error("JVM exited during popup dismissal".into()));
-            }
-
-            // --- Event-driven blocking dialog detection (no I/O) ---
-            if self.observation.has_2fa_dialog() {
-                log::info!("2FA dialog detected via observation during popup dismissal");
-                return Ok(State::WaitingFor2fa);
-            }
-            if self.observation.has_relogin_dialog() {
-                log::info!("Re-login dialog detected via observation during popup dismissal");
-                self.handler_registry.reset();
-                return Ok(State::ReconnectingSession);
-            }
-            if self.observation.has_session_conflict() {
-                log::info!("Session conflict detected via observation during popup dismissal");
-                self.handler_registry.reset();
-                return Ok(State::HandlingSessionConflict);
-            }
-
-            // HTTP fallback for blocking dialogs (if observation not synced)
-            if !self.observation.synced {
-                if let Some(next_state) = self.check_blocking_dialog().await {
-                    log::info!("Blocking dialog detected during popup dismissal — transitioning to {}", next_state);
-                    if !matches!(next_state, State::WaitingFor2fa) {
-                        self.handler_registry.reset();
-                    }
-                    return Ok(next_state);
-                }
-            }
-
-            // Dismiss popups via HTTP (still need agent interaction for clicking)
-            let mut found_popup = false;
-            if let Ok(windows) = self.agent_client.list_windows().await {
-                for win in &windows {
-                    if let Some(Ok(_)) = self.handler_registry.dispatch(&self.agent_client, win).await {
-                        log::info!("Dismissed popup: {}", win.title);
-                        found_popup = true;
-                        last_popup = std::time::Instant::now();
-                    }
-                }
-            }
-
-            if !found_popup && last_popup.elapsed() > quiet_threshold {
+        if !found_popup {
+            let quiet_since = self.popup_last_dismissed.unwrap_or(self.state_entered_at);
+            if quiet_since.elapsed() > quiet_threshold {
                 log::info!("No popups for {:?} — waiting for API readiness", quiet_threshold);
                 return Ok(State::WaitingForApiReady);
             }
-
-            if start.elapsed() > max_wait {
-                log::info!("Max popup dismissal time reached, waiting for API readiness");
-                return Ok(State::WaitingForApiReady);
-            }
-
-            tokio::time::sleep(poll_interval).await;
         }
+
+        // Max wait deadline
+        if self.state_entered_at.elapsed() > std::time::Duration::from_secs(30) {
+            log::info!("Max popup dismissal time reached, waiting for API readiness");
+            return Ok(State::WaitingForApiReady);
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        Ok(State::DismissingPopups)
     }
 
+    /// Single-step: check observation cache / HTTP for API readiness, return.
+    /// Deadline tracked via state_entered_at.
     async fn do_wait_for_api_ready(&mut self) -> Result<State, StateMachineError> {
-        let timeout = std::time::Duration::from_secs(90);
-        let poll = std::time::Duration::from_secs(2);
-        let start = std::time::Instant::now();
-
-        log::info!("Waiting for Gateway to reach connected state");
-
-        loop {
-            // Guard: JVM must still be running
-            if !self.supervisor.is_running() {
-                log::warn!("JVM exited while waiting for API readiness");
-                return Ok(State::Restarting);
-            }
-
-            // --- Event-driven fast path (observation cache, no I/O) ---
-            if self.observation.synced {
-                // Blocking dialog detection
-                if self.observation.has_2fa_dialog() {
-                    log::info!("2FA dialog detected via observation while waiting for API ready");
-                    return Ok(State::WaitingFor2fa);
-                }
-                if self.observation.has_relogin_dialog() {
-                    log::info!("Re-login detected via observation while waiting for API ready");
-                    return Ok(State::ReconnectingSession);
-                }
-                if self.observation.has_session_conflict() {
-                    log::info!("Session conflict detected via observation while waiting for API ready");
-                    return Ok(State::HandlingSessionConflict);
-                }
-
-                // API readiness: main gateway window exists with no login button
-                // (login button was cleared after credential submission).
-                // This is the IBC pattern: no login button = Gateway authenticated.
-                if let Some(main) = self.observation.main_gateway_window() {
-                    if !main.has_login_button {
-                        log::info!("Gateway ready via observation (no login button, class={}) — proceeding to configure", main.class);
-                        return Ok(State::ConfiguringApi);
-                    } else {
-                        log::debug!("WaitingForApiReady: login button still present — auth in progress");
-                    }
-                }
-            }
-
-            // --- HTTP fallback (when observation not synced) ---
-            if !self.observation.synced {
-                if let Some(next_state) = self.check_blocking_dialog().await {
-                    log::info!("Blocking dialog detected while waiting for API — transitioning to {}", next_state);
-                    return Ok(next_state);
-                }
-
-                if let Ok(windows) = self.agent_client.list_windows().await {
-                    let main_window = windows.iter().find(|w| {
-                        let t = w.title.to_lowercase();
-                        t.contains("ib gateway") || t.contains("ibkr gateway")
-                    });
-
-                    if let Some(main) = main_window {
-                        use crate::types::WindowId;
-                        let has_login_fields = if let Ok(components) = self.agent_client.dump_components(WindowId(main.id.0)).await {
-                            components.get("textfields")
-                                .and_then(|t| t.as_array())
-                                .map(|a| !a.is_empty())
-                                .unwrap_or(false)
-                        } else {
-                            false
-                        };
-
-                        if !has_login_fields {
-                            log::info!("Gateway ready (HTTP fallback, class={}) — proceeding to configure", main.class);
-                            return Ok(State::ConfiguringApi);
-                        }
-                    }
-                }
-            }
-
-            if start.elapsed() > timeout {
-                log::warn!("Gateway not ready after {:?} — proceeding to ConfiguringApi anyway", timeout);
-                return Ok(State::ConfiguringApi);
-            }
-
-            // Process commands/queries while waiting
-            self.process_queries().await;
-            tokio::time::sleep(poll).await;
+        if !self.supervisor.is_running() {
+            log::warn!("JVM exited while waiting for API readiness");
+            return Ok(State::Restarting);
         }
+
+        // Event-driven fast path (observation cache, no I/O)
+        if self.observation.synced {
+            if self.observation.has_2fa_dialog() {
+                log::info!("2FA dialog detected via observation while waiting for API ready");
+                return Ok(State::WaitingFor2fa);
+            }
+            if self.observation.has_relogin_dialog() {
+                log::info!("Re-login detected via observation while waiting for API ready");
+                return Ok(State::ReconnectingSession);
+            }
+            if self.observation.has_session_conflict() {
+                log::info!("Session conflict detected via observation while waiting for API ready");
+                return Ok(State::HandlingSessionConflict);
+            }
+
+            if let Some(main) = self.observation.main_gateway_window() {
+                if !main.has_login_button {
+                    log::info!("Gateway ready via observation (no login button, class={}) — proceeding to configure", main.class);
+                    return Ok(State::ConfiguringApi);
+                }
+            }
+        }
+
+        // HTTP fallback (when observation not synced)
+        if !self.observation.synced {
+            if let Some(next_state) = self.check_blocking_dialog().await {
+                log::info!("Blocking dialog detected while waiting for API — transitioning to {}", next_state);
+                return Ok(next_state);
+            }
+
+            if let Ok(windows) = self.agent_client.list_windows().await {
+                let main_window = windows.iter().find(|w| {
+                    let t = w.title.to_lowercase();
+                    t.contains("ib gateway") || t.contains("ibkr gateway")
+                });
+
+                if let Some(main) = main_window {
+                    use crate::types::WindowId;
+                    let has_login_fields = if let Ok(components) = self.agent_client.dump_components(WindowId(main.id.0)).await {
+                        components.get("textfields")
+                            .and_then(|t| t.as_array())
+                            .map(|a| !a.is_empty())
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
+
+                    if !has_login_fields {
+                        log::info!("Gateway ready (HTTP fallback, class={}) — proceeding to configure", main.class);
+                        return Ok(State::ConfiguringApi);
+                    }
+                }
+            }
+        }
+
+        // Deadline
+        if self.state_entered_at.elapsed() > std::time::Duration::from_secs(90) {
+            log::warn!("Gateway not ready after 90s — proceeding to ConfiguringApi anyway");
+            return Ok(State::ConfiguringApi);
+        }
+
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        Ok(State::WaitingForApiReady)
     }
 
     async fn do_configure_api(&mut self) -> Result<State, StateMachineError> {
@@ -1165,8 +1101,9 @@ impl StateMachine {
         }
     }
 
+    /// Single-step: check observation cache for dialogs, manage socat/client IDs.
+    /// Events provide instant wakeup for dialog detection. Reconciliation poll at 10s.
     async fn do_connected(&mut self) -> Result<State, StateMachineError> {
-        log::debug!("Gateway connected — monitoring loop tick");
 
         // Record the main window class on first entry — used to detect silent session loss.
         // Uses observation cache (event-driven) with HTTP fallback.
@@ -1328,31 +1265,20 @@ impl StateMachine {
         Ok(State::Connected)
     }
 
-    /// Graduated session recovery: handles RE-LOGIN dialogs with configurable
-    /// attempts before falling back to a full JVM restart.
-    ///
-    /// Flow:
-    ///   1. Wait 30s (transient recovery window — Gateway may self-recover)
-    ///   2. If dialog gone → return to Connected
-    ///   3. If dialog still present → click "Re-login"
-    ///   4. If re-login succeeds → WaitingForLogin → auth flow → Connected
-    ///   5. If re-login fails (dialog reappears) → increment attempts
-    ///   6. After max attempts → click Cancel, wait 60s, restart JVM
+    /// Single-step graduated session recovery.
+    /// Phase 1 (elapsed < 30s): wait for transient recovery.
+    /// Phase 2 (elapsed >= 30s): check dialog, click Re-login.
+    /// Phase 3 (attempts > max): click Cancel, reauth or restart.
+    /// relogin_attempts incremented in apply_transition() on state entry.
     async fn do_reconnecting_session(&mut self) -> Result<State, StateMachineError> {
-        self.relogin_attempts += 1;
         let max = self.config.timing.relogin_max_attempts;
-        log::info!(
-            "ReconnectingSession: attempt {}/{} — connection lost",
-            self.relogin_attempts, max
-        );
 
+        // Phase 3: exhausted attempts — cancel and fallback
         if self.relogin_attempts > max {
-            // Exhausted attempts — cancel dialog and restart JVM
             log::warn!(
-                "Re-login failed after {} attempts — cancelling and restarting JVM",
+                "Re-login failed after {} attempts — cancelling",
                 self.relogin_attempts
             );
-            // Find and click Cancel on the re-login dialog
             if let Ok(windows) = self.agent_client.list_windows().await {
                 for w in &windows {
                     let t = w.title.to_lowercase();
@@ -1364,23 +1290,48 @@ impl StateMachine {
             self.handler_registry.reset();
             self.abort_client_id_task();
             self.relogin_attempts = 0;
-            // Wait before restart to avoid rapid cycling
-            log::info!("Waiting 60s before restarting JVM...");
-            for _ in 0..30 {
-                self.process_queries().await;
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+            use crate::config::ReloginFailureAction;
+            match self.config.timing.relogin_failure_action {
+                ReloginFailureAction::Restart => {
+                    log::info!("relogin_failure_action=restart — restarting JVM");
+                    return Ok(State::Restarting);
+                }
+                ReloginFailureAction::Reauth => {
+                    if self.observation.has_login_form() {
+                        log::info!("Login form available after Cancel — re-authenticating");
+                        return Ok(State::WaitingForLogin);
+                    }
+                    if let Ok(windows) = self.agent_client.list_windows().await {
+                        let has_gateway = windows.iter().any(|w| {
+                            let t = w.title.to_lowercase();
+                            t.contains("ib gateway") || t.contains("ibkr gateway")
+                        });
+                        if has_gateway {
+                            log::info!("Gateway window present after Cancel — re-authenticating");
+                            return Ok(State::WaitingForLogin);
+                        }
+                    }
+                    log::warn!("No Gateway window after Cancel — restarting JVM");
+                    return Ok(State::Restarting);
+                }
             }
-            return Ok(State::Restarting);
         }
 
-        // Wait 30s for transient recovery — Gateway may self-recover
-        log::info!("Waiting 30s for transient recovery...");
-        for _ in 0..15 {
-            self.process_queries().await;
+        // Phase 1: transient recovery wait (first 30s)
+        if self.state_entered_at.elapsed() < std::time::Duration::from_secs(30) {
+            log::debug!(
+                "ReconnectingSession: waiting for transient recovery ({:.0}s/30s, attempt {}/{})",
+                self.state_entered_at.elapsed().as_secs_f64(),
+                self.relogin_attempts, max
+            );
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            return Ok(State::ReconnectingSession);
         }
 
-        // Check if dialog is still there
+        // Phase 2: check dialog, click Re-login
         if let Ok(windows) = self.agent_client.list_windows().await {
             let dialog = windows.iter().find(|w| {
                 let t = w.title.to_lowercase();
@@ -1388,40 +1339,36 @@ impl StateMachine {
             });
 
             if dialog.is_none() {
-                // Dialog disappeared — Gateway self-recovered
                 log::info!("RE-LOGIN dialog disappeared — Gateway self-recovered");
                 self.relogin_attempts = 0;
                 return Ok(State::Connected);
             }
 
-            // Still showing — click Re-login
             if let Some(d) = dialog {
-                log::info!("Clicking Re-login to attempt reconnection (attempt {})", self.relogin_attempts);
+                log::info!("Clicking Re-login (attempt {}/{})", self.relogin_attempts, max);
                 let _ = self.agent_client.click_button(d.id, "Re-login").await;
                 self.handler_registry.reset();
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                // Auth flow will pick up from here. If it fails and we get another
-                // RE-LOGIN dialog, check_blocking_dialog routes back here with
-                // relogin_attempts incremented.
                 return Ok(State::WaitingForLogin);
             }
         }
 
-        // Couldn't check windows — try again next tick
+        // Couldn't check windows — retry next tick
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         Ok(State::ReconnectingSession)
     }
 
+    /// Single-step: wait for restart delay (deadline-based), then kill and relaunch.
     async fn do_restart(&mut self) -> Result<State, StateMachineError> {
         let delay = self.config.timing.restart_delay_secs;
-        if delay > 0 {
-            log::info!("Waiting {}s before restarting Gateway (giving time to self-recover)", delay);
-            let start = std::time::Instant::now();
-            while start.elapsed().as_secs() < delay {
-                self.process_queries().await;
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            }
+
+        // Phase 1: delay before restart (dashboard stays responsive via outer loop)
+        if delay > 0 && self.state_entered_at.elapsed().as_secs() < delay {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            return Ok(State::Restarting);
         }
 
+        // Phase 2: kill and restart
         log::info!("Restarting IB Gateway");
 
         self.abort_client_id_task();
@@ -1456,14 +1403,8 @@ impl StateMachine {
         Ok(State::Launching)
     }
 
+    /// Single-step: check IB status, return. Commands/queries handled by outer loop.
     async fn do_waiting_for_ib(&mut self) -> Result<State, StateMachineError> {
-        log::info!("Waiting for IB system to become available ({})", self.ib_status.reason);
-
-        // Process queries and commands so dashboard stays responsive
-        self.process_queries().await;
-        self.process_commands_nonblocking().await;
-
-        // Check if IB became available
         if self.ib_status.available {
             log::info!("IB system is now available — resuming");
             if let Some(return_state) = self.ib_status.return_state.take() {
@@ -1472,12 +1413,7 @@ impl StateMachine {
             return Ok(State::Init);
         }
 
-        // Poll with query processing so dashboard stays responsive
-        for _ in 0..5 {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            self.process_queries().await;
-            self.process_commands_nonblocking().await;
-        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         Ok(State::WaitingForIB)
     }
 

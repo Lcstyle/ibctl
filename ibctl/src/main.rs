@@ -180,13 +180,12 @@ async fn async_main(config: ValidConfig) -> Result<(), Box<dyn std::error::Error
         tasks.spawn(cold_restart_fut);
     }
 
-    // Start agent event stream reader (NDJSON over {socket}.events)
-    let event_socket_path = format!("{}.events", config.agent.socket_path);
+    // Start agent event stream reader (SUBSCRIBE on same socket — multiplexed protocol v2)
     let event_rx = event_stream::spawn_event_reader(
-        std::path::PathBuf::from(&event_socket_path),
+        std::path::PathBuf::from(&config.agent.socket_path),
         64, // bounded channel capacity
     );
-    log::info!("Agent event stream reader started for {}", event_socket_path);
+    log::info!("Agent event stream reader started for {}", config.agent.socket_path);
 
     // Create and run the state machine
     let channels = state_machine::Channels {

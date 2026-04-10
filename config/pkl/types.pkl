@@ -244,6 +244,9 @@ class TimingConfig {
   restartDelaySecs: UInt = 90
   /// Max re-login attempts before cancel + restart (env: IBCTL_RELOGIN_ATTEMPTS)
   reloginMaxAttempts: UInt = 1
+  /// Action after exhausting re-login attempts: "reauth" re-uses the login form,
+  /// "restart" kills and relaunches the JVM. (env: IBCTL_RELOGIN_FAILURE_ACTION)
+  reloginFailureAction: "reauth"|"restart" = "reauth"
 }
 
 // --- Container Layer ---

@@ -19,34 +19,23 @@ public class IbctlAgent {
             } catch (NumberFormatException ignored) {}
         }
 
+        // Install AWT window monitor before starting server
+        WindowMonitor.install();
+
+        // Start multiplexed server — single socket handles both HTTP and event streams
         Thread serverThread = new Thread(() -> {
             try {
-                HttpApi.start(socketPath);
+                MultiplexedServer.start(socketPath);
             } catch (Exception e) {
-                System.err.println("[ibctl-agent] Failed to start HTTP server: " + e.getMessage());
+                System.err.println("[ibctl-agent] Failed to start server: " + e.getMessage());
             }
         });
         serverThread.setDaemon(true);
-        serverThread.setName("ibctl-agent-http");
+        serverThread.setName("ibctl-agent-server");
         serverThread.start();
 
-        WindowMonitor.install();
-
-        // Start event stream on a dedicated socket ({socketPath}.events)
-        String eventSocketPath = socketPath + ".events";
-        Thread eventThread = new Thread(() -> {
-            try {
-                EventStream.start(eventSocketPath);
-            } catch (Exception e) {
-                System.err.println("[ibctl-agent] Failed to start event stream: " + e.getMessage());
-            }
-        });
-        eventThread.setDaemon(true);
-        eventThread.setName("ibctl-agent-events");
-        eventThread.start();
-
         System.out.println("[ibctl-agent] Agent initialized, listening on " + socketPath);
-        System.out.println("[ibctl-agent] Event stream on " + eventSocketPath);
+        System.out.println("[ibctl-agent] Protocol v2: HTTP + SUBSCRIBE on single socket");
     }
 
     public static String getSocketPath() {

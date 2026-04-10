@@ -121,6 +121,7 @@ class TimingConfig(BaseModel):
     login_dialog_timeout_secs: int = Field(default=120, ge=0)
     restart_delay_secs: int = Field(default=90, ge=0)
     relogin_max_attempts: int = Field(default=1, ge=0)
+    relogin_failure_action: Literal["reauth", "restart"] = "reauth"
 
 
 class SiteConfig(BaseModel):
@@ -201,6 +202,7 @@ class IbctlConfig(BaseModel):
             "gateway.paper_socat_port": self.gateway.paper_socat_port,
             "command_server.port": self.command_server.port,
             "command_server.paper_port": self.command_server.paper_port,
+            "dashboard.port": self.dashboard.port,
         }
         seen: dict[int, str] = {}
         for name, port in ports.items():
@@ -311,8 +313,11 @@ ENV_MAP: dict[str, str] = {
     "timing.login_dialog_timeout_secs": "IBCTL_LOGIN_TIMEOUT",
     "timing.restart_delay_secs": "IBCTL_RESTART_DELAY",
     "timing.relogin_max_attempts": "IBCTL_RELOGIN_ATTEMPTS",
+    "timing.relogin_failure_action": "IBCTL_RELOGIN_FAILURE_ACTION",
     # Dashboard
     "dashboard.enabled": "IBCTL_DASHBOARD_ENABLED",
+    "dashboard.port": "IBCTL_DASHBOARD_PORT",
+    "dashboard.debug_mode": "IBCTL_DEBUG_MODE",
     "dashboard.github_oauth_enabled": "IBCTL_GITHUB_OAUTH_ENABLED",
     "dashboard.oidc_enabled": "IBCTL_OIDC_ENABLED",
     "dashboard.oidc_issuer": "IBCTL_OIDC_ISSUER",

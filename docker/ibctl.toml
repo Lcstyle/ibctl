@@ -103,6 +103,10 @@ ttl_seconds = 600
 level = "info"
 # directory for persistent log files (set via IBCTL_LOG_DIR)
 log_dir = ""
+# use futures market session dates for log filenames (env: IBCTL_FUTURES_SESSION_LOGGING)
+futures_session_logging = false
+# hour (0-23 ET) when futures session reopens (env: IBCTL_SESSION_REOPEN_HOUR)
+session_reopen_hour = 18
 
 [timing]
 # delay between UI actions in config dialog
@@ -125,6 +129,8 @@ login_dialog_timeout_secs = 120
 restart_delay_secs = 90
 # re-login attempts before cancel + restart JVM (0 = always cancel)
 relogin_max_attempts = 1
+# action after exhausting re-login attempts: "reauth" or "restart" (env: IBCTL_RELOGIN_FAILURE_ACTION)
+relogin_failure_action = "reauth"
 
 [site]
 # "primary" or "standby" (env: IBCTL_SITE_ROLE)

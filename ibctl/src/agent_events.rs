@@ -49,6 +49,33 @@ pub enum AgentEvent {
         seq: u64,
         ts: u64,
     },
+    /// Wave 3: Login form is ready with field details.
+    LoginFormReady {
+        seq: u64,
+        window_id: u64,
+        text_field_count: u32,
+        password_field_count: u32,
+        login_button: Option<String>,
+        selected_mode: Option<String>,
+        ts: u64,
+    },
+    /// Wave 3: 2FA prompt with dialog structure details.
+    TwofaPrompt {
+        seq: u64,
+        window_id: u64,
+        prompt_type: String,
+        devices: Vec<String>,
+        ts: u64,
+    },
+    /// Wave 3: Error/warning dialog with message and buttons.
+    ErrorDialog {
+        seq: u64,
+        window_id: u64,
+        window_title: String,
+        message: Option<String>,
+        buttons: Vec<String>,
+        ts: u64,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -293,6 +320,46 @@ mod tests {
         obs.window_closed(2, 3);
         assert_eq!(obs.windows.len(), 1);
         assert!(!obs.has_2fa_dialog());
+    }
+
+    #[test]
+    fn test_deserialize_login_form_ready() {
+        let json = r#"{"type":"login_form_ready","seq":5,"window_id":123,"text_field_count":1,"password_field_count":1,"login_button":"Log In","selected_mode":"Live Trading","ts":1000}"#;
+        let event: AgentEvent = serde_json::from_str(json).unwrap();
+        match event {
+            AgentEvent::LoginFormReady { login_button, selected_mode, text_field_count, .. } => {
+                assert_eq!(login_button, Some("Log In".into()));
+                assert_eq!(selected_mode, Some("Live Trading".into()));
+                assert_eq!(text_field_count, 1);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_twofa_prompt() {
+        let json = r#"{"type":"twofa_prompt","seq":6,"window_id":456,"prompt_type":"device_selection","devices":["IB Key","SMS"],"ts":1000}"#;
+        let event: AgentEvent = serde_json::from_str(json).unwrap();
+        match event {
+            AgentEvent::TwofaPrompt { prompt_type, devices, .. } => {
+                assert_eq!(prompt_type, "device_selection");
+                assert_eq!(devices, vec!["IB Key", "SMS"]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_error_dialog() {
+        let json = r#"{"type":"error_dialog","seq":7,"window_id":789,"window_title":"Warning","message":"Paper trading account","buttons":["OK"],"ts":1000}"#;
+        let event: AgentEvent = serde_json::from_str(json).unwrap();
+        match event {
+            AgentEvent::ErrorDialog { message, buttons, .. } => {
+                assert_eq!(message, Some("Paper trading account".into()));
+                assert_eq!(buttons, vec!["OK"]);
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]

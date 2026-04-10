@@ -210,6 +210,21 @@ pub struct StateMachine {
     /// Set true after device is selected and OK clicked. Reset on state transitions
     /// that start a new login cycle.
     pub(super) twofa_device_selected: bool,
+    /// Whether the 2FA dialog has been observed during the current WaitingFor2fa state.
+    /// Reset on state entry. Used to distinguish "no 2FA needed" from "2FA completed".
+    pub(super) twofa_seen: bool,
+    /// When the 2FA dialog first disappeared after being seen. Used for 3s confirmation
+    /// delay to avoid reacting to transient redraws. Reset when dialog reappears.
+    pub(super) twofa_gone_at: Option<Instant>,
+    /// Timestamp when the current state was entered. Used for deadline-based timeouts
+    /// instead of internal loops. Reset on every state transition in apply_transition().
+    pub(super) state_entered_at: Instant,
+    /// Last popup dismissed in DismissingPopups state. Tracks quiet period to detect
+    /// when all popups are gone. Reset on state entry.
+    pub(super) popup_last_dismissed: Option<Instant>,
+    /// Consecutive agent communication failures within the current state.
+    /// Reset on state entry. Used for error escalation (10 failures = give up).
+    pub(super) consecutive_agent_failures: u32,
     /// Agent event stream receiver — window open/close events from the Java agent.
     pub(super) event_rx: Option<mpsc::Receiver<crate::agent_events::AgentEvent>>,
     /// Centralized UI observation cache — updated by events and targeted queries.
@@ -259,6 +274,11 @@ impl StateMachine {
             relogin_attempts: 0,
             connected_window_class: None,
             twofa_device_selected: false,
+            twofa_seen: false,
+            twofa_gone_at: None,
+            state_entered_at: Instant::now(),
+            popup_last_dismissed: None,
+            consecutive_agent_failures: 0,
             stats: Stats::default(),
             snapshot_tx,
             snapshot_version: 0,

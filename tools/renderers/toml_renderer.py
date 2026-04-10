@@ -244,6 +244,18 @@ def render_docker_toml(cfg) -> str:
     log.add("level", rt.logging.level)
     log.add(tomlkit.comment("directory for persistent log files (set via IBCTL_LOG_DIR)"))
     log.add("log_dir", rt.logging.logDir)
+    log.add(
+        tomlkit.comment(
+            "use futures market session dates for log filenames (env: IBCTL_FUTURES_SESSION_LOGGING)"
+        )
+    )
+    log.add("futures_session_logging", rt.logging.futuresSessionLogging)
+    log.add(
+        tomlkit.comment(
+            "hour (0-23 ET) when futures session reopens (env: IBCTL_SESSION_REOPEN_HOUR)"
+        )
+    )
+    log.add("session_reopen_hour", int(rt.logging.sessionReopenHour))
     doc.add("logging", log)
     doc.add(tomlkit.nl())
 
@@ -277,6 +289,12 @@ def render_docker_toml(cfg) -> str:
         )
     )
     tm.add("relogin_max_attempts", int(rt.timing.reloginMaxAttempts))
+    tm.add(
+        tomlkit.comment(
+            'action after exhausting re-login attempts: "reauth" or "restart" (env: IBCTL_RELOGIN_FAILURE_ACTION)'
+        )
+    )
+    tm.add("relogin_failure_action", rt.timing.reloginFailureAction)
     doc.add("timing", tm)
     doc.add(tomlkit.nl())
 

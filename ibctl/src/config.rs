@@ -395,9 +395,25 @@ pub struct TimingConfig {
     pub restart_delay_secs: u64,
     /// Max re-login attempts before cancelling and restarting JVM.
     /// On first attempt, waits 30s then clicks Re-login. If it fails again
-    /// (up to this limit), clicks Cancel, waits 60s, restarts JVM.
+    /// (up to this limit), clicks Cancel and takes the relogin_failure_action.
     /// Default: 1
     pub relogin_max_attempts: u32,
+    /// Action after exhausting re-login attempts: "reauth" (default) re-uses
+    /// the existing login form without killing the JVM; "restart" kills and
+    /// relaunches the JVM for a clean slate.
+    /// Default: "reauth"
+    #[serde(rename = "relogin_failure_action")]
+    pub relogin_failure_action: ReloginFailureAction,
+}
+
+/// What to do after all re-login attempts fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReloginFailureAction {
+    /// Re-authenticate using the existing login form (no JVM restart).
+    Reauth,
+    /// Kill and restart the JVM for a clean slate.
+    Restart,
 }
 
 // --- Default implementations ---
@@ -415,6 +431,7 @@ impl Default for TimingConfig {
             login_dialog_timeout_secs: 120,
             restart_delay_secs: 90,
             relogin_max_attempts: 1,
+            relogin_failure_action: ReloginFailureAction::Reauth,
         }
     }
 }
@@ -641,12 +658,15 @@ impl Config {
                 other => log::warn!("Unknown IBCTL_SESSION_ACTION '{}', keeping default", other),
             }
         }
-        if let Ok(v) = std::env::var("IBCTL_ACCEPT_INCOMING") {
+        // IBCTL_ACCEPT_INCOMING takes precedence; fall back to IBC-compatible TWS_ACCEPT_INCOMING
+        if let Ok(v) = std::env::var("IBCTL_ACCEPT_INCOMING")
+            .or_else(|_| std::env::var("TWS_ACCEPT_INCOMING"))
+        {
             match v.to_lowercase().as_str() {
                 "accept" => self.session.accept_incoming = AcceptIncoming::Accept,
                 "reject" => self.session.accept_incoming = AcceptIncoming::Reject,
                 "manual" => self.session.accept_incoming = AcceptIncoming::Manual,
-                other => log::warn!("Unknown IBCTL_ACCEPT_INCOMING '{}', keeping default", other),
+                other => log::warn!("Unknown ACCEPT_INCOMING '{}', keeping default", other),
             }
         }
         if let Ok(v) = std::env::var("TWS_COLD_RESTART") {
@@ -674,6 +694,13 @@ impl Config {
         }
         if let Some(v) = std::env::var("IBCTL_RELOGIN_ATTEMPTS").ok().and_then(|s| s.parse().ok()) {
             self.timing.relogin_max_attempts = v;
+        }
+        if let Ok(v) = std::env::var("IBCTL_RELOGIN_FAILURE_ACTION") {
+            match v.to_lowercase().as_str() {
+                "reauth" => self.timing.relogin_failure_action = ReloginFailureAction::Reauth,
+                "restart" => self.timing.relogin_failure_action = ReloginFailureAction::Restart,
+                _ => log::warn!("Invalid IBCTL_RELOGIN_FAILURE_ACTION '{}' — must be 'reauth' or 'restart'", v),
+            }
         }
 
         // Agent

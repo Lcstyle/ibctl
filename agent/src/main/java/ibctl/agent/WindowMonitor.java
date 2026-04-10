@@ -43,10 +43,10 @@ public class WindowMonitor {
                     openWindows.add(window);
                 }
                 notifyWaiters(window);
-                EventStream.windowOpened(window);
+                MultiplexedServer.windowOpened(window);
             } else if (we.getID() == WindowEvent.WINDOW_CLOSED) {
                 openWindows.remove(window);
-                EventStream.windowClosed(window);
+                MultiplexedServer.windowClosed(window);
             }
         }, AWTEvent.WINDOW_EVENT_MASK);
     }

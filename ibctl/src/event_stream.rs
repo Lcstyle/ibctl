@@ -1,8 +1,8 @@
-//! NDJSON event stream reader for the Java agent's event socket.
+//! NDJSON event stream reader for the Java agent's multiplexed socket.
 //!
-//! Spawns a background task that connects to `{agent_socket}.events`,
-//! reads newline-delimited JSON events, and feeds them into a bounded
-//! mpsc channel for the state machine's select! loop.
+//! Connects to the agent's Unix domain socket, sends `SUBSCRIBE\n` to
+//! switch to event stream mode, then reads newline-delimited JSON events
+//! into a bounded mpsc channel for the state machine's select! loop.
 //!
 //! Reconnects automatically with exponential backoff on disconnect.
 //! The event stream is additive — the state machine still works
@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 
@@ -32,7 +32,13 @@ pub fn spawn_event_reader(
 
         loop {
             match UnixStream::connect(&socket_path).await {
-                Ok(stream) => {
+                Ok(mut stream) => {
+                    // Send SUBSCRIBE to switch connection to event stream mode
+                    if let Err(e) = stream.write_all(b"SUBSCRIBE\n").await {
+                        log::warn!("Failed to send SUBSCRIBE: {}", e);
+                        continue;
+                    }
+
                     backoff_ms = 100; // reset on successful connect
                     log::info!("Connected to agent event stream at {}", socket_path.display());
 
@@ -98,19 +104,26 @@ mod tests {
     async fn test_event_reader_parses_ndjson() {
         // Create a temp UDS path
         let dir = tempfile::tempdir().unwrap();
-        let sock_path = dir.path().join("test.sock.events");
+        let sock_path = dir.path().join("test.sock");
 
-        // Start a fake event server
+        // Start a fake multiplexed server that expects SUBSCRIBE
         let listener = UnixListener::bind(&sock_path).unwrap();
-        let server_path = sock_path.clone();
 
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            let mut writer = tokio::io::BufWriter::new(stream);
-            use tokio::io::AsyncWriteExt;
+            let (read_half, write_half) = stream.into_split();
+
+            // Read the SUBSCRIBE line from client
+            let mut reader = tokio::io::BufReader::new(read_half);
+            let mut line = String::new();
+            use tokio::io::AsyncBufReadExt as _;
+            reader.read_line(&mut line).await.unwrap();
+            assert!(line.starts_with("SUBSCRIBE"), "Expected SUBSCRIBE, got: {}", line);
+
+            let mut writer = tokio::io::BufWriter::new(write_half);
 
             // Send hello + snapshot + window_opened
-            writer.write_all(b"{\"type\":\"hello\",\"protocol_version\":1,\"agent_tick_ms\":50,\"ts\":1000}\n").await.unwrap();
+            writer.write_all(b"{\"type\":\"hello\",\"protocol_version\":2,\"agent_tick_ms\":50,\"ts\":1000}\n").await.unwrap();
             writer.write_all(b"{\"type\":\"snapshot\",\"seq\":1,\"windows\":[],\"ts\":1000}\n").await.unwrap();
             writer.write_all(b"{\"type\":\"window_opened\",\"seq\":2,\"window_id\":42,\"window_title\":\"IBKR Gateway\",\"window_class\":\"ibgateway.az\",\"has_login_button\":true,\"bounds\":{\"x\":0,\"y\":0,\"width\":800,\"height\":600},\"ts\":1001}\n").await.unwrap();
             writer.flush().await.unwrap();
@@ -127,7 +140,7 @@ mod tests {
             std::time::Duration::from_secs(2),
             rx.recv(),
         ).await.unwrap().unwrap();
-        assert!(matches!(hello, AgentEvent::Hello { protocol_version: 1, .. }));
+        assert!(matches!(hello, AgentEvent::Hello { protocol_version: 2, .. }));
 
         let snapshot = rx.recv().await.unwrap();
         assert!(matches!(snapshot, AgentEvent::Snapshot { .. }));
