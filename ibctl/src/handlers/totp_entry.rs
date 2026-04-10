@@ -83,14 +83,57 @@ impl DialogHandler for TotpEntryHandler {
                 .await
                 .map_err(HandlerError::AgentError)?;
 
-            // Submit by pressing Enter
-            client
-                .send_key(window.id, "Enter")
+            // Prefer the explicit OK/submit button. Some Gateway builds do not
+            // accept Enter as form submission on the 2FA challenge dialog.
+            let submitted = client
+                .click_button(window.id, "OK")
                 .await
                 .map_err(HandlerError::AgentError)?;
+
+            if !submitted {
+                log::debug!("No OK button found in 2FA dialog — falling back to Enter");
+                client
+                    .send_key(window.id, "Enter")
+                    .await
+                    .map_err(HandlerError::AgentError)?;
+            }
 
             log::info!("2FA code submitted");
             Ok(HandlerResult::Handled)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::WindowId;
+
+    #[test]
+    fn test_can_handle_second_factor_window() {
+        let handler = TotpEntryHandler::new("TWOFACTOR_CODE".to_string(), TotpProvider::Oathtool);
+        let window = WindowInfo {
+            id: WindowId(1),
+            title: "Second Factor Authentication".to_string(),
+            class: "dialog".to_string(),
+            bounds: None,
+            visible: true,
+        };
+
+        assert!(handler.can_handle(&window));
+    }
+
+    #[test]
+    fn test_can_handle_security_code_window() {
+        let handler = TotpEntryHandler::new("TWOFACTOR_CODE".to_string(), TotpProvider::Oathtool);
+        let window = WindowInfo {
+            id: WindowId(1),
+            title: "Security Code".to_string(),
+            class: "dialog".to_string(),
+            bounds: None,
+            visible: true,
+        };
+
+        assert!(handler.can_handle(&window));
     }
 }

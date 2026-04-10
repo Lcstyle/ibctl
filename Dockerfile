@@ -20,6 +20,7 @@ FROM ubuntu:24.04 AS setup
 
 ARG IB_GATEWAY_VERSION
 ARG IB_GATEWAY_CHANNEL
+ARG TARGETARCH
 ARG DEBIAN_FRONTEND=noninteractive
 ARG IB_GATEWAY_FILE="ibgateway-${IB_GATEWAY_VERSION}-standalone-linux-x64.sh"
 ARG IB_GATEWAY_REPO="https://github.com/gnzsnz/ib-gateway-docker"
@@ -34,8 +35,13 @@ WORKDIR /tmp/setup
 RUN apt-get update -y \
     && apt-get install --no-install-recommends --yes curl ca-certificates \
     && apt-get clean && rm -rf /var/lib/apt/lists/* \
-    # aarch64: download Zulu JDK
-    && if [ "$(uname -m)" = "aarch64" ]; then \
+    # Validate supported architectures
+    && if [ "${TARGETARCH}" != "amd64" ] && [ "${TARGETARCH}" != "arm64" ]; then \
+        echo "Unsupported Docker target architecture: ${TARGETARCH}" >&2; \
+        exit 1; \
+    fi \
+    # arm64: download Zulu JDK
+    && if [ "${TARGETARCH}" = "arm64" ]; then \
         curl -sSLO ${ZULU_URL} && \
         tar -xzf ${ZULU_FILE} -C /usr/local/ && \
         ln -s /usr/local/${ZULU_NAME} /usr/local/zulu17; \
@@ -46,7 +52,7 @@ RUN apt-get update -y \
     && sha256sum --check ./${IB_GATEWAY_FILE}.sha256 \
     && chmod a+x ./${IB_GATEWAY_FILE} \
     # Install IB Gateway
-    && if [ "$(uname -m)" = "aarch64" ]; then \
+    && if [ "${TARGETARCH}" = "arm64" ]; then \
         app_java_home=/usr/local/zulu17 ./${IB_GATEWAY_FILE} -q -dir /root/Jts/ibgateway/${IB_GATEWAY_VERSION}; \
     else \
         ./${IB_GATEWAY_FILE} -q -dir /root/Jts/ibgateway/${IB_GATEWAY_VERSION}; \

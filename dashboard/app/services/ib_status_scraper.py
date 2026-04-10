@@ -14,7 +14,6 @@ from __future__ import annotations
 import logging
 import re
 import socket
-import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, time
 from enum import Enum
@@ -192,38 +191,49 @@ class IBStatusScraper:
         return self._session
 
     @staticmethod
-    def _ping(host: str, timeout: int = 3) -> bool:
-        """Ping a host via ICMP. Tests both DNS resolution and network routing."""
+    def _check_host(host: str, port: int = 443, timeout: int = 3) -> bool:
+        """Check host reachability via TCP socket.
+
+        Works in environments where ICMP ping is blocked (e.g. Kubernetes).
+        ConnectionRefusedError is treated as reachable — the host responds,
+        the port just isn't open (expected for IB backend servers).
+        """
         try:
-            result = subprocess.run(
-                ["ping", "-c", "1", "-W", str(timeout), host],
-                capture_output=True, timeout=timeout + 2,
-            )
-            return result.returncode == 0
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            with socket.create_connection((host, port), timeout=timeout):
+                return True
+        except ConnectionRefusedError:
+            logger.debug("TCP probe to %s:%d was refused; treating host as reachable", host, port)
+            return True  # Host is up, port closed — routing works
+        except socket.gaierror as e:
+            logger.debug("TCP probe DNS resolution failed for %s:%d: %s", host, port, e)
+        except socket.timeout:
+            logger.debug("TCP probe to %s:%d timed out", host, port)
+        except OSError as e:
+            logger.debug("TCP probe to %s:%d failed: %s", host, port, e)
             return False
+        return False
 
     def check_backends(self) -> tuple[bool, list[str]]:
-        """Check connectivity to IB backend servers via ICMP ping.
+        """Check connectivity to IB backend servers via TCP.
 
-        Ping tests both DNS resolution and network routing without requiring
-        an open TCP port. IB's backend hosts respond to ICMP but don't accept
-        TCP connections on public ports.
+        Uses TCP socket on port 443; treats ECONNREFUSED as reachable since
+        IB backend hosts don't expose public TCP ports. Works in Kubernetes
+        where ICMP is typically blocked by CNI or NetworkPolicy.
 
         Returns (any_reachable, list_of_reachable_hosts).
         """
         reachable = []
         for host in self.config.backend_hosts:
-            if self._ping(host):
+            if self._check_host(host):
                 reachable.append(host)
         return len(reachable) > 0, reachable
 
     def check_internet(self) -> bool:
-        """Check basic internet connectivity (ping backends first, then CDN fallback)."""
+        """Check basic internet connectivity (TCP to backends first, then CDN fallback)."""
         backends_ok, _ = self.check_backends()
         if backends_ok:
             return True
-        return self._ping(self.config.fallback_host)
+        return self._check_host(self.config.fallback_host)
 
     def fetch_status(self) -> IBSystemStatus:
         """Fetch and parse the IB system status page."""
@@ -234,11 +244,14 @@ class IBStatusScraper:
                 fetch_error="Internet connectivity check failed — backends and CDN unreachable",
             )
 
-        # Backend ping is informational — if backends are down but CDN is up,
+        # Backend TCP probe is informational — if backends are down but CDN is up,
         # we still scrape the status page (it's the authoritative source)
         backends_ok, reachable = self.check_backends()
         if not backends_ok and self.config.backend_hosts:
-            logger.warning("IB backend servers not responding to ping: %s", self.config.backend_hosts)
+            logger.warning(
+                "IB backend servers not responding to TCP probe: %s",
+                self.config.backend_hosts,
+            )
 
         session = self._get_session()
         delay = 1.0
