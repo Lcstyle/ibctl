@@ -5,9 +5,11 @@
 //! TCP command server for external tooling.
 
 mod agent_client;
+mod agent_events;
 mod cold_restart;
 mod command_server;
 mod config;
+mod event_stream;
 mod handlers;
 mod logging;
 mod signals;
@@ -178,12 +180,21 @@ async fn async_main(config: ValidConfig) -> Result<(), Box<dyn std::error::Error
         tasks.spawn(cold_restart_fut);
     }
 
+    // Start agent event stream reader (NDJSON over {socket}.events)
+    let event_socket_path = format!("{}.events", config.agent.socket_path);
+    let event_rx = event_stream::spawn_event_reader(
+        std::path::PathBuf::from(&event_socket_path),
+        64, // bounded channel capacity
+    );
+    log::info!("Agent event stream reader started for {}", event_socket_path);
+
     // Create and run the state machine
     let channels = state_machine::Channels {
         signals: signal_rx,
         commands: command_rx,
         queries: query_rx,
         cold_restart: cold_restart_rx,
+        agent_events: Some(event_rx),
     };
     let mut state_machine = state_machine::StateMachine::new(
         config,

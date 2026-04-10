@@ -32,7 +32,21 @@ public class IbctlAgent {
 
         WindowMonitor.install();
 
+        // Start event stream on a dedicated socket ({socketPath}.events)
+        String eventSocketPath = socketPath + ".events";
+        Thread eventThread = new Thread(() -> {
+            try {
+                EventStream.start(eventSocketPath);
+            } catch (Exception e) {
+                System.err.println("[ibctl-agent] Failed to start event stream: " + e.getMessage());
+            }
+        });
+        eventThread.setDaemon(true);
+        eventThread.setName("ibctl-agent-events");
+        eventThread.start();
+
         System.out.println("[ibctl-agent] Agent initialized, listening on " + socketPath);
+        System.out.println("[ibctl-agent] Event stream on " + eventSocketPath);
     }
 
     public static String getSocketPath() {

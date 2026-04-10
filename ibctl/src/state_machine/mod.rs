@@ -76,6 +76,15 @@ impl StateMachine {
                 &mut self.cold_restart_rx,
                 mpsc::channel(1).1,
             );
+            // Event stream is optional — create a dummy if not connected.
+            // During action states (Authenticating, ConfiguringApi), events
+            // should NOT interrupt the transition — they'd cancel in-progress
+            // UI automation. Instead, drain events after the transition completes.
+            let action_in_progress = matches!(
+                self.state,
+                State::Authenticating | State::ConfiguringApi | State::HandlingSessionConflict
+            );
+            let mut evt_rx = if action_in_progress { None } else { self.event_rx.take() };
 
             let outcome = if self.pause.paused {
                 // Pause mode: wait for interrupt or timeout
@@ -91,6 +100,9 @@ impl StateMachine {
                     Some(_) = cold_rx.recv() => {
                         SelectOutcome::Interrupted(Interrupt::ColdRestart)
                     }
+                    Some(event) = async { match evt_rx.as_mut() { Some(rx) => rx.recv().await, None => std::future::pending().await } } => {
+                        SelectOutcome::Interrupted(Interrupt::AgentEvent(event))
+                    }
                     _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
                         SelectOutcome::Transitioned(Ok(self.state.clone()))
                     }
@@ -99,6 +111,9 @@ impl StateMachine {
                 // Main select: interrupts race against the state transition.
                 // `biased;` ensures signals get priority when multiple branches
                 // are ready simultaneously.
+                //
+                // Priority order (per GPT-5.4 review):
+                //   Signal/shutdown > ColdRestart > Command > AgentEvent > transition
                 //
                 // All recv() branches use `Some(_) =` pattern guards so that a
                 // closed channel (sender dropped) is treated as "branch not ready"
@@ -112,12 +127,19 @@ impl StateMachine {
                         SelectOutcome::Interrupted(Interrupt::Signal(sig))
                     }
 
+                    Some(_) = cold_rx.recv() => {
+                        SelectOutcome::Interrupted(Interrupt::ColdRestart)
+                    }
+
                     Some(c) = cmd_rx.recv() => {
                         SelectOutcome::Interrupted(Interrupt::Command(c))
                     }
 
-                    Some(_) = cold_rx.recv() => {
-                        SelectOutcome::Interrupted(Interrupt::ColdRestart)
+                    // Agent events — update observation cache, trigger re-evaluation.
+                    // Uses Option<Receiver>: if event stream is not connected,
+                    // this branch is permanently pending (never fires).
+                    Some(event) = async { match evt_rx.as_mut() { Some(rx) => rx.recv().await, None => std::future::pending().await } } => {
+                        SelectOutcome::Interrupted(Interrupt::AgentEvent(event))
                     }
 
                     // State transition — cancellation-safe because:
@@ -135,6 +157,21 @@ impl StateMachine {
             self.signal_rx = sig_rx;
             self.command_rx = cmd_rx;
             self.cold_restart_rx = cold_rx;
+            if !action_in_progress {
+                self.event_rx = evt_rx;
+            }
+
+            // Drain any pending events (including those that arrived during action states).
+            // Collect first to avoid double-borrow of self.
+            if let Some(ref mut rx) = self.event_rx {
+                let mut pending = Vec::new();
+                while let Ok(event) = rx.try_recv() {
+                    pending.push(event);
+                }
+                for event in pending {
+                    self.handle_agent_event(event).await;
+                }
+            }
 
             // Process the outcome
             match outcome {
@@ -311,8 +348,51 @@ impl StateMachine {
                 self.abort_client_id_task();
                 self.state = State::Restarting;
             }
+            Interrupt::AgentEvent(event) => {
+                self.handle_agent_event(event).await;
+            }
         }
         Ok(())
+    }
+
+    /// Process an agent event — update the observation cache.
+    /// Does NOT directly change controller state. The next transition()
+    /// call reads the updated observation and decides the transition.
+    async fn handle_agent_event(&mut self, event: crate::agent_events::AgentEvent) {
+        use crate::agent_events::AgentEvent;
+
+        match event {
+            AgentEvent::Hello { protocol_version, .. } => {
+                log::info!("Agent event stream connected (protocol v{})", protocol_version);
+            }
+            AgentEvent::Snapshot { seq, windows, .. } => {
+                self.observation.apply_snapshot(windows, seq);
+            }
+            AgentEvent::WindowOpened { seq, window_id, ref window_title, ref window_class, has_login_button, .. } => {
+                self.observation.window_opened(
+                    window_id,
+                    window_title.clone(),
+                    window_class.clone(),
+                    has_login_button,
+                    seq,
+                );
+                log::info!("Event: window opened '{}' (has_login_button={})", window_title, has_login_button);
+            }
+            AgentEvent::WindowClosed { seq, window_id, ref window_title, .. } => {
+                self.observation.window_closed(window_id, seq);
+                log::info!("Event: window closed '{}'", window_title);
+            }
+            AgentEvent::Overflow { .. } => {
+                log::warn!("Agent event queue overflow — marking observation as desynced");
+                self.observation.mark_desync();
+            }
+            AgentEvent::Keepalive { .. } => {
+                log::debug!("Agent event keepalive");
+            }
+        }
+
+        // Re-publish snapshot so dashboard sees latest state
+        self.publish_snapshot();
     }
 
     /// IB System Status TTL expiry — fail-open if no recent push.
@@ -515,57 +595,78 @@ impl StateMachine {
                 return Ok(State::Error("JVM process exited while waiting for login window".into()));
             }
 
-            // Check for blocking dialogs (re-login, 2FA) before looking for login window
-            if let Some(next_state) = self.check_blocking_dialog().await {
-                log::info!("Blocking dialog detected while waiting for login — transitioning to {}", next_state);
-                return Ok(next_state);
-            }
-
-            match self.agent_client.list_windows().await {
-                Ok(windows) => {
-                    for w in &windows {
-                        let title_lower = w.title.to_lowercase();
-
-                        if title_lower.contains("existing session") {
-                            log::info!("Session conflict dialog detected: {}", w.title);
-                            return Ok(State::HandlingSessionConflict);
-                        }
-                    }
-
-                    // Find the main Gateway window by title
-                    let main_window = windows.iter().find(|w| {
-                        let t = w.title.to_lowercase();
-                        t.contains("ib gateway") || t.contains("ibkr gateway")
-                    });
-
-                    if let Some(main) = main_window {
-                        // Determine if this is a login form by inspecting components.
-                        // The login form has text fields (username + password).
-                        // A connected Gateway has no text fields in the main window.
-                        // Class name is unreliable — some Gateway versions use the
-                        // same class (e.g. "ibgateway.az") for both login and connected.
-                        use crate::types::WindowId;
-                        let has_login_fields = if let Ok(components) = self.agent_client.dump_components(WindowId(main.id.0)).await {
-                            components.get("textfields")
-                                .and_then(|t| t.as_array())
-                                .map(|a| !a.is_empty())
-                                .unwrap_or(false)
-                        } else {
-                            // Agent error — assume login form to be safe
-                            true
-                        };
-
-                        if has_login_fields {
-                            log::info!("Login form detected (text fields present) — proceeding to authenticate");
-                            return Ok(State::Authenticating);
-                        } else {
-                            log::info!("Gateway already authenticated — main window present, no text fields");
-                            return Ok(State::DismissingPopups);
-                        }
+            // --- Event-driven fast path (observation cache, no I/O) ---
+            // The event stream provides window_opened events with has_login_button,
+            // eliminating the need for both list_windows() AND dump_components().
+            if self.observation.synced {
+                if self.observation.has_session_conflict() {
+                    log::info!("Session conflict detected via observation cache");
+                    return Ok(State::HandlingSessionConflict);
+                }
+                if self.observation.has_2fa_dialog() {
+                    log::info!("2FA dialog detected via observation cache while waiting for login");
+                    return Ok(State::WaitingFor2fa);
+                }
+                if self.observation.has_relogin_dialog() {
+                    log::info!("Re-login dialog detected via observation cache");
+                    return Ok(State::ReconnectingSession);
+                }
+                if let Some(main) = self.observation.main_gateway_window() {
+                    if main.has_login_button {
+                        log::info!("Login form detected via observation cache (has_login_button=true)");
+                        return Ok(State::Authenticating);
+                    } else {
+                        log::info!("Gateway already authenticated via observation cache (no text fields)");
+                        return Ok(State::DismissingPopups);
                     }
                 }
-                Err(e) => {
-                    log::debug!("Agent not ready yet: {}", e);
+            }
+
+            // --- HTTP fallback (when observation cache is not synced) ---
+            if !self.observation.synced {
+                // Check for blocking dialogs (re-login, 2FA)
+                if let Some(next_state) = self.check_blocking_dialog().await {
+                    log::info!("Blocking dialog detected while waiting for login — transitioning to {}", next_state);
+                    return Ok(next_state);
+                }
+
+                match self.agent_client.list_windows().await {
+                    Ok(windows) => {
+                        for w in &windows {
+                            if w.title.to_lowercase().contains("existing session") {
+                                log::info!("Session conflict dialog detected: {}", w.title);
+                                return Ok(State::HandlingSessionConflict);
+                            }
+                        }
+
+                        let main_window = windows.iter().find(|w| {
+                            let t = w.title.to_lowercase();
+                            t.contains("ib gateway") || t.contains("ibkr gateway")
+                        });
+
+                        if let Some(main) = main_window {
+                            use crate::types::WindowId;
+                            let has_login_fields = if let Ok(components) = self.agent_client.dump_components(WindowId(main.id.0)).await {
+                                components.get("textfields")
+                                    .and_then(|t| t.as_array())
+                                    .map(|a| !a.is_empty())
+                                    .unwrap_or(false)
+                            } else {
+                                true
+                            };
+
+                            if has_login_fields {
+                                log::info!("Login form detected (text fields present, HTTP fallback)");
+                                return Ok(State::Authenticating);
+                            } else {
+                                log::info!("Gateway already authenticated (HTTP fallback, no text fields)");
+                                return Ok(State::DismissingPopups);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::debug!("Agent not ready yet: {}", e);
+                    }
                 }
             }
 
@@ -630,6 +731,10 @@ impl StateMachine {
         match self.handler_registry.dispatch(&self.agent_client, win).await {
             Some(Ok(crate::handlers::HandlerResult::Handled)) => {
                 log::info!("Login submitted via handler");
+                // The login window will morph into the connected window without
+                // closing/reopening (IB Gateway mutates in place). Clear the cached
+                // has_login_button flag so do_connected() doesn't see a stale "login form".
+                self.observation.clear_login_buttons();
             }
             Some(Ok(crate::handlers::HandlerResult::Error(msg))) => {
                 log::error!("Login handler reported error: {}", msg);
@@ -678,6 +783,16 @@ impl StateMachine {
         loop {
             if !self.supervisor.is_running() {
                 return Ok(State::Error("JVM exited during 2FA wait".into()));
+            }
+
+            // --- Event-driven fast path (observation cache, no I/O) ---
+            if self.observation.has_relogin_dialog() {
+                log::info!("Re-login dialog detected via observation during 2FA wait");
+                return Ok(State::WaitingForLogin);
+            }
+            if self.observation.has_session_conflict() {
+                log::info!("Session conflict detected via observation during 2FA wait");
+                return Ok(State::HandlingSessionConflict);
             }
 
             // Check for blocking dialogs (re-login, authenticating splash)
@@ -1005,14 +1120,19 @@ impl StateMachine {
     async fn do_connected(&mut self) -> Result<State, StateMachineError> {
         log::debug!("Gateway connected — monitoring loop tick");
 
-        // Record the main window class on first entry — used to detect silent session loss
+        // Record the main window class on first entry — used to detect silent session loss.
+        // Uses observation cache (event-driven) with HTTP fallback.
         if self.connected_window_class.is_none() {
-            if let Ok(windows) = self.agent_client.list_windows().await {
+            if let Some(main) = self.observation.main_gateway_window() {
+                log::info!("Recording connected window class: {} (from observation cache)", main.class);
+                self.connected_window_class = Some(main.class.clone());
+            } else if let Ok(windows) = self.agent_client.list_windows().await {
+                // Fallback: observation cache not populated yet
                 if let Some(main) = windows.iter().find(|w| {
                     let t = w.title.to_lowercase();
                     t.contains("ib gateway") || t.contains("ibkr gateway")
                 }) {
-                    log::info!("Recording connected window class: {}", main.class);
+                    log::info!("Recording connected window class: {} (from HTTP fallback)", main.class);
                     self.connected_window_class = Some(main.class.clone());
                 }
             }
@@ -1088,56 +1208,57 @@ impl StateMachine {
             self.start_socat(api_port, socat_port);
         }
 
-        // Check windows for session loss and re-login dialogs
-        if let Ok(windows) = self.agent_client.list_windows().await {
-            // Detect silent session loss: if the main Gateway window's class changed
-            // since we entered Connected, the UI reverted (likely to login form).
-            // Confirm with text field check before transitioning.
-            if let Some(ref expected_class) = self.connected_window_class {
-                if let Some(main) = windows.iter().find(|w| {
-                    let t = w.title.to_lowercase();
-                    t.contains("ib gateway") || t.contains("ibkr gateway")
-                }) {
-                    if main.class != *expected_class {
-                        // Class changed — confirm it's a login form by checking for text fields
-                        use crate::types::WindowId;
-                        if let Ok(components) = self.agent_client.dump_components(WindowId(main.id.0)).await {
-                            let has_textfields = components.get("textfields")
-                                .and_then(|t| t.as_array())
-                                .map(|a| !a.is_empty())
-                                .unwrap_or(false);
-                            if has_textfields {
-                                log::warn!(
-                                    "Session lost — login form detected (class changed: {} → {}, text fields present)",
-                                    expected_class, main.class
-                                );
-                                self.connected_window_class = None;
-                                self.handler_registry.reset();
-                                self.abort_client_id_task();
-                                return Ok(State::WaitingForLogin);
-                            } else {
-                                log::info!(
-                                    "Window class changed {} → {} (no login form — benign UI update)",
-                                    expected_class, main.class
-                                );
-                                self.connected_window_class = Some(main.class.clone());
-                            }
-                        }
-                    }
-                }
+        // --- Event-driven dialog detection (observation cache) ---
+        // Check the observation cache for re-login dialogs and session loss.
+        // Events update the cache in real-time; this is instant (no I/O).
+
+        // Re-login dialog detection
+        if self.observation.has_relogin_dialog() {
+            log::info!("RE-LOGIN dialog detected via observation cache — transitioning to ReconnectingSession");
+            self.abort_client_id_task();
+            self.stop_socat();
+            return Ok(State::ReconnectingSession);
+        }
+
+        // Session conflict detection
+        if self.observation.has_session_conflict() {
+            log::info!("Session conflict detected via observation cache — transitioning to HandlingSessionConflict");
+            self.abort_client_id_task();
+            self.stop_socat();
+            return Ok(State::HandlingSessionConflict);
+        }
+
+        // Silent session loss: check if main window now has text fields
+        // (login form reappeared without a re-login dialog)
+        if let Some(main) = self.observation.main_gateway_window() {
+            if main.has_login_button {
+                log::warn!("Session lost — login form detected in observation cache (has_login_button=true)");
+                self.connected_window_class = None;
+                self.handler_registry.reset();
+                self.abort_client_id_task();
+                return Ok(State::WaitingForLogin);
             }
 
-            for win in &windows {
-                let title_lower = win.title.to_lowercase();
-
-                if title_lower.contains("re-login") || title_lower.contains("login is required") {
-                    log::info!("RE-LOGIN dialog detected in Connected — transitioning to ReconnectingSession");
-                    self.abort_client_id_task();
-                    self.stop_socat();
-                    return Ok(State::ReconnectingSession);
+            // Track class changes (benign UI updates)
+            if let Some(ref expected_class) = self.connected_window_class {
+                if main.class != *expected_class && !main.has_login_button {
+                    log::info!(
+                        "Window class changed {} → {} (no login form — benign UI update)",
+                        expected_class, main.class
+                    );
+                    self.connected_window_class = Some(main.class.clone());
                 }
+            }
+        }
 
-                let _ = self.handler_registry.dispatch(&self.agent_client, win).await;
+        // --- Reconciliation poll (safety net, reduced frequency) ---
+        // Only poll if observation cache is stale or desynced.
+        // With events flowing, this rarely fires.
+        if !self.observation.synced || self.observation.last_updated.elapsed() > std::time::Duration::from_secs(15) {
+            if let Ok(windows) = self.agent_client.list_windows().await {
+                for win in &windows {
+                    let _ = self.handler_registry.dispatch(&self.agent_client, win).await;
+                }
             }
         }
 
@@ -1151,10 +1272,11 @@ impl StateMachine {
             }
         }
 
-        // Signal/command/cold-restart handling is done by the outer
-        // tokio::select! in run() — no need to check_interrupts() here.
+        // Signal/command/cold-restart/event handling is done by the outer
+        // tokio::select! in run(). Events provide instant dialog detection.
+        // This sleep is now just a reconciliation tick — events handle the fast path.
 
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         Ok(State::Connected)
     }
 

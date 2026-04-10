@@ -125,6 +125,7 @@ pub struct Channels {
     pub commands: mpsc::Receiver<Command>,
     pub queries: mpsc::Receiver<Query>,
     pub cold_restart: mpsc::Receiver<ColdRestartSignal>,
+    pub agent_events: Option<mpsc::Receiver<crate::agent_events::AgentEvent>>,
 }
 
 /// Internal enum for interrupt sources.
@@ -132,6 +133,7 @@ pub(super) enum Interrupt {
     Signal(Signal),
     Command(Command),
     ColdRestart,
+    AgentEvent(crate::agent_events::AgentEvent),
 }
 
 /// IB system status — pushed by dashboard or external clients via IBSTATUS command.
@@ -208,6 +210,11 @@ pub struct StateMachine {
     /// Set true after device is selected and OK clicked. Reset on state transitions
     /// that start a new login cycle.
     pub(super) twofa_device_selected: bool,
+    /// Agent event stream receiver — window open/close events from the Java agent.
+    pub(super) event_rx: Option<mpsc::Receiver<crate::agent_events::AgentEvent>>,
+    /// Centralized UI observation cache — updated by events and targeted queries.
+    /// State handlers read this instead of polling the agent directly.
+    pub(super) observation: crate::agent_events::AgentObservation,
     pub stats: Stats,
     /// Watch channel sender for publishing query snapshots.
     /// Command server reads the latest snapshot directly — no mpsc round-trip.
@@ -236,6 +243,8 @@ impl StateMachine {
             command_rx: channels.commands,
             query_rx: channels.queries,
             cold_restart_rx: channels.cold_restart,
+            event_rx: channels.agent_events,
+            observation: crate::agent_events::AgentObservation::new(),
             socat_process: None,
             config_retries: 0,
             pause: PauseControl::new(),
