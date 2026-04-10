@@ -523,41 +523,45 @@ impl StateMachine {
 
             match self.agent_client.list_windows().await {
                 Ok(windows) => {
-                    let mut has_login_form = false;
-                    let mut has_main_window = false;
-
                     for w in &windows {
                         let title_lower = w.title.to_lowercase();
-                        let class_lower = w.class.to_lowercase();
 
                         if title_lower.contains("existing session") {
                             log::info!("Session conflict dialog detected: {}", w.title);
                             return Ok(State::HandlingSessionConflict);
                         }
-
-                        // Login form: class contains "login" (jclient.login.as)
-                        if class_lower.contains("login") {
-                            has_login_form = true;
-                        }
-
-                        // Main Gateway window: title matches but class is NOT login
-                        if (title_lower.contains("ib gateway") || title_lower.contains("ibkr gateway"))
-                            && !class_lower.contains("login")
-                        {
-                            has_main_window = true;
-                        }
                     }
 
-                    if has_login_form {
-                        log::info!("Login form detected — proceeding to authenticate");
-                        return Ok(State::Authenticating);
-                    }
+                    // Find the main Gateway window by title
+                    let main_window = windows.iter().find(|w| {
+                        let t = w.title.to_lowercase();
+                        t.contains("ib gateway") || t.contains("ibkr gateway")
+                    });
 
-                    if has_main_window && !has_login_form {
-                        // Gateway already authenticated (e.g., paper auto-login).
-                        // The main window is showing but no login form exists.
-                        log::info!("Gateway already authenticated — main window present, no login form");
-                        return Ok(State::DismissingPopups);
+                    if let Some(main) = main_window {
+                        // Determine if this is a login form by inspecting components.
+                        // The login form has text fields (username + password).
+                        // A connected Gateway has no text fields in the main window.
+                        // Class name is unreliable — some Gateway versions use the
+                        // same class (e.g. "ibgateway.az") for both login and connected.
+                        use crate::types::WindowId;
+                        let has_login_fields = if let Ok(components) = self.agent_client.dump_components(WindowId(main.id.0)).await {
+                            components.get("textfields")
+                                .and_then(|t| t.as_array())
+                                .map(|a| !a.is_empty())
+                                .unwrap_or(false)
+                        } else {
+                            // Agent error — assume login form to be safe
+                            true
+                        };
+
+                        if has_login_fields {
+                            log::info!("Login form detected (text fields present) — proceeding to authenticate");
+                            return Ok(State::Authenticating);
+                        } else {
+                            log::info!("Gateway already authenticated — main window present, no text fields");
+                            return Ok(State::DismissingPopups);
+                        }
                     }
                 }
                 Err(e) => {
@@ -596,25 +600,32 @@ impl StateMachine {
 
         let windows = self.agent_client.list_windows().await?;
 
-        // Find the login form by class (not title — the main window also says "IBKR Gateway")
-        let login_window = windows.iter().find(|w| w.class.to_lowercase().contains("login"));
+        // Find the main Gateway window by title (class is unreliable across versions)
+        let main_window = windows.iter().find(|w| {
+            let t = w.title.to_lowercase();
+            t.contains("ib gateway") || t.contains("ibkr gateway")
+        });
 
-        // If no login form exists but the main Gateway window is showing,
-        // Gateway already authenticated (e.g., paper auto-login without 2FA)
-        if login_window.is_none() {
-            let has_main = windows.iter().any(|w| {
-                let t = w.title.to_lowercase();
-                (t.contains("ib gateway") || t.contains("ibkr gateway")) && !w.class.to_lowercase().contains("login")
-            });
-            if has_main {
-                log::info!("No login form but main Gateway window present — already authenticated");
-                return Ok(State::DismissingPopups);
-            }
+        let Some(win) = main_window else {
             return Ok(State::WaitingForLogin);
-        }
+        };
 
-        // Safety: login_window.is_none() was checked above and returned early
-        let Some(win) = login_window else { return Ok(State::WaitingForLogin) };
+        // Check if this window has text fields (login form) or not (already connected).
+        // Some Gateway versions use the same class for both states.
+        use crate::types::WindowId;
+        let has_login_fields = if let Ok(components) = self.agent_client.dump_components(WindowId(win.id.0)).await {
+            components.get("textfields")
+                .and_then(|t| t.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false)
+        } else {
+            false
+        };
+
+        if !has_login_fields {
+            log::info!("Main Gateway window present but no text fields — already authenticated");
+            return Ok(State::DismissingPopups);
+        }
 
         match self.handler_registry.dispatch(&self.agent_client, win).await {
             Some(Ok(crate::handlers::HandlerResult::Handled)) => {
@@ -899,31 +910,24 @@ impl StateMachine {
                 });
 
                 if let Some(main) = main_window {
-                    let class_lower = main.class.to_lowercase();
-
-                    // Login form still present — not ready
-                    if class_lower.contains("login") {
-                        log::debug!("WaitingForApiReady: login form still present (class={})", main.class);
+                    // Check for text fields (login form has username + password inputs).
+                    // Class name is unreliable — some Gateway versions use the same
+                    // class for both login and connected states.
+                    use crate::types::WindowId;
+                    let has_login_fields = if let Ok(components) = self.agent_client.dump_components(WindowId(main.id.0)).await {
+                        components.get("textfields")
+                            .and_then(|t| t.as_array())
+                            .map(|a| !a.is_empty())
+                            .unwrap_or(false)
                     } else {
-                        // Main window class is not a login form.
-                        // Confirm no text fields (login forms have username/password fields)
-                        use crate::types::WindowId;
-                        let has_login_fields = if let Ok(components) = self.agent_client.dump_components(WindowId(main.id.0)).await {
-                            components.get("textfields")
-                                .and_then(|t| t.as_array())
-                                .map(|a| !a.is_empty())
-                                .unwrap_or(false)
-                        } else {
-                            false
-                        };
+                        false
+                    };
 
-                        if has_login_fields {
-                            log::debug!("WaitingForApiReady: text fields present — login/auth in progress");
-                        } else {
-                            // No login class, no text fields — Gateway appears connected
-                            log::info!("Gateway window ready (class={}) — proceeding to configure", main.class);
-                            return Ok(State::ConfiguringApi);
-                        }
+                    if has_login_fields {
+                        log::debug!("WaitingForApiReady: text fields present — login/auth in progress");
+                    } else {
+                        log::info!("Gateway window ready (class={}) — proceeding to configure", main.class);
+                        return Ok(State::ConfiguringApi);
                     }
                 } else {
                     log::debug!("WaitingForApiReady: no main window found yet");
