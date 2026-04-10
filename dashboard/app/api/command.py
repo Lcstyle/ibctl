@@ -57,6 +57,70 @@ async def send_command(request: Request, body: CommandRequest):
         return {"ok": False, "command": command, "mode": target_mode, "error": e.message}
 
 
+# --- IB System Status API ---
+
+
+@router.get("/api/v1/ib-status")
+async def get_ib_status(request: Request):
+    """Current IB system status with alerts and maintenance windows.
+
+    Returns the scraper's latest view of IB system availability — the same
+    data that drives ibctl's WaitingForIB state. External clients can poll
+    this instead of running their own IB status scraper.
+    """
+    monitor = getattr(request.app.state, 'ib_status_monitor', None)
+    if not monitor:
+        return {"ok": False, "error": "IB status monitor not running"}
+
+    scraper_status = monitor._scraper._last_status
+
+    result = {
+        "ok": True,
+        "status": monitor._last_pushed_status,
+        "override_active": monitor.override_active,
+    }
+
+    if monitor.override_active:
+        result["override_status"] = monitor.override_status
+        result["override_reason"] = monitor.override_reason
+
+    if scraper_status:
+        result["last_updated"] = scraper_status.last_updated.isoformat() if scraper_status.last_updated else None
+        result["fetch_error"] = scraper_status.fetch_error
+        result["alerts"] = [
+            {
+                "message": a.message,
+                "severity": a.severity.value,
+                "is_blocking": a.is_blocking(),
+            }
+            for a in scraper_status.alerts
+        ]
+        result["daily_resets"] = [
+            {
+                "region": w.region,
+                "start_time": w.start_time.strftime("%H:%M"),
+                "end_time": w.end_time.strftime("%H:%M"),
+                "timezone": w.timezone,
+            }
+            for w in scraper_status.daily_resets
+        ]
+        result["weekend_resets"] = [
+            {
+                "region": w.region,
+                "start_time": w.start_time.strftime("%H:%M"),
+                "end_time": w.end_time.strftime("%H:%M"),
+                "timezone": w.timezone,
+            }
+            for w in scraper_status.weekend_resets
+        ]
+    else:
+        result["alerts"] = []
+        result["daily_resets"] = []
+        result["weekend_resets"] = []
+
+    return result
+
+
 # --- IB Status Override & Audit Log ---
 
 class OverrideRequest(BaseModel):
