@@ -424,7 +424,7 @@ impl Default for AuthConfig {
         Self {
             username: String::new(),
             password: SecretString::from(String::new()),
-            trading_mode: TradingMode::Live,
+            trading_mode: TradingMode::Paper,
             paper: PaperAuthConfig::default(),
         }
     }
@@ -474,7 +474,7 @@ impl Default for SessionConfig {
 impl Default for CommandServerConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             port: 7462,
             bind_address: "0.0.0.0".to_string(),
             control_from: vec!["127.0.0.1".to_string()],
@@ -859,7 +859,7 @@ mod tests {
     #[test]
     fn test_default_config_values() {
         let config = Config::default();
-        assert_eq!(config.auth.trading_mode, TradingMode::Live);
+        assert_eq!(config.auth.trading_mode, TradingMode::Paper);
         assert_eq!(config.twofa.provider, TotpProvider::Oathtool);
         assert_eq!(config.twofa.timeout_action, TwoFaTimeoutAction::Restart);
         assert_eq!(config.gateway.program, GatewayProgram::Gateway);
@@ -867,7 +867,7 @@ mod tests {
         assert_eq!(config.session.accept_incoming, AcceptIncoming::Accept);
         assert_eq!(config.logging.level, LogLevel::Info);
         assert_eq!(config.command_server.port, 7462);
-        assert!(config.command_server.enabled);
+        assert!(!config.command_server.enabled);
         assert_eq!(config.timing.login_dialog_timeout_secs, 120);
     }
 

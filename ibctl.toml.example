@@ -15,7 +15,7 @@
 # IB login username (env: TWS_USERID)
 tws_userid = ""
 # Trading mode: live | paper | both (env: TRADING_MODE)
-trading_mode = "live"
+trading_mode = "paper"
 
 [auth.paper]
 # Paper account username, only needed for dual mode (env: TWS_USERID_PAPER)

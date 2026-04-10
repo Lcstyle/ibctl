@@ -70,7 +70,7 @@ class AuthConfig {
   /// @env TWS_USERID
   twsUserid: String = ""
   /// Trading mode — also set via TRADING_MODE env var
-  tradingMode: TradingMode = "live"
+  tradingMode: TradingMode = "paper"
   /// Paper account sub-config (for dual mode)
   paper: PaperAuthConfig = new PaperAuthConfig {}
 }
@@ -138,8 +138,8 @@ class SessionConfig {
 
 /// TCP command server (IBC-compatible).
 class CommandServerConfig {
-  /// Enable command server
-  enabled: Boolean = true
+  /// Enable command server (required for dashboard)
+  enabled: Boolean = false
   /// Live instance command server port (env: IBCTL_COMMAND_PORT)
   port: UInt16 = 7462
   /// Paper instance command server port

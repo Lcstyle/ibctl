@@ -249,11 +249,33 @@ class TestFileSecret:
         os.unlink(path)
 
 
+class TestDashboardRequiresCommandServer:
+    def test_dashboard_without_command_server_fails(self):
+        path = _write_toml(
+            '[dashboard]\nenabled = true\n\n'
+            '[command_server]\nenabled = false\n'
+        )
+        result = validate_config(toml_path=path, check_env=False)
+        assert not result.ok
+        assert any("command_server" in e.message for e in result.errors)
+        os.unlink(path)
+
+    def test_dashboard_with_command_server_passes(self):
+        path = _write_toml(
+            '[dashboard]\nenabled = true\n\n'
+            '[command_server]\nenabled = true\n'
+        )
+        result = validate_config(toml_path=path, check_env=False)
+        assert result.ok
+        os.unlink(path)
+
+
 class TestUnknownSections:
     def test_known_sections_accepted(self):
         """All known sections (including dashboard, ib_system_status) validate."""
         path = _write_toml(
             '[auth]\ntrading_mode = "live"\n\n'
+            '[command_server]\nenabled = true\n\n'
             '[dashboard]\nenabled = true\nport = 8080\n\n'
             '[ib_system_status]\nenabled = true\n'
         )

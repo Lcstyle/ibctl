@@ -7,7 +7,7 @@
 # set via TWS_USERID env var
 tws_userid = ""
 # "live", "paper", or "both"
-trading_mode = "live"
+trading_mode = "paper"
 # Paper credentials (for TRADING_MODE=both):
 # paper.tws_userid = ""    # set via TWS_USERID_PAPER env var
 

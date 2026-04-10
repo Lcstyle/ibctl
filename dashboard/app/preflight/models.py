@@ -37,7 +37,7 @@ class AuthConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     tws_userid: str = ""
-    trading_mode: TradingMode = "live"
+    trading_mode: TradingMode = "paper"
     paper: PaperAuthConfig = PaperAuthConfig()
 
 
@@ -86,7 +86,7 @@ class SessionConfig(BaseModel):
 class CommandServerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    enabled: bool = True
+    enabled: bool = False
     port: int = Field(default=7462, ge=1, le=65535)
     paper_port: int = Field(default=7463, ge=1, le=65535)
     bind_address: str = "0.0.0.0"
@@ -201,6 +201,13 @@ class IbctlConfig(BaseModel):
                     f"Port conflict: {name} ({port}) collides with {seen[port]}"
                 )
             seen[port] = name
+
+        # Dashboard requires command server
+        if self.dashboard.enabled and not self.command_server.enabled:
+            raise ValueError(
+                "dashboard.enabled=true requires command_server.enabled=true — "
+                "the dashboard connects to ibctl via the command server"
+            )
 
         # Dual mode credential warning (env check happens in validator.py)
         # This only warns about TOML-level — env overrides are checked separately
