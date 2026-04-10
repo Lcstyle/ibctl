@@ -721,9 +721,10 @@ impl Config {
     /// Validate that required fields are present.
     /// Private — called at the end of `load()` to enforce the ValidConfig invariant.
     fn validate(&self) -> Result<(), ConfigError> {
+        // Primary credentials — required for all modes
         if self.auth.username.is_empty() {
             return Err(ConfigError::Missing(
-                "auth.username (or TWS_USERID env var)".to_string(),
+                "tws_userid (set TWS_USERID env var or tws_userid in TOML)".to_string(),
             ));
         }
         if self.auth.password.expose_secret().is_empty() {
@@ -731,12 +732,21 @@ impl Config {
                 "TWS_PASSWORD or TWS_PASSWORD_FILE env var".to_string(),
             ));
         }
-        if matches!(self.auth.trading_mode, TradingMode::Both | TradingMode::Paper)
-            && self.auth.paper.username.is_empty()
-            && self.auth.trading_mode == TradingMode::Both
-        {
-            log::warn!("trading_mode=both but no paper username set; will use main credentials");
+
+        // Paper credentials — required for dual mode
+        if self.auth.trading_mode == TradingMode::Both {
+            if self.auth.paper.username.is_empty() {
+                return Err(ConfigError::Missing(
+                    "paper tws_userid (set TWS_USERID_PAPER env var) — required for trading_mode=both".to_string(),
+                ));
+            }
+            if self.auth.paper.password.expose_secret().is_empty() {
+                return Err(ConfigError::Missing(
+                    "TWS_PASSWORD_PAPER or TWS_PASSWORD_PAPER_FILE env var — required for trading_mode=both".to_string(),
+                ));
+            }
         }
+
         Ok(())
     }
 
@@ -947,6 +957,48 @@ key = "value"
         let mut config = Config::default();
         config.auth.username = "testuser".to_string();
         config.auth.password = SecretString::from("testpass".to_string());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_both_mode_missing_paper_username() {
+        let mut config = Config::default();
+        config.auth.username = "testuser".to_string();
+        config.auth.password = SecretString::from("testpass".to_string());
+        config.auth.trading_mode = TradingMode::Both;
+        // Paper username empty, paper password empty
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_both_mode_missing_paper_password() {
+        let mut config = Config::default();
+        config.auth.username = "testuser".to_string();
+        config.auth.password = SecretString::from("testpass".to_string());
+        config.auth.trading_mode = TradingMode::Both;
+        config.auth.paper.username = "paperuser".to_string();
+        // Paper password still empty
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_both_mode_ok_with_all_credentials() {
+        let mut config = Config::default();
+        config.auth.username = "testuser".to_string();
+        config.auth.password = SecretString::from("testpass".to_string());
+        config.auth.trading_mode = TradingMode::Both;
+        config.auth.paper.username = "paperuser".to_string();
+        config.auth.paper.password = SecretString::from("paperpass".to_string());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_live_mode_doesnt_need_paper() {
+        let mut config = Config::default();
+        config.auth.username = "testuser".to_string();
+        config.auth.password = SecretString::from("testpass".to_string());
+        config.auth.trading_mode = TradingMode::Live;
+        // No paper credentials
         assert!(config.validate().is_ok());
     }
 
