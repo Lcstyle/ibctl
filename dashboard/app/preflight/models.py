@@ -90,7 +90,7 @@ class CommandServerConfig(BaseModel):
     port: int = Field(default=7462, ge=1, le=65535)
     paper_port: int = Field(default=7463, ge=1, le=65535)
     bind_address: str = "0.0.0.0"
-    control_from: list[str] = ["127.0.0.1"]
+    control_from: list[str] = ["127.0.0.1", "172.0.0.0/8"]
 
 
 class AgentConfig(BaseModel):
@@ -148,14 +148,14 @@ class IbSystemStatusConfig(BaseModel):
 
     enabled: bool = False
     ttl_seconds: int = Field(default=600, ge=0)
-    check_interval: int = Field(default=300, ge=0)
+    check_interval_seconds: int = Field(default=300, ge=0)
     url: str = "https://www.interactivebrokers.com/en/software/systemStatus.php"
     region: str = "NA"
-    backend_hosts: str = "cdc1-hb1.ibllc.com,cdc1-hb2.ibllc.com"
+    backend_hosts: list[str] = ["cdc1-hb1.ibllc.com", "cdc1-hb2.ibllc.com"]
     fallback_host: str = "interactivebrokers.com"
-    extra_exchange_keywords: str = ""
-    extra_benign_phrases: str = ""
-    extra_blocking_keywords: str = ""
+    extra_exchange_keywords: list[str] = []
+    extra_benign_phrases: list[str] = []
+    extra_blocking_keywords: list[str] = []
 
 
 # --- Top-level config ---

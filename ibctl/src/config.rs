@@ -477,7 +477,7 @@ impl Default for CommandServerConfig {
             enabled: false,
             port: 7462,
             bind_address: "0.0.0.0".to_string(),
-            control_from: vec!["127.0.0.1".to_string()],
+            control_from: vec!["127.0.0.1".to_string(), "172.0.0.0/8".to_string()],
         }
     }
 }
