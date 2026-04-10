@@ -12,7 +12,7 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from .env_overlay import apply_env_overrides
+from .env_overlay import apply_env_overrides, env_or_file
 from .models import ENV_MAP, SECRET_ENV_VARS, IbctlConfig
 
 
@@ -74,6 +74,50 @@ def _format_pydantic_errors(exc: ValidationError) -> list[PreflightError]:
     return errors
 
 
+def _check_credentials(model: IbctlConfig) -> list[PreflightError]:
+    """Check that required credentials are set in the environment.
+
+    Passwords are env-only (never in TOML). Which credentials are required
+    depends on the trading mode:
+    - live: TWS_USERID + TWS_PASSWORD
+    - paper: TWS_USERID + TWS_PASSWORD
+    - both: above + TWS_USERID_PAPER + TWS_PASSWORD_PAPER
+    """
+    errors = []
+    mode = model.auth.trading_mode
+
+    # Primary credentials (required for all modes)
+    if not model.auth.tws_userid and not env_or_file("TWS_USERID"):
+        errors.append(PreflightError(
+            field="auth.tws_userid",
+            message="required — set TWS_USERID or tws_userid in TOML",
+            env_var="TWS_USERID",
+        ))
+    if not env_or_file("TWS_PASSWORD"):
+        errors.append(PreflightError(
+            field="<env>",
+            message="required — set TWS_PASSWORD or TWS_PASSWORD_FILE",
+            env_var="TWS_PASSWORD",
+        ))
+
+    # Paper credentials (required for dual mode)
+    if mode == "both":
+        if not model.auth.paper.tws_userid and not env_or_file("TWS_USERID_PAPER"):
+            errors.append(PreflightError(
+                field="auth.paper.tws_userid",
+                message="required for trading_mode=both — set TWS_USERID_PAPER",
+                env_var="TWS_USERID_PAPER",
+            ))
+        if not env_or_file("TWS_PASSWORD_PAPER"):
+            errors.append(PreflightError(
+                field="<env>",
+                message="required for trading_mode=both — set TWS_PASSWORD_PAPER or TWS_PASSWORD_PAPER_FILE",
+                env_var="TWS_PASSWORD_PAPER",
+            ))
+
+    return errors
+
+
 def validate_config(
     toml_path: str = "/opt/ibctl/ibctl.toml",
     check_env: bool = True,
@@ -118,7 +162,15 @@ def validate_config(
             errors=_format_pydantic_errors(exc),
         )
 
-    # Step 4: Collect warnings from model validators
+    # Step 4: Check credentials (env-only, not in TOML)
+    errors = []
+    if check_env:
+        errors = _check_credentials(model)
+
+    if errors:
+        return PreflightResult(ok=False, errors=errors)
+
+    # Step 5: Collect warnings from model validators
     warnings = model.get_warnings()
 
     return PreflightResult(ok=True, warnings=warnings)

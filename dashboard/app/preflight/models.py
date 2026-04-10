@@ -202,14 +202,15 @@ class IbctlConfig(BaseModel):
                 )
             seen[port] = name
 
-        # Dual mode credential check
+        # Dual mode credential warning (env check happens in validator.py)
+        # This only warns about TOML-level — env overrides are checked separately
         if (
             self.auth.trading_mode == "both"
             and not self.auth.paper.tws_userid
         ):
             warnings.append(
-                "trading_mode=both but no paper tws_userid set; "
-                "will use main credentials (set TWS_USERID_PAPER)"
+                "trading_mode=both but no paper tws_userid in TOML; "
+                "ensure TWS_USERID_PAPER is set via env var"
             )
 
         # Store warnings for retrieval by validator
