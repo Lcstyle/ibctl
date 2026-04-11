@@ -15,7 +15,7 @@ trading_mode = "paper"
 # "oathtool" (shells out) or "builtin" (not yet implemented)
 provider = "oathtool"
 # name of env var holding TOTP secret
-secret_env = "TWOFACTOR_CODE"
+secret_env = "TWOFACTOR_CODE" # pragma: allowlist secret
 # "restart" (re-login) or "exit" (shutdown)
 timeout_action = "restart"
 # max wait for 2FA approval before timeout_action
@@ -81,6 +81,13 @@ oidc_scopes = "openid profile email"
 
 # Notifications (ntfy, Slack, Telegram — requires dashboard.enabled)
 notifications_enabled = false
+# Notification channel: ntfy | slack | telegram (env: IBCTL_NOTIFICATION_CHANNEL)
+notification_channel = "ntfy"
+
+# ZMQ PUB socket for external status subscribers (env: IBCTL_ZMQ_ENABLED)
+zmq_enabled = true
+# ZMQ PUB port (env: IBCTL_ZMQ_PORT)
+zmq_port = 5556
 
 [ib_system_status]
 enabled = false

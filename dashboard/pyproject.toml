@@ -9,6 +9,7 @@ dependencies = [
     "jinja2>=3.1",
     "sse-starlette>=2.0",
     "httpx>=0.27",
+    "pyzmq>=26.0",
 ]
 
 [project.optional-dependencies]

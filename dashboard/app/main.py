@@ -41,44 +41,72 @@ async def lifespan(app: FastAPI):
 
     registry = app.state.instance_registry
 
-    # Start background cache poller — keeps STATUS cache populated
-    # independently of browser SSE connections. Monitors depend on this.
+    # Start ZMQ PUB socket for external status subscribers.
+    # Always on when dashboard is running — zero cost with no subscribers.
+    # Port exposure is controlled by docker-compose, not this flag.
+    zmq_publisher = None
+    zmq_disabled = os.environ.get("IBCTL_ZMQ_ENABLED", "").lower() in ("false", "0", "no")
+    if not zmq_disabled:
+        from app.services.zmq_publisher import ZmqStatusPublisher
+        zmq_port = int(os.environ.get("IBCTL_ZMQ_PORT", "5556"))
+        zmq_publisher = ZmqStatusPublisher(bind_address=f"tcp://*:{zmq_port}")
+        zmq_publisher.start(registry=registry)
+        await zmq_publisher.start_heartbeat()
+        registry.set_zmq_publisher(zmq_publisher)
+        app.state.zmq_publisher = zmq_publisher
+
+    # Start background cache population — uses SUBSCRIBE for push, falls back to polling
     await registry.start_background_poller()
 
-    # Start IB System Status monitor
-    from app.services.ib_status_monitor import create_monitor
-    monitor = create_monitor(registry)
-    app.state.ib_status_monitor = monitor
-    await monitor.start()
+    # Start IB System Status monitor (only if enabled in config)
+    monitor = None
+    ib_status_enabled = os.environ.get("IBCTL_IB_STATUS_ENABLED", "").lower() in ("true", "1", "yes")
+    if ib_status_enabled:
+        from app.services.ib_status_monitor import create_monitor
+        monitor = create_monitor(registry)
+        app.state.ib_status_monitor = monitor
+        await monitor.start()
+    else:
+        logger.info("IB System Status monitor disabled")
 
     # Start Notification service
     from app.services.notification_service import NotificationService
     notification_service = NotificationService()
     app.state.notification_service = notification_service
 
-    # Start background monitors (depend on registry + notification_service)
-    from app.services.no_clients_monitor import NoClientsMonitor
-    from app.services.login_failure_monitor import LoginFailureMonitor
-    no_clients_monitor = NoClientsMonitor(registry, notification_service)
-    login_failure_monitor = LoginFailureMonitor(registry, notification_service)
-    app.state.no_clients_monitor = no_clients_monitor
-    app.state.login_failure_monitor = login_failure_monitor
-    await no_clients_monitor.start()
-    await login_failure_monitor.start()
+    # Start monitor manager (single background task for all monitors)
+    from app.services.monitor_manager import MonitorManager
+    from app.services.monitors import (
+        LoginFailedMonitor, NoClientsMonitor,
+        SessionLostMonitor, ReloginFailedMonitor,
+        WarmRestartMonitor, IBMaintenanceMonitor,
+    )
+    monitors = [
+        LoginFailedMonitor(),
+        NoClientsMonitor(),
+        SessionLostMonitor(),
+        ReloginFailedMonitor(),
+        WarmRestartMonitor(),
+        IBMaintenanceMonitor(ib_status_monitor=monitor),
+    ]
+    monitor_manager = MonitorManager(registry, notification_service, monitors)
+    app.state.monitor_manager = monitor_manager
+    await monitor_manager.start()
 
     if notification_service.config.enabled:
-        logger.info("Notification service enabled (ntfy: %s/%s)",
-                     notification_service.config.ntfy_url, notification_service.config.ntfy_topic)
+        logger.info("Notification service enabled (channel: %s)", notification_service.config.channel)
     else:
         logger.info("Notification service disabled (set IBCTL_NOTIFICATIONS_ENABLED=true to enable)")
 
     yield
 
     # Stop services (reverse order)
-    await login_failure_monitor.stop()
-    await no_clients_monitor.stop()
-    await monitor.stop()
+    await monitor_manager.stop()
+    if monitor:
+        await monitor.stop()
     await registry.stop_background_poller()
+    if zmq_publisher:
+        zmq_publisher.close()
     logger.info("Dashboard shutting down")
 
 

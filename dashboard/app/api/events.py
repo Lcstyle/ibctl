@@ -1,8 +1,8 @@
 """Server-Sent Events endpoint for real-time multi-instance updates.
 
-Polls all ibctl instances every 2 seconds internally. Only pushes events
-to the browser when state changes are detected. The browser uses these
-to update the UI instantly without waiting for the HTMX poll interval.
+Wakes instantly when the instance registry receives a push status update
+(via SUBSCRIBE). Falls back to a 5-second heartbeat if no updates arrive.
+Only pushes events to the browser when state changes are detected.
 """
 
 from __future__ import annotations
@@ -31,8 +31,11 @@ async def events(request: Request):
             if await request.is_disconnected():
                 break
 
+            # Wait for push notification from SubscribeClient, or 5s heartbeat timeout
+            await registry.wait_for_update(timeout=5.0)
+
             try:
-                instances = await registry.all_status()
+                instances = registry.cached_all_status()
 
                 # Also cache STATE for each mode (state-history partial reads from cache)
                 # CONFIG is cached with 300s TTL and only fetched on first miss
@@ -73,7 +76,7 @@ async def events(request: Request):
                     last_states[mode] = current_state
                     last_ready[mode] = current_ready
 
-                # Periodic heartbeat with full status (every poll)
+                # Status update (on every push or heartbeat)
                 yield {
                     "event": "status",
                     "data": json.dumps([
@@ -83,12 +86,10 @@ async def events(request: Request):
                 }
 
             except Exception as e:
-                logger.debug("SSE poll error: %s", e)
+                logger.debug("SSE event error: %s", e)
                 yield {
                     "event": "error",
                     "data": json.dumps({"error": str(e)}),
                 }
-
-            await asyncio.sleep(2)
 
     return EventSourceResponse(event_generator())

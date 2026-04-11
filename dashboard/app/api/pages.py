@@ -594,32 +594,180 @@ async def state_history_partial(request: Request, mode: str | None = None):
 
 @router.get("/partials/config", response_class=HTMLResponse)
 async def config_partial(request: Request):
-    registry = request.app.state.instance_registry
+    """Dynamic config display — reads TOML + env vars locally, no TCP round-trip.
+
+    Contract: template always receives {"error": str|None, "sections": list}.
+    On failure, sections=[] and error describes the problem.
+    """
     templates = request.app.state.templates
+    config_logger = logging.getLogger("dashboard.api.config")
 
     try:
-        # Use cached config (5 min TTL) — config doesn't change at runtime
-        config_data = await registry.cached_config(registry.primary_mode())
-        if config_data is None:
-            client = registry.get_client(registry.primary_mode())
-            config = await client.config()
-            config_data = asdict(config)
-        config = type('Config', (), {'__getattr__': lambda s, k: config_data.get(k, {})})()
-    except (DashboardError, Exception) as e:
+        # Read config locally — we're in the same container, no need for TCP
+        config_data = _load_local_config()
+        sections = _build_config_groups(config_data)
+    except Exception:
+        config_logger.exception("Failed to load local config for display")
         return templates.TemplateResponse(request, "partials/config_content.html", {
-            "error": e.message, "config": {}, "env_vars": {},
+            "error": "Failed to load configuration — check dashboard logs",
+            "sections": [],
         })
 
-    # Collect relevant env vars for display
-    relevant_prefixes = ("TWS_", "TRADING_", "TWOFA", "IBCTL_", "BYPASS_", "READ_ONLY",
-                         "ALLOW_BLIND", "AUTO_RESTART", "AUTO_LOGOFF", "JAVA_HEAP",
-                         "EXISTING_SESSION", "VNC_", "TZ", "DISPLAY", "GATEWAY_OR")
-    env_vars = {k: v for k, v in sorted(os.environ.items()) if any(k.startswith(p) for p in relevant_prefixes)}
-
     return templates.TemplateResponse(request, "partials/config_content.html", {
-        "config": config,
-        "env_vars": env_vars,
+        "error": None,
+        "sections": sections,
     })
+
+
+def _load_local_config() -> dict:
+    """Load ibctl config from TOML file + env var overrides.
+
+    Reads the same TOML the Rust binary loads, applies the same env var
+    overlay the preflight validator uses. No TCP needed — we're local.
+    """
+    import tomllib
+    config_path = os.environ.get("IBCTL_CONFIG", "/opt/ibctl/ibctl.toml")
+    try:
+        with open(config_path, "rb") as f:
+            config = tomllib.load(f)
+    except FileNotFoundError:
+        config = {}
+
+    # Apply env overrides (same logic as preflight)
+    from app.preflight.env_overlay import apply_env_overrides
+    config = apply_env_overrides(config)
+
+    # Add env-only values that don't appear in TOML
+    env_only = {}
+    env_only_map = {
+        "TZ": "Timezone",
+        "AUTO_RESTART_TIME": "Auto Restart Time",
+        "READ_ONLY_API": "Read-Only API",
+        "BYPASS_WARNING": "Bypass Warnings",
+        "ALLOW_BLIND_TRADING": "Allow Blind Trading",
+        "TWS_MASTER_CLIENT_ID": "Master Client ID",
+        "VNC_SERVER_PASSWORD": "VNC Password",
+        "JAVA_HEAP_SIZE": "Java Heap Size",
+    }
+    for env_key, label in env_only_map.items():
+        val = os.environ.get(env_key)
+        if val is not None and val != "":
+            env_only[label] = val
+    if env_only:
+        config["environment"] = env_only
+
+    return config
+
+
+def _build_config_groups(config_data: dict) -> list[dict]:
+    """Group config sections into collapsible accordion panels."""
+    SECRET_KEYS = {"password", "secret", "token"}
+
+    # Logical groupings: (group_label, group_key, [toml_sections], default_open)
+    GROUPS = [
+        ("Identity & Auth", "identity", ["environment", "auth", "twofa"], True),
+        ("Gateway & Network", "gateway", ["gateway", "session", "command_server", "agent"], False),
+        ("Dashboard & Alerts", "dashboard", ["dashboard", "ib_system_status"], False),
+        ("Tuning & Operations", "tuning", ["timing", "logging", "site"], False),
+    ]
+
+    # Sub-section labels within each group
+    SECTION_LABELS = {
+        "auth": "Account",
+        "twofa": "2FA",
+        "gateway": "Gateway",
+        "session": "Session",
+        "command_server": "Command Server",
+        "agent": "Agent",
+        "dashboard": "Dashboard",
+        "ib_system_status": "IB Status Scraper",
+        "logging": "Logging",
+        "timing": "Timing",
+        "site": "Site / Failover",
+        "environment": "Runtime",
+    }
+
+    groups = []
+    for group_label, group_key, section_keys, default_open in GROUPS:
+        subsections = []
+        for sk in section_keys:
+            section_data = config_data.get(sk)
+            if not isinstance(section_data, dict) or not section_data:
+                continue
+            items = _extract_items(section_data, SECRET_KEYS)
+            if items:
+                subsections.append({
+                    "label": SECTION_LABELS.get(sk, sk),
+                    "items": items,
+                })
+
+        if subsections:
+            # Summary line for the accordion header
+            summary = _build_group_summary(group_key, config_data)
+            groups.append({
+                "key": group_key,
+                "label": group_label,
+                "summary": summary,
+                "subsections": subsections,
+                "default_open": default_open,
+            })
+
+    return groups
+
+
+def _extract_items(section_data: dict, secret_keys: set) -> list[dict]:
+    """Extract key-value items from a config section, flattening one level."""
+    items = []
+    for key, value in section_data.items():
+        if isinstance(value, dict):
+            for sub_key, sub_val in value.items():
+                display_key = f"{key}.{sub_key}"
+                masked = any(s in sub_key.lower() for s in secret_keys)
+                items.append({
+                    "key": display_key,
+                    "value": "********" if masked and sub_val else _format_val(sub_val),
+                    "masked": masked,
+                })
+        else:
+            masked = any(s in key.lower() for s in secret_keys)
+            items.append({
+                "key": key,
+                "value": "********" if masked and value else _format_val(value),
+                "masked": masked,
+            })
+    return items
+
+
+def _build_group_summary(group_key: str, config: dict) -> str:
+    """One-line summary for the accordion header."""
+    if group_key == "identity":
+        mode = config.get("auth", {}).get("trading_mode", "?")
+        user = config.get("auth", {}).get("tws_userid", "?")
+        return f"{mode} — {user}"
+    if group_key == "gateway":
+        program = config.get("gateway", {}).get("gateway_or_tws", "gateway")
+        heap = config.get("gateway", {}).get("java_heap_size", "?")
+        return f"{program} — {heap}MB heap"
+    if group_key == "dashboard":
+        enabled = config.get("dashboard", {}).get("enabled", False)
+        port = config.get("dashboard", {}).get("port", "?")
+        return f"{'enabled' if enabled else 'disabled'} — port {port}" if enabled else "disabled"
+    if group_key == "tuning":
+        role = config.get("site", {}).get("role", "primary")
+        level = config.get("logging", {}).get("level", "info")
+        return f"site={role} — log={level}"
+    return ""
+
+
+def _format_val(v) -> str:
+    """Format a config value for display."""
+    if v is None or v == "":
+        return "—"
+    if isinstance(v, bool):
+        return "yes" if v else "no"
+    if isinstance(v, list):
+        return ", ".join(str(x) for x in v) if v else "—"
+    return str(v)
 
 
 @router.get("/partials/logs", response_class=HTMLResponse)

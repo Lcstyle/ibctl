@@ -165,7 +165,7 @@ RUN if [ -f /tmp/prebuilt/ibctl ]; then \
 COPY dashboard/pyproject.toml /opt/ibctl/dashboard/pyproject.toml
 RUN python3 -m venv /opt/ibctl/dashboard/.venv \
     && /opt/ibctl/dashboard/.venv/bin/pip install --no-cache-dir \
-        fastapi uvicorn jinja2 sse-starlette requests beautifulsoup4 httpx
+        fastapi uvicorn jinja2 sse-starlette requests beautifulsoup4 httpx pyzmq
 
 # Copy dashboard source
 COPY dashboard/app /opt/ibctl/dashboard/app

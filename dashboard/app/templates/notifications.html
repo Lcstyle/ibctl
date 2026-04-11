@@ -3,29 +3,66 @@
 <h2>Notifications</h2>
 
 <div id="persist-warning" style="display: none; background: #422006; border: 1px solid #92400e; border-radius: 6px; padding: 10px 14px; margin-bottom: 12px; font-size: 12px; color: #fbbf24;">
-    <strong>Warning:</strong> No persistent volume mounted at <code>/opt/ibctl/persist</code>. Settings saved here will be lost on container restart. Mount a volume or use environment variables (IBCTL_NTFY_TOKEN, etc.) for durable configuration.
+    <strong>Warning:</strong> No persistent volume mounted at <code>/opt/ibctl/persist</code>. Settings saved here will be lost on container restart. Mount a volume or use environment variables for durable configuration.
 </div>
 <div id="notifications-content">
     <div class="card" style="margin-bottom: 12px;">
-        <div class="card-label">ntfy.sh Configuration</div>
+        <div class="card-label">Notification Configuration</div>
         <div style="margin-top: 8px;">
             <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px;">
                 <label style="color: #a1a1aa; font-size: 12px; min-width: 60px;">Enabled</label>
-                <input type="checkbox" id="notif-enabled">
-            </div>
-            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
-                <label style="color: #a1a1aa; font-size: 12px; min-width: 60px;">URL</label>
-                <input type="text" id="notif-url" placeholder="https://ntfy.sh" style="flex: 1; background: #0a1630; border: 1px solid #27272a; border-radius: 3px; color: #e2e8f0; padding: 4px 8px; font-size: 12px; font-family: 'SF Mono', monospace;">
-            </div>
-            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
-                <label style="color: #a1a1aa; font-size: 12px; min-width: 60px;">Topic</label>
-                <input type="text" id="notif-topic" placeholder="ibctl" style="flex: 1; background: #0a1630; border: 1px solid #27272a; border-radius: 3px; color: #e2e8f0; padding: 4px 8px; font-size: 12px; font-family: 'SF Mono', monospace;">
+                <input type="checkbox" id="notif-enabled" onchange="markDirty()">
             </div>
             <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px;">
-                <label style="color: #a1a1aa; font-size: 12px; min-width: 60px;">Token</label>
-                <input type="password" id="notif-token" placeholder="Bearer token (optional)" style="flex: 1; background: #0a1630; border: 1px solid #27272a; border-radius: 3px; color: #e2e8f0; padding: 4px 8px; font-size: 12px; font-family: 'SF Mono', monospace;">
-                <span id="token-env-badge" style="display: none; font-size: 10px; color: #fbbf24; white-space: nowrap;">🔒 Set via env var</span>
+                <label style="color: #a1a1aa; font-size: 12px; min-width: 60px;">Channel</label>
+                <select id="notif-channel" onchange="toggleChannelForms(); markDirty()" style="flex: 1; max-width: 200px; background: #0a1630; border: 1px solid #27272a; border-radius: 3px; color: #e2e8f0; padding: 4px 8px; font-size: 12px; font-family: 'SF Mono', monospace;">
+                    <option value="ntfy">ntfy.sh</option>
+                    <option value="slack">Slack</option>
+                    <option value="telegram">Telegram</option>
+                </select>
+                <span id="channel-env-badge" style="display: none; font-size: 10px; color: #fbbf24; white-space: nowrap;">Set via env var</span>
             </div>
+
+            <!-- ntfy fields -->
+            <div id="ntfy-fields">
+                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+                    <label style="color: #a1a1aa; font-size: 12px; min-width: 60px;">URL</label>
+                    <input type="text" id="notif-url" placeholder="https://ntfy.sh" style="flex: 1; background: #0a1630; border: 1px solid #27272a; border-radius: 3px; color: #e2e8f0; padding: 4px 8px; font-size: 12px; font-family: 'SF Mono', monospace;" onchange="markDirty()">
+                </div>
+                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+                    <label style="color: #a1a1aa; font-size: 12px; min-width: 60px;">Topic</label>
+                    <input type="text" id="notif-topic" placeholder="ibctl" style="flex: 1; background: #0a1630; border: 1px solid #27272a; border-radius: 3px; color: #e2e8f0; padding: 4px 8px; font-size: 12px; font-family: 'SF Mono', monospace;" onchange="markDirty()">
+                </div>
+                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px;">
+                    <label style="color: #a1a1aa; font-size: 12px; min-width: 60px;">Token</label>
+                    <input type="password" id="notif-token" placeholder="Bearer token (optional)" style="flex: 1; background: #0a1630; border: 1px solid #27272a; border-radius: 3px; color: #e2e8f0; padding: 4px 8px; font-size: 12px; font-family: 'SF Mono', monospace;" onchange="markDirty()">
+                    <span id="ntfy-token-env-badge" style="display: none; font-size: 10px; color: #fbbf24; white-space: nowrap;">Set via env var</span>
+                </div>
+            </div>
+
+            <!-- Slack fields -->
+            <div id="slack-fields" style="display: none;">
+                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px;">
+                    <label style="color: #a1a1aa; font-size: 12px; min-width: 60px;">Webhook</label>
+                    <input type="password" id="notif-slack-webhook" placeholder="https://hooks.slack.com/services/..." style="flex: 1; background: #0a1630; border: 1px solid #27272a; border-radius: 3px; color: #e2e8f0; padding: 4px 8px; font-size: 12px; font-family: 'SF Mono', monospace;" onchange="markDirty()">
+                    <span id="slack-webhook-env-badge" style="display: none; font-size: 10px; color: #fbbf24; white-space: nowrap;">Set via env var</span>
+                </div>
+            </div>
+
+            <!-- Telegram fields -->
+            <div id="telegram-fields" style="display: none;">
+                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+                    <label style="color: #a1a1aa; font-size: 12px; min-width: 60px;">Bot Token</label>
+                    <input type="password" id="notif-tg-token" placeholder="123456:ABC-DEF..." style="flex: 1; background: #0a1630; border: 1px solid #27272a; border-radius: 3px; color: #e2e8f0; padding: 4px 8px; font-size: 12px; font-family: 'SF Mono', monospace;" onchange="markDirty()">
+                    <span id="tg-token-env-badge" style="display: none; font-size: 10px; color: #fbbf24; white-space: nowrap;">Set via env var</span>
+                </div>
+                <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 10px;">
+                    <label style="color: #a1a1aa; font-size: 12px; min-width: 60px;">Chat ID</label>
+                    <input type="text" id="notif-tg-chatid" placeholder="-1001234567890" style="flex: 1; background: #0a1630; border: 1px solid #27272a; border-radius: 3px; color: #e2e8f0; padding: 4px 8px; font-size: 12px; font-family: 'SF Mono', monospace;" onchange="markDirty()">
+                    <span id="tg-chatid-env-badge" style="display: none; font-size: 10px; color: #fbbf24; white-space: nowrap;">Set via env var</span>
+                </div>
+            </div>
+
             <div style="display: flex; gap: 6px;">
                 <button class="ctrl-btn" onclick="saveConfig()">Save</button>
                 <button class="ctrl-btn" onclick="testNotification()">Send Test</button>
@@ -57,12 +94,20 @@ var currentConfig = {};
 var envLocked = {};
 
 var EVENT_LABELS = {
+    'login_failed': {label: 'Login Failed', desc: 'Alert when login attempt fails and ibctl restarts', hasTimeout: false},
     'no_clients': {label: 'No API Clients', desc: 'Alert when an instance is Connected but has 0 clients', hasTimeout: true},
     'session_lost': {label: 'Session Lost', desc: 'Alert when state leaves Connected unexpectedly', hasTimeout: false},
     'relogin_failed': {label: 'Re-login Failed', desc: 'Alert when re-login attempts exhausted', hasTimeout: false},
-    'warm_restart': {label: 'Warm Restart', desc: 'Alert when daily warm restart completes', hasTimeout: false},
-    'ib_maintenance': {label: 'IB Maintenance', desc: 'Alert when IB status changes to maintenance', hasTimeout: false},
+    'warm_restart': {label: 'Warm Restart', desc: 'Alert when Gateway JVM warm restart occurs', hasTimeout: false},
+    'ib_maintenance': {label: 'IB Maintenance', desc: 'Alert when IB status changes to maintenance or outage', hasTimeout: false},
 };
+
+function toggleChannelForms() {
+    var channel = document.getElementById('notif-channel').value;
+    document.getElementById('ntfy-fields').style.display = channel === 'ntfy' ? '' : 'none';
+    document.getElementById('slack-fields').style.display = channel === 'slack' ? '' : 'none';
+    document.getElementById('telegram-fields').style.display = channel === 'telegram' ? '' : 'none';
+}
 
 function loadConfig() {
     fetch(ROOT_PATH + '/api/v1/notifications/config')
@@ -80,13 +125,21 @@ function loadConfig() {
             warning.style.display = 'none';
         }
 
+        // Global fields
         document.getElementById('notif-enabled').checked = d.config.enabled;
+        document.getElementById('notif-channel').value = d.config.channel || 'ntfy';
+        applyEnvLock('notif-channel', envLocked.channel, 'IBCTL_NOTIFICATION_CHANNEL');
+        var channelBadge = document.getElementById('channel-env-badge');
+        channelBadge.style.display = envLocked.channel ? '' : 'none';
+
+        // ntfy fields
         document.getElementById('notif-url').value = d.config.ntfy.url || '';
         document.getElementById('notif-topic').value = d.config.ntfy.topic || '';
+        applyEnvLock('notif-url', envLocked.ntfy_url, 'IBCTL_NTFY_URL');
+        applyEnvLock('notif-topic', envLocked.ntfy_topic, 'IBCTL_NTFY_TOPIC');
 
-        // Handle env-locked token
         var tokenInput = document.getElementById('notif-token');
-        var tokenBadge = document.getElementById('token-env-badge');
+        var tokenBadge = document.getElementById('ntfy-token-env-badge');
         if (envLocked.ntfy_token) {
             tokenInput.value = '';
             tokenInput.placeholder = 'Injected via IBCTL_NTFY_TOKEN';
@@ -100,10 +153,54 @@ function loadConfig() {
             tokenInput.value = d.config.ntfy.token || '';
         }
 
-        // Lock other env-injected fields
-        applyEnvLock('notif-url', envLocked.ntfy_url, 'IBCTL_NTFY_URL');
-        applyEnvLock('notif-topic', envLocked.ntfy_topic, 'IBCTL_NTFY_TOPIC');
+        // Slack fields
+        var slackWebhook = document.getElementById('notif-slack-webhook');
+        var slackBadge = document.getElementById('slack-webhook-env-badge');
+        if (envLocked.slack_webhook_url) {
+            slackWebhook.value = '';
+            slackWebhook.placeholder = 'Injected via IBCTL_SLACK_WEBHOOK_URL';
+            slackWebhook.disabled = true;
+            slackWebhook.style.opacity = '0.5';
+            slackBadge.style.display = '';
+        } else {
+            slackWebhook.disabled = false;
+            slackWebhook.style.opacity = '1';
+            slackBadge.style.display = 'none';
+            slackWebhook.value = d.config.slack.webhook_url || '';
+        }
 
+        // Telegram fields
+        var tgToken = document.getElementById('notif-tg-token');
+        var tgTokenBadge = document.getElementById('tg-token-env-badge');
+        if (envLocked.telegram_bot_token) {
+            tgToken.value = '';
+            tgToken.placeholder = 'Injected via IBCTL_TELEGRAM_BOT_TOKEN';
+            tgToken.disabled = true;
+            tgToken.style.opacity = '0.5';
+            tgTokenBadge.style.display = '';
+        } else {
+            tgToken.disabled = false;
+            tgToken.style.opacity = '1';
+            tgTokenBadge.style.display = 'none';
+            tgToken.value = d.config.telegram.bot_token || '';
+        }
+
+        var tgChatId = document.getElementById('notif-tg-chatid');
+        var tgChatBadge = document.getElementById('tg-chatid-env-badge');
+        if (envLocked.telegram_chat_id) {
+            tgChatId.value = '';
+            tgChatId.placeholder = 'Injected via IBCTL_TELEGRAM_CHAT_ID';
+            tgChatId.disabled = true;
+            tgChatId.style.opacity = '0.5';
+            tgChatBadge.style.display = '';
+        } else {
+            tgChatId.disabled = false;
+            tgChatId.style.opacity = '1';
+            tgChatBadge.style.display = 'none';
+            tgChatId.value = d.config.telegram.chat_id || '';
+        }
+
+        toggleChannelForms();
         renderEvents(d.config.events || {});
     });
 }
@@ -163,9 +260,13 @@ function gatherConfig() {
     }
     return {
         enabled: document.getElementById('notif-enabled').checked,
+        channel: document.getElementById('notif-channel').value,
         ntfy_url: document.getElementById('notif-url').value,
         ntfy_topic: document.getElementById('notif-topic').value,
         ntfy_token: document.getElementById('notif-token').value,
+        slack_webhook_url: document.getElementById('notif-slack-webhook').value,
+        telegram_bot_token: document.getElementById('notif-tg-token').value,
+        telegram_chat_id: document.getElementById('notif-tg-chatid').value,
         events: events,
     };
 }

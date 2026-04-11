@@ -599,14 +599,14 @@ impl Config {
         }
 
         // 2FA
-        if let Ok(v) = std::env::var("TOTP_PROVIDER") {
+        if let Some(v) = env_nonempty("TOTP_PROVIDER") {
             match v.to_lowercase().as_str() {
                 "oathtool" => self.twofa.provider = TotpProvider::Oathtool,
                 "builtin" => self.twofa.provider = TotpProvider::Builtin,
                 other => log::warn!("Unknown TOTP_PROVIDER '{}', keeping default", other),
             }
         }
-        if let Ok(v) = std::env::var("TWOFA_TIMEOUT_ACTION") {
+        if let Some(v) = env_nonempty("TWOFA_TIMEOUT_ACTION") {
             match v.to_lowercase().as_str() {
                 "restart" => self.twofa.timeout_action = TwoFaTimeoutAction::Restart,
                 "exit" => self.twofa.timeout_action = TwoFaTimeoutAction::Exit,
@@ -616,10 +616,10 @@ impl Config {
         if let Some(v) = std::env::var("TWOFA_EXIT_INTERVAL").ok().and_then(|s| s.parse().ok()) {
             self.twofa.timeout_seconds = v;
         }
-        if let Ok(v) = std::env::var("TWOFA_DEVICE") {
+        if let Some(v) = env_nonempty("TWOFA_DEVICE") {
             self.twofa.device = v;
         }
-        if let Ok(v) = std::env::var("RELOGIN_AFTER_TWOFA_TIMEOUT") {
+        if let Some(v) = env_nonempty("RELOGIN_AFTER_TWOFA_TIMEOUT") {
             self.twofa.relogin_after_timeout =
                 matches!(v.to_lowercase().as_str(), "yes" | "true" | "1");
         }
@@ -629,19 +629,19 @@ impl Config {
             .unwrap_or(false);
 
         // Gateway
-        if let Ok(v) = std::env::var("TWS_PATH") {
+        if let Some(v) = env_nonempty("TWS_PATH") {
             self.gateway.tws_path = v;
         }
-        if let Ok(v) = std::env::var("TWS_SETTINGS_PATH") {
+        if let Some(v) = env_nonempty("TWS_SETTINGS_PATH") {
             self.gateway.settings_path = v;
         }
-        if let Ok(v) = std::env::var("TWS_MAJOR_VRSN") {
+        if let Some(v) = env_nonempty("TWS_MAJOR_VRSN") {
             self.gateway.version = v;
         }
         if let Some(v) = std::env::var("JAVA_HEAP_SIZE").ok().and_then(|s| s.parse().ok()) {
             self.gateway.java_heap_mb = v;
         }
-        if let Ok(v) = std::env::var("GATEWAY_OR_TWS") {
+        if let Some(v) = env_nonempty("GATEWAY_OR_TWS") {
             match v.to_lowercase().as_str() {
                 "gateway" => self.gateway.program = GatewayProgram::Gateway,
                 "tws" => self.gateway.program = GatewayProgram::Tws,
@@ -650,7 +650,7 @@ impl Config {
         }
 
         // Session
-        if let Ok(v) = std::env::var("IBCTL_SESSION_ACTION") {
+        if let Some(v) = env_nonempty("IBCTL_SESSION_ACTION") {
             match v.to_lowercase().as_str() {
                 "primary" => self.session.action = SessionAction::Primary,
                 "secondary" => self.session.action = SessionAction::Secondary,
@@ -659,8 +659,8 @@ impl Config {
             }
         }
         // IBCTL_ACCEPT_INCOMING takes precedence; fall back to IBC-compatible TWS_ACCEPT_INCOMING
-        if let Ok(v) = std::env::var("IBCTL_ACCEPT_INCOMING")
-            .or_else(|_| std::env::var("TWS_ACCEPT_INCOMING"))
+        if let Some(v) = env_nonempty("IBCTL_ACCEPT_INCOMING")
+            .or_else(|| env_nonempty("TWS_ACCEPT_INCOMING"))
         {
             match v.to_lowercase().as_str() {
                 "accept" => self.session.accept_incoming = AcceptIncoming::Accept,
@@ -669,18 +669,18 @@ impl Config {
                 other => log::warn!("Unknown ACCEPT_INCOMING '{}', keeping default", other),
             }
         }
-        if let Ok(v) = std::env::var("TWS_COLD_RESTART") {
+        if let Some(v) = env_nonempty("TWS_COLD_RESTART") {
             self.session.cold_restart_time = v;
         }
 
         // Command server
-        if let Ok(v) = std::env::var("IBCTL_COMMAND_SERVER_ENABLED") {
+        if let Some(v) = env_nonempty("IBCTL_COMMAND_SERVER_ENABLED") {
             self.command_server.enabled = v.to_lowercase() != "false" && v != "0" && v.to_lowercase() != "no";
         }
         if let Some(v) = std::env::var("IBCTL_COMMAND_PORT").ok().and_then(|s| s.parse().ok()) {
             self.command_server.port = v;
         }
-        if let Ok(v) = std::env::var("IBCTL_CONTROL_FROM") {
+        if let Some(v) = env_nonempty("IBCTL_CONTROL_FROM") {
             self.command_server.control_from =
                 v.split(',').map(|s| s.trim().to_string()).collect();
         }
@@ -695,7 +695,7 @@ impl Config {
         if let Some(v) = std::env::var("IBCTL_RELOGIN_ATTEMPTS").ok().and_then(|s| s.parse().ok()) {
             self.timing.relogin_max_attempts = v;
         }
-        if let Ok(v) = std::env::var("IBCTL_RELOGIN_FAILURE_ACTION") {
+        if let Some(v) = env_nonempty("IBCTL_RELOGIN_FAILURE_ACTION") {
             match v.to_lowercase().as_str() {
                 "reauth" => self.timing.relogin_failure_action = ReloginFailureAction::Reauth,
                 "restart" => self.timing.relogin_failure_action = ReloginFailureAction::Restart,
@@ -704,12 +704,12 @@ impl Config {
         }
 
         // Agent
-        if let Ok(v) = std::env::var("IBCTL_AGENT_SOCKET") {
+        if let Some(v) = env_nonempty("IBCTL_AGENT_SOCKET") {
             self.agent.socket_path = v;
         }
 
         // Logging
-        if let Ok(v) = std::env::var("IBCTL_LOG_LEVEL") {
+        if let Some(v) = env_nonempty("IBCTL_LOG_LEVEL") {
             match v.to_lowercase().as_str() {
                 "debug" => self.logging.level = LogLevel::Debug,
                 "info" => self.logging.level = LogLevel::Info,
@@ -718,13 +718,13 @@ impl Config {
                 other => log::warn!("Unknown IBCTL_LOG_LEVEL '{}', keeping default", other),
             }
         }
-        if let Ok(v) = std::env::var("IBCTL_LOG_DIR") {
+        if let Some(v) = env_nonempty("IBCTL_LOG_DIR") {
             self.logging.log_dir = v;
         }
-        if let Ok(v) = std::env::var("IBCTL_FUTURES_SESSION_LOGGING") {
+        if let Some(v) = env_nonempty("IBCTL_FUTURES_SESSION_LOGGING") {
             self.logging.futures_session_logging = matches!(v.to_lowercase().as_str(), "true" | "yes" | "1");
         }
-        if let Ok(v) = std::env::var("IBCTL_SESSION_REOPEN_HOUR") {
+        if let Some(v) = env_nonempty("IBCTL_SESSION_REOPEN_HOUR") {
             if let Ok(h) = v.parse::<u8>() {
                 if h < 24 {
                     self.logging.session_reopen_hour = h;
@@ -733,14 +733,14 @@ impl Config {
         }
 
         // Site
-        if let Ok(v) = std::env::var("IBCTL_SITE_ROLE") {
+        if let Some(v) = env_nonempty("IBCTL_SITE_ROLE") {
             match v.to_lowercase().as_str() {
                 "primary" => self.site.role = SiteRole::Primary,
                 "standby" => self.site.role = SiteRole::Standby,
                 other => log::warn!("Unknown IBCTL_SITE_ROLE '{}', keeping default", other),
             }
         }
-        if let Ok(v) = std::env::var("IBCTL_AUTO_LAUNCH") {
+        if let Some(v) = env_nonempty("IBCTL_AUTO_LAUNCH") {
             self.site.auto_launch = matches!(v.to_lowercase().as_str(), "true" | "yes" | "1");
         }
     }
@@ -779,6 +779,12 @@ impl Config {
 
 }
 
+/// Read an environment variable, skipping empty values.
+/// Empty string = not set = use TOML default.
+fn env_nonempty(var: &str) -> Option<String> {
+    std::env::var(var).ok().filter(|v| !v.is_empty())
+}
+
 /// Read an environment variable, with Docker secrets `_FILE` support.
 ///
 /// If `VAR_FILE` is set, reads the file contents. Otherwise returns `VAR` value.
@@ -795,8 +801,8 @@ pub fn env_or_file(var: &str) -> Option<String> {
         }
     }
 
-    // Fall back to direct env var
-    std::env::var(var).ok()
+    // Fall back to direct env var — skip empty strings (empty = use TOML default)
+    std::env::var(var).ok().filter(|v| !v.is_empty())
 }
 
 #[cfg(test)]

@@ -3,6 +3,10 @@
 //! Events are pushed by the Java agent over a dedicated Unix domain socket.
 //! The state machine uses these to update its `AgentObservation` cache,
 //! replacing periodic polling with event-driven observation.
+//!
+//! Only fields consumed by the state machine are declared here. Serde
+//! silently skips any additional JSON fields (e.g. `ts`, `bounds` on
+//! events where they aren't used).
 
 use serde::Deserialize;
 
@@ -13,14 +17,11 @@ pub enum AgentEvent {
     /// Protocol handshake — sent on connect.
     Hello {
         protocol_version: u32,
-        agent_tick_ms: u32,
-        ts: u64,
     },
     /// Full snapshot of all current windows — sent on connect after hello.
     Snapshot {
         seq: u64,
         windows: Vec<SnapshotWindow>,
-        ts: u64,
     },
     /// A new window became visible.
     WindowOpened {
@@ -29,56 +30,41 @@ pub enum AgentEvent {
         window_title: String,
         window_class: String,
         has_login_button: bool,
-        bounds: Option<EventBounds>,
-        ts: u64,
     },
     /// A window was closed/disposed.
     WindowClosed {
         seq: u64,
         window_id: u64,
         window_title: String,
-        ts: u64,
     },
     /// Event queue overflowed — consumer must re-snapshot.
-    Overflow {
-        seq: u64,
-        ts: u64,
-    },
+    Overflow {},
     /// Periodic heartbeat (every 30s).
-    Keepalive {
-        seq: u64,
-        ts: u64,
-    },
+    Keepalive {},
     /// Wave 3: Login form is ready with field details.
     LoginFormReady {
-        seq: u64,
-        window_id: u64,
         text_field_count: u32,
         password_field_count: u32,
         login_button: Option<String>,
         selected_mode: Option<String>,
-        ts: u64,
     },
     /// Wave 3: 2FA prompt with dialog structure details.
     TwofaPrompt {
-        seq: u64,
-        window_id: u64,
         prompt_type: String,
         devices: Vec<String>,
-        ts: u64,
     },
     /// Wave 3: Error/warning dialog with message and buttons.
     ErrorDialog {
-        seq: u64,
-        window_id: u64,
         window_title: String,
         message: Option<String>,
         buttons: Vec<String>,
-        ts: u64,
     },
 }
 
+/// Window data from agent snapshot. Fields populated by serde, read by
+/// reconciliation logic (e.g. bounds.width for window size filtering).
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // Fields read via serde + application code; compiler can't trace through Deserialize
 pub struct SnapshotWindow {
     pub window_id: u64,
     pub window_title: String,
@@ -88,6 +74,7 @@ pub struct SnapshotWindow {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)] // Accessed via SnapshotWindow.bounds — compiler can't trace serde path
 pub struct EventBounds {
     pub x: i32,
     pub y: i32,
@@ -285,7 +272,7 @@ mod tests {
     fn test_deserialize_overflow() {
         let json = r#"{"type":"overflow","seq":99,"ts":1000}"#;
         let event: AgentEvent = serde_json::from_str(json).unwrap();
-        assert!(matches!(event, AgentEvent::Overflow { seq: 99, .. }));
+        assert!(matches!(event, AgentEvent::Overflow { .. }));
     }
 
     #[test]

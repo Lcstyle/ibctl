@@ -34,6 +34,17 @@ Thumbs.db
 deploy.sh
 docker-compose.override.yml
 notifications.json
+scraper_overrides.json
+ib_status_audit.json
+
+# Backup/snapshot files — deployment tools may generate these on hosts
+*.bak
+*.backup
+*.snapshot
+*-backup.*
+*-snapshot.*
+*.site-specific.*
+jts.ini
 
 # Build artifacts
 docker/ibctl

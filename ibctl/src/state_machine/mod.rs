@@ -566,12 +566,11 @@ impl StateMachine {
                     if (t.contains("ib gateway") || t.contains("ibkr gateway"))
                         && !t.contains("login")
                         && !t.contains("configuration")
+                        && w.bounds.as_ref().is_some_and(|b| b.width > 400)
                     {
-                        if w.bounds.as_ref().map(|b| b.width > 400).unwrap_or(false) {
-                            log::info!("Warm restart: Gateway self-authenticated — main window detected");
-                            self.warm_restart_pending = None;
-                            return Ok(State::DismissingPopups);
-                        }
+                        log::info!("Warm restart: Gateway self-authenticated — main window detected");
+                        self.warm_restart_pending = None;
+                        return Ok(State::DismissingPopups);
                     }
                 }
             }
@@ -844,7 +843,7 @@ impl StateMachine {
                     if self.twofa_gone_at.is_none() {
                         self.twofa_gone_at = Some(Instant::now());
                         log::info!("2FA dialog disappeared — confirming (3s)...");
-                    } else if self.twofa_gone_at.unwrap().elapsed() > std::time::Duration::from_secs(3) {
+                    } else if self.twofa_gone_at.is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(3)) {
                         log::info!("2FA completed (confirmed — dialog gone for 3s)");
                         return Ok(State::DismissingPopups);
                     }

@@ -4,84 +4,51 @@
 </div>
 {% else %}
 
-{% set ev = env_vars %}
-{% macro k(full, short) %}<span class="config-key"><span class="full">{{ full }}</span><span class="short">{{ short }}</span></span>{% endmacro %}
-
-<div class="config-columns">
-
-<!-- GLOBAL / CONTAINER -->
-<div class="card config-col">
-    <div class="card-label" style="font-size: 12px; letter-spacing: 1px; color: #71717a;">GLOBAL / CONTAINER</div>
-    <div class="config-grid" style="margin-top: 8px;">
-        <div class="config-item">{{ k('Trading Mode', 'Mode') }}<span class="config-val">{{ ev.get('TRADING_MODE', config.auth.trading_mode) }}</span></div>
-        <div class="config-item">{{ k('Timezone', 'TZ') }}<span class="config-val">{{ ev.get('TZ', 'UTC') }}</span></div>
-        <div class="config-item">{{ k('TWS Path', 'Path') }}<span class="config-val">{{ config.gateway.tws_path }}</span></div>
-        <div class="config-item">{{ k('Gateway Version', 'Version') }}<span class="config-val">{{ ev.get('TWS_MAJOR_VRSN', config.gateway.version) }}</span></div>
-        <div class="config-item">{{ k('Program', 'Prog') }}<span class="config-val">{{ config.gateway.program }}</span></div>
-        <div class="config-item">{{ k('Java Heap', 'Heap') }}<span class="config-val">{{ ev.get('JAVA_HEAP_SIZE', config.gateway.java_heap_mb) }}MB</span></div>
-        <div class="config-item">{{ k('Session Action', 'Session') }}<span class="config-val">{{ config.session.action }}</span></div>
-        <div class="config-item">{{ k('Accept Incoming', 'Accept') }}<span class="config-val">{{ config.session.accept_incoming }}</span></div>
-        <div class="config-item">{{ k('Master Client ID', 'Client ID') }}<span class="config-val">{{ ev.get('TWS_MASTER_CLIENT_ID', '—') }}</span></div>
-        <div class="config-item">{{ k('Read-Only API', 'R/O API') }}<span class="config-val">{{ ev.get('READ_ONLY_API', 'no') }}</span></div>
-        <div class="config-item">{{ k('Bypass Warnings', 'Bypass') }}<span class="config-val">{{ ev.get('BYPASS_WARNING', 'no') }}</span></div>
-        <div class="config-item">{{ k('Cold Restart', 'Cold') }}<span class="config-val">{{ ev.get('TWS_COLD_RESTART', '—') }}</span></div>
-        <div class="config-item">{{ k('Auto Restart Time', 'Restart') }}<span class="config-val">{{ ev.get('AUTO_RESTART_TIME', '—') }}</span></div>
-        <div class="config-item">{{ k('2FA Device', '2FA') }}<span class="config-val">{{ ev.get('TWOFA_DEVICE', '—') }}</span></div>
-        <div class="config-item">{{ k('2FA Timeout Action', '2FA Act') }}<span class="config-val">{{ ev.get('TWOFA_TIMEOUT_ACTION', 'restart') }}</span></div>
-        <div class="config-item">{{ k('2FA Timeout', '2FA T/O') }}<span class="config-val">{{ ev.get('TWOFA_EXIT_INTERVAL', '120') }}s</span></div>
-        <div class="config-item">{{ k('Dashboard Port', 'Dash') }}<span class="config-val">{{ ev.get('IBCTL_DASHBOARD_PORT', '8080') }}</span></div>
-        <div class="config-item">{{ k('VNC Password', 'VNC') }}<span class="config-val config-masked">********</span></div>
-    </div>
-    <div style="margin-top: 12px; padding-top: 10px; border-top: 1px solid #27272a;">
-        <div class="card-label" style="font-size: 11px; letter-spacing: 1px; color: #52525b; margin-bottom: 6px;">TIMING</div>
-        <div class="config-grid">
-            <div class="config-item"><span class="config-key">UI Tick</span><span class="config-val">{{ config.timing.ui_tick_ms }}ms</span></div>
-            <div class="config-item"><span class="config-key">Agent Tick</span><span class="config-val">{{ config.timing.agent_tick_ms }}ms</span></div>
-            <div class="config-item">{{ k('Post-Login Delay', 'Login Delay') }}<span class="config-val">{{ config.timing.post_login_delay_ms }}ms</span></div>
-            <div class="config-item">{{ k('Popup Quiet', 'Popup') }}<span class="config-val">{{ config.timing.popup_quiet_secs }}s</span></div>
+{% for group in sections %}
+<div class="accordion-card{% if group.default_open %} open{% endif %}" data-accordion="cfg-{{ group.key }}"{% if group.default_open %} data-default-open="true"{% endif %}>
+    <div class="accordion-header" onclick="toggleConfigAccordion(this)">
+        <div class="accordion-title">
+            <span class="accordion-label">{{ group.label }}</span>
+            <span class="accordion-status" style="color: #a1a1aa; font-size: 12px;">{{ group.summary }}</span>
         </div>
+        <span class="accordion-chevron">&#9660;</span>
+    </div>
+    <div class="accordion-body" style="padding: 0;">
+        {% for sub in group.subsections %}
+        {% if group.subsections | length > 1 %}
+        <div style="padding: 6px 14px 2px; color: #52525b; font-size: 10px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase;{% if not loop.first %} border-top: 1px solid #16213e; margin-top: 2px;{% endif %}">{{ sub.label }}</div>
+        {% endif %}
+        <div style="padding: 4px 14px 8px; display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 0 20px;">
+            {% for item in sub["items"] %}
+            <div style="display: flex; justify-content: space-between; align-items: baseline; padding: 3px 0; border-bottom: 1px solid #0a1630;">
+                <span style="color: #71717a; font-size: 11px; white-space: nowrap; margin-right: 12px;">{{ item.key }}</span>
+                <span style="color: {% if item.masked %}#52525b{% else %}#e2e8f0{% endif %}; font-size: 11px; font-family: 'SF Mono', monospace; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="{{ item.value }}">{{ item.value }}</span>
+            </div>
+            {% endfor %}
+        </div>
+        {% endfor %}
     </div>
 </div>
+{% endfor %}
 
-<!-- RIGHT COLUMN: LIVE + PAPER stacked -->
-<div class="config-col config-col-stack">
+<style>
+.accordion-card { background: #0d1b3e; border: 1px solid #16213e; border-radius: 8px; margin-bottom: 6px; overflow: hidden; }
+.accordion-card.open { border-color: #1e3a6e; }
+.accordion-header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; cursor: pointer; user-select: none; }
+.accordion-header:hover { background: #112040; }
+.accordion-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.accordion-label { font-size: 11px; color: #555; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }
+.accordion-chevron { color: #555; font-size: 10px; transition: transform 0.2s; }
+.accordion-card.open .accordion-chevron { transform: rotate(180deg); }
+.accordion-body { display: none; border-top: 1px solid #16213e; }
+.accordion-card.open .accordion-body { display: block; }
+</style>
 
-    <!-- LIVE -->
-    <div class="card">
-        <div class="card-label" style="font-size: 12px; letter-spacing: 1px;">
-            <span style="color: #4ade80; font-weight: 700;">LIVE</span>
-            <span style="color: #71717a;"> Trading Instance</span>
-        </div>
-        <div class="config-grid" style="margin-top: 8px;">
-            <div class="config-item"><span class="config-key">User</span><span class="config-val">{{ ev.get('TWS_USERID', config.auth.username) }}</span></div>
-            <div class="config-item"><span class="config-key">Pass</span><span class="config-val config-masked">********</span></div>
-            <div class="config-item">{{ k('Gateway API Port', 'API') }}<span class="config-val">4001→4003</span></div>
-            <div class="config-item">{{ k('Command Server', 'Cmd') }}<span class="config-val">{{ config.command_server.port }} ({{ config.command_server.bind_address }})</span></div>
-            <div class="config-item">{{ k('Agent Socket', 'Agent') }}<span class="config-val">{{ config.agent.socket_path }}</span></div>
-            {% if config.gateway.settings_path %}
-            <div class="config-item">{{ k('Settings Path', 'Settings') }}<span class="config-val">{{ config.gateway.settings_path }}</span></div>
-            {% endif %}
-        </div>
-    </div>
-
-    <!-- PAPER -->
-    <div class="card">
-        <div class="card-label" style="font-size: 12px; letter-spacing: 1px;">
-            <span style="color: #fbbf24; font-weight: 700;">PAPER</span>
-            <span style="color: #71717a;"> Simulated Trading</span>
-        </div>
-        <div class="config-grid" style="margin-top: 8px;">
-            <div class="config-item"><span class="config-key">User</span><span class="config-val">{{ ev.get('TWS_USERID_PAPER', '—') }}</span></div>
-            <div class="config-item"><span class="config-key">Pass</span><span class="config-val config-masked">********</span></div>
-            <div class="config-item">{{ k('Gateway API Port', 'API') }}<span class="config-val">4002→4004</span></div>
-            <div class="config-item">{{ k('Command Server', 'Cmd') }}<span class="config-val">7463</span></div>
-            <div class="config-item">{{ k('Agent Socket', 'Agent') }}<span class="config-val">/run/ibctl/agent-paper.sock</span></div>
-            <div class="config-item">{{ k('Settings Path', 'Settings') }}<span class="config-val">/home/ibgateway/Jts_paper</span></div>
-        </div>
-    </div>
-
-</div>
-
-</div>
+<script>
+function toggleConfigAccordion(header) {
+    var card = header.parentElement;
+    card.classList.toggle('open');
+}
+</script>
 
 {% endif %}

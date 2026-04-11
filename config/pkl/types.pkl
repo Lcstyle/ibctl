@@ -66,9 +66,10 @@ class RuntimeConfig {
 /// Auth config. Passwords are env-only (TWS_PASSWORD, TWS_PASSWORD_FILE).
 /// Only tws_userid and trading_mode appear in generated TOML.
 class AuthConfig {
-  /// IB login username
+  /// IB login username — set via TWS_USERID env var, not in TOML
+  /// Must be empty (env-only) or alphanumeric IB username
   /// @env TWS_USERID
-  twsUserid: String = ""
+  twsUserid: String(matches(Regex("^[a-zA-Z0-9_]*$"))) = ""
   /// Trading mode — also set via TRADING_MODE env var
   tradingMode: TradingMode = "paper"
   /// Paper account sub-config (for dual mode)
@@ -76,15 +77,16 @@ class AuthConfig {
 }
 
 class PaperAuthConfig {
-  /// Paper account username
+  /// Paper account username — set via TWS_USERID_PAPER env var, not in TOML
+  /// Must be empty (env-only) or alphanumeric IB username
   /// @env TWS_USERID_PAPER
-  twsUserid: String = ""
+  twsUserid: String(matches(Regex("^[a-zA-Z0-9_]*$"))) = ""
 }
 
 /// Two-factor authentication settings.
 class TwoFaConfig {
-  /// Name of env var holding the TOTP secret
-  secretEnv: String = "TWOFACTOR_CODE"
+  /// Name of env var holding the TOTP secret (must be an env var name, not a secret value)
+  secretEnv: String(matches(Regex("^[A-Z][A-Z0-9_]*$"))) = "TWOFACTOR_CODE"
   /// TOTP provider (env: TOTP_PROVIDER)
   provider: TotpProvider = "oathtool"
   /// Action on 2FA timeout (env: TWOFA_TIMEOUT_ACTION)
@@ -166,8 +168,10 @@ class DashboardConfig {
   enabled: Boolean = false
   /// Dashboard HTTP port (env: IBCTL_DASHBOARD_PORT)
   port: UInt16 = 8080
-  /// Bearer token for API auth, empty = no auth (env: IBCTL_DASHBOARD_TOKEN)
-  tokenEnv: String = "IBCTL_DASHBOARD_TOKEN"
+  /// Bearer token for API auth, empty = no auth
+  /// Secrets never go in TOML — set via IBCTL_DASHBOARD_TOKEN env var
+  /// Must be empty in schema (actual token is env-only)
+  token: String(length == 0) = ""
   /// Enable debug endpoints (env: IBCTL_DEBUG_MODE)
   debugMode: Boolean = false
   /// Enable GitHub OAuth login (requires IBCTL_GITHUB_OAUTH_CLIENT_ID + _CLIENT_SECRET env vars)
@@ -184,6 +188,16 @@ class DashboardConfig {
   /// Enable notifications (ntfy, Slack, Telegram)
   /// @env IBCTL_NOTIFICATIONS_ENABLED
   notificationsEnabled: Boolean = false
+  /// Notification delivery channel: "ntfy", "slack", or "telegram"
+  /// @env IBCTL_NOTIFICATION_CHANNEL
+  notificationChannel: "ntfy"|"slack"|"telegram" = "ntfy"
+  /// ZMQ PUB socket for external status subscribers
+  /// Always on when dashboard is running. Set to false to disable.
+  /// @env IBCTL_ZMQ_ENABLED
+  zmqEnabled: Boolean = true
+  /// ZMQ PUB socket port
+  /// @env IBCTL_ZMQ_PORT
+  zmqPort: UInt16 = 5556
 }
 
 /// IB system status scraper settings (consumed by dashboard daemon).

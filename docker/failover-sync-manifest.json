@@ -1,0 +1,256 @@
+{
+  "_generated": "tools/renderers/failover_manifest.py",
+  "must_sync": {
+    "env_vars": {
+      "TWS_USERID": {
+        "toml_path": "auth.tws_userid",
+        "env_var": "TWS_USERID"
+      },
+      "TRADING_MODE": {
+        "toml_path": "auth.trading_mode",
+        "env_var": "TRADING_MODE"
+      },
+      "TWS_USERID_PAPER": {
+        "toml_path": "auth.paper.tws_userid",
+        "env_var": "TWS_USERID_PAPER"
+      },
+      "TOTP_PROVIDER": {
+        "toml_path": "twofa.provider",
+        "env_var": "TOTP_PROVIDER"
+      },
+      "TWOFA_TIMEOUT_ACTION": {
+        "toml_path": "twofa.timeout_action",
+        "env_var": "TWOFA_TIMEOUT_ACTION"
+      },
+      "TWOFA_EXIT_INTERVAL": {
+        "toml_path": "twofa.exit_interval",
+        "env_var": "TWOFA_EXIT_INTERVAL"
+      },
+      "TWOFA_DEVICE": {
+        "toml_path": "twofa.device",
+        "env_var": "TWOFA_DEVICE"
+      },
+      "RELOGIN_AFTER_TWOFA_TIMEOUT": {
+        "toml_path": "twofa.relogin_after_timeout",
+        "env_var": "RELOGIN_AFTER_TWOFA_TIMEOUT"
+      },
+      "JAVA_HEAP_SIZE": {
+        "toml_path": "gateway.java_heap_size",
+        "env_var": "JAVA_HEAP_SIZE"
+      },
+      "GATEWAY_OR_TWS": {
+        "toml_path": "gateway.gateway_or_tws",
+        "env_var": "GATEWAY_OR_TWS"
+      },
+      "IBCTL_SESSION_ACTION": {
+        "toml_path": "session.action",
+        "env_var": "IBCTL_SESSION_ACTION"
+      },
+      "IBCTL_ACCEPT_INCOMING": {
+        "toml_path": "session.accept_incoming",
+        "env_var": "IBCTL_ACCEPT_INCOMING"
+      },
+      "TWS_COLD_RESTART": {
+        "toml_path": "session.tws_cold_restart",
+        "env_var": "TWS_COLD_RESTART"
+      },
+      "IBCTL_COMMAND_SERVER_ENABLED": {
+        "toml_path": "command_server.enabled",
+        "env_var": "IBCTL_COMMAND_SERVER_ENABLED"
+      },
+      "IBCTL_COMMAND_PORT": {
+        "toml_path": "command_server.port",
+        "env_var": "IBCTL_COMMAND_PORT"
+      },
+      "IBCTL_LOGIN_TIMEOUT": {
+        "toml_path": "timing.login_dialog_timeout_secs",
+        "env_var": "IBCTL_LOGIN_TIMEOUT"
+      },
+      "IBCTL_RESTART_DELAY": {
+        "toml_path": "timing.restart_delay_secs",
+        "env_var": "IBCTL_RESTART_DELAY"
+      },
+      "IBCTL_RELOGIN_ATTEMPTS": {
+        "toml_path": "timing.relogin_max_attempts",
+        "env_var": "IBCTL_RELOGIN_ATTEMPTS"
+      },
+      "IBCTL_RELOGIN_FAILURE_ACTION": {
+        "toml_path": "timing.relogin_failure_action",
+        "env_var": "IBCTL_RELOGIN_FAILURE_ACTION"
+      },
+      "IBCTL_DASHBOARD_ENABLED": {
+        "toml_path": "dashboard.enabled",
+        "env_var": "IBCTL_DASHBOARD_ENABLED"
+      },
+      "IBCTL_DASHBOARD_PORT": {
+        "toml_path": "dashboard.port",
+        "env_var": "IBCTL_DASHBOARD_PORT"
+      },
+      "IBCTL_SITE_ROLE": {
+        "toml_path": "site.role",
+        "env_var": "IBCTL_SITE_ROLE"
+      },
+      "IBCTL_AUTO_LAUNCH": {
+        "toml_path": "site.auto_launch",
+        "env_var": "IBCTL_AUTO_LAUNCH"
+      },
+      "TZ": {
+        "description": "Timezone"
+      },
+      "AUTO_RESTART_TIME": {
+        "description": "Daily restart time (UTC)"
+      },
+      "READ_ONLY_API": {
+        "description": "API write access"
+      }
+    }
+  },
+  "secrets": {
+    "env_vars": [
+      "IBCTL_DASHBOARD_AUTH_SECRET",
+      "IBCTL_DASHBOARD_TOKEN",
+      "IBCTL_GITHUB_OAUTH_CLIENT_SECRET",
+      "IBCTL_NTFY_TOKEN",
+      "IBCTL_OIDC_CLIENT_SECRET",
+      "IBCTL_SLACK_WEBHOOK_URL",
+      "IBCTL_TELEGRAM_BOT_TOKEN",
+      "TWS_PASSWORD",
+      "TWS_PASSWORD_PAPER"
+    ],
+    "file_suffix": "_FILE"
+  },
+  "optional_sync": {
+    "env_vars": {
+      "TWS_PATH": {
+        "toml_path": "gateway.tws_path",
+        "env_var": "TWS_PATH"
+      },
+      "TWS_SETTINGS_PATH": {
+        "toml_path": "gateway.tws_settings_path",
+        "env_var": "TWS_SETTINGS_PATH"
+      },
+      "TWS_MAJOR_VRSN": {
+        "toml_path": "gateway.tws_major_vrsn",
+        "env_var": "TWS_MAJOR_VRSN"
+      },
+      "IBCTL_CONTROL_FROM": {
+        "toml_path": "command_server.control_from",
+        "env_var": "IBCTL_CONTROL_FROM"
+      },
+      "IBCTL_AGENT_SOCKET": {
+        "toml_path": "agent.socket_path",
+        "env_var": "IBCTL_AGENT_SOCKET"
+      },
+      "IBCTL_LOG_LEVEL": {
+        "toml_path": "logging.level",
+        "env_var": "IBCTL_LOG_LEVEL"
+      },
+      "IBCTL_LOG_DIR": {
+        "toml_path": "logging.log_dir",
+        "env_var": "IBCTL_LOG_DIR"
+      },
+      "IBCTL_FUTURES_SESSION_LOGGING": {
+        "toml_path": "logging.futures_session_logging",
+        "env_var": "IBCTL_FUTURES_SESSION_LOGGING"
+      },
+      "IBCTL_SESSION_REOPEN_HOUR": {
+        "toml_path": "logging.session_reopen_hour",
+        "env_var": "IBCTL_SESSION_REOPEN_HOUR"
+      },
+      "IBCTL_DEBUG_MODE": {
+        "toml_path": "dashboard.debug_mode",
+        "env_var": "IBCTL_DEBUG_MODE"
+      },
+      "IBCTL_GITHUB_OAUTH_ENABLED": {
+        "toml_path": "dashboard.github_oauth_enabled",
+        "env_var": "IBCTL_GITHUB_OAUTH_ENABLED"
+      },
+      "IBCTL_OIDC_ENABLED": {
+        "toml_path": "dashboard.oidc_enabled",
+        "env_var": "IBCTL_OIDC_ENABLED"
+      },
+      "IBCTL_OIDC_ISSUER": {
+        "toml_path": "dashboard.oidc_issuer",
+        "env_var": "IBCTL_OIDC_ISSUER"
+      },
+      "IBCTL_OIDC_SCOPES": {
+        "toml_path": "dashboard.oidc_scopes",
+        "env_var": "IBCTL_OIDC_SCOPES"
+      },
+      "IBCTL_NOTIFICATIONS_ENABLED": {
+        "toml_path": "dashboard.notifications_enabled",
+        "env_var": "IBCTL_NOTIFICATIONS_ENABLED"
+      },
+      "IBCTL_NOTIFICATION_CHANNEL": {
+        "toml_path": "dashboard.notification_channel",
+        "env_var": "IBCTL_NOTIFICATION_CHANNEL"
+      },
+      "IBCTL_ZMQ_ENABLED": {
+        "toml_path": "dashboard.zmq_enabled",
+        "env_var": "IBCTL_ZMQ_ENABLED"
+      },
+      "IBCTL_ZMQ_PORT": {
+        "toml_path": "dashboard.zmq_port",
+        "env_var": "IBCTL_ZMQ_PORT"
+      },
+      "IBCTL_IB_STATUS_ENABLED": {
+        "toml_path": "ib_system_status.enabled",
+        "env_var": "IBCTL_IB_STATUS_ENABLED"
+      },
+      "IB_STATUS_CHECK_INTERVAL": {
+        "toml_path": "ib_system_status.check_interval_seconds",
+        "env_var": "IB_STATUS_CHECK_INTERVAL"
+      },
+      "IB_STATUS_REGION": {
+        "toml_path": "ib_system_status.region",
+        "env_var": "IB_STATUS_REGION"
+      }
+    }
+  },
+  "files": {
+    "sync": [
+      "/opt/ibctl/persist/config/notifications.json",
+      "/opt/ibctl/persist/config/scraper_overrides.json"
+    ],
+    "sync_gateway_state": [
+      "$TWS_SETTINGS_PATH/jts.ini"
+    ],
+    "never_sync": [
+      "/opt/ibctl/persist/config/ib_status_audit.json",
+      "/opt/ibctl/persist/logs/",
+      "/run/ibctl/*.sock",
+      "$TWS_SETTINGS_PATH/.iborder",
+      "$TWS_SETTINGS_PATH/.cold_restart_marker"
+    ]
+  },
+  "standby_overrides": {
+    "IBCTL_SITE_ROLE": "standby",
+    "IBCTL_AUTO_LAUNCH": "false"
+  },
+  "promotion": {
+    "command": "START",
+    "overrides": {
+      "IBCTL_SITE_ROLE": "primary",
+      "IBCTL_AUTO_LAUNCH": "true"
+    },
+    "pre_checks": [
+      "env_parity",
+      "secrets_present",
+      "jts_ini_synced",
+      "primary_stopped",
+      "command_server_responds"
+    ]
+  },
+  "ports": {
+    "command_server": {
+      "live": 7462,
+      "paper": 7463
+    },
+    "zmq_pub": 5556,
+    "api": {
+      "live": 4003,
+      "paper": 4004
+    },
+    "dashboard": 3080
+  }
+}

@@ -24,7 +24,7 @@ runtime = new RuntimeConfig {
   }
 
   twofa = new TwoFaConfig {
-    secretEnv = "TWOFACTOR_CODE"
+    secretEnv = "TWOFACTOR_CODE"  // pragma: allowlist secret
     provider = "oathtool"
     timeoutAction = "restart"
     exitInterval = 120
@@ -65,7 +65,7 @@ runtime = new RuntimeConfig {
   dashboard = new DashboardConfig {
     enabled = false
     port = 8080
-    tokenEnv = "IBCTL_DASHBOARD_TOKEN"
+    token = ""
     debugMode = false
   }
 

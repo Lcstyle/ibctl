@@ -4,9 +4,12 @@ Manages connections to one or more ibctl command servers (live, paper, or both).
 Queries all instances concurrently and translates connection failures into
 InstanceStatus(error=...) rather than propagating exceptions.
 
-Includes a TTL cache for STATUS and CONFIG responses to reduce TCP round-trips.
-STATUS is cached for 2s (matches HTMX poll interval), CONFIG is cached for 60s
-(doesn't change at runtime).
+Supports two cache-population strategies:
+  1. SUBSCRIBE (preferred): persistent push connection from ibctl, instant updates
+  2. Polling fallback: 5s TCP STATUS poll for older ibctl binaries
+
+An asyncio.Condition allows SSE endpoints, monitors, and ZMQ publishers to
+wake instantly when new status arrives (no polling at any layer).
 """
 
 from __future__ import annotations
@@ -45,15 +48,15 @@ class _CachedResponse:
 class InstanceRegistry:
     """Manages connections to multiple ibctl instances with response caching.
 
-    Includes a background poller that refreshes STATUS every 5s independently
-    of browser SSE connections. This ensures monitors (no-clients, login-failure)
-    always have fresh data even if nobody has the dashboard open in a browser.
+    Uses SUBSCRIBE for push-driven cache updates when supported, falling back
+    to 5s TCP polling for older ibctl binaries. An asyncio.Condition notifies
+    all waiters (SSE, monitors, ZMQ publisher) instantly on status changes.
     """
 
     # Cache TTLs in seconds
-    STATUS_TTL = 15.0   # Background poller refreshes every 5s; 15s is a safety net
+    STATUS_TTL = 15.0   # Safety net; subscribe updates cache on every push
     CONFIG_TTL = 300.0  # Config doesn't change at runtime (5 min)
-    POLL_INTERVAL = 5.0  # Background cache refresh interval
+    POLL_INTERVAL = 5.0  # Fallback polling interval (only used if SUBSCRIBE unsupported)
 
     def __init__(
         self,
@@ -63,7 +66,9 @@ class InstanceRegistry:
         self._clients: dict[str, IbctlClientProtocol] = {}
         self._endpoints: dict[str, InstanceEndpoint] = {}
         self._cache: dict[str, _CachedResponse] = {}
+        self._subscribe_clients: list = []  # SubscribeClient instances
         self._poller_task: asyncio.Task | None = None
+        self._status_updated: asyncio.Condition = asyncio.Condition()
 
         for ep in endpoints:
             self._endpoints[ep.mode] = ep
@@ -71,16 +76,33 @@ class InstanceRegistry:
             logger.info("Registered %s instance at %s:%d", ep.mode, ep.host, ep.port)
 
     async def start_background_poller(self):
-        """Start background task that keeps the STATUS cache populated.
+        """Start cache population — tries SUBSCRIBE first, falls back to polling.
 
-        Monitors (no-clients, login-failure) depend on cached_all_status()
-        which reads from this cache. Without the poller, the cache is only
-        populated when a browser connects to the SSE endpoint.
+        SUBSCRIBE gives instant push updates from ibctl. If the ibctl binary
+        doesn't support SUBSCRIBE (older version), falls back to 5s TCP polling.
         """
-        self._poller_task = asyncio.create_task(self._poll_loop(), name="registry-poller")
-        logger.info("Background status poller started (interval=%.0fs)", self.POLL_INTERVAL)
+        from app.services.subscribe_client import SubscribeClient
+
+        for mode, ep in self._endpoints.items():
+            sub = SubscribeClient(
+                host=ep.host,
+                port=ep.port,
+                mode=mode,
+                on_status=self._push_status_sync,
+            )
+            self._subscribe_clients.append(sub)
+            await sub.start()
+
+        # Monitor subscribe clients — if any fail (old ibctl), start fallback poller
+        self._poller_task = asyncio.create_task(
+            self._subscribe_watchdog(), name="subscribe-watchdog",
+        )
+        logger.info("Subscribe clients started for %d instances", len(self._endpoints))
 
     async def stop_background_poller(self):
+        for sub in self._subscribe_clients:
+            await sub.stop()
+        self._subscribe_clients.clear()
         if self._poller_task:
             self._poller_task.cancel()
             try:
@@ -88,13 +110,70 @@ class InstanceRegistry:
             except asyncio.CancelledError:
                 pass
             self._poller_task = None
-            logger.info("Background status poller stopped")
+        logger.info("Background status services stopped")
+
+    async def _subscribe_watchdog(self):
+        """Monitor subscribe clients. If any mark SUBSCRIBE as unsupported,
+        start a fallback polling loop for those instances."""
+        await asyncio.sleep(10)  # Give subscribe clients time to connect
+        needs_polling = False
+        for sub in self._subscribe_clients:
+            if not sub.subscribe_supported:
+                logger.info("Fallback to polling for %s (SUBSCRIBE not supported)", sub._mode)
+                needs_polling = True
+
+        if needs_polling:
+            logger.info("Starting fallback polling loop (interval=%.0fs)", self.POLL_INTERVAL)
+            while True:
+                try:
+                    await self.all_status()
+                    await self._notify_update()
+                except Exception as e:
+                    logger.warning("Fallback poller error: %s", e)
+                await asyncio.sleep(self.POLL_INTERVAL)
+
+    def set_zmq_publisher(self, publisher):
+        """Attach a ZMQ publisher to broadcast status updates externally."""
+        self._zmq_publisher = publisher
+
+    def _push_status_sync(self, mode: str, status: dict):
+        """Called by SubscribeClient (sync callback) when status arrives."""
+        cache_key = f"{mode}:STATUS"
+        self._cache[cache_key] = _CachedResponse(status, self.STATUS_TTL)
+        # Publish to ZMQ if configured
+        zmq_pub = getattr(self, "_zmq_publisher", None)
+        if zmq_pub:
+            zmq_pub.publish(mode, status)
+        # Schedule async notification on the event loop
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._notify_update())
+        except RuntimeError:
+            pass  # No running loop (shouldn't happen in production)
+
+    async def _notify_update(self):
+        """Wake all waiters (SSE, monitors, ZMQ publisher)."""
+        async with self._status_updated:
+            self._status_updated.notify_all()
+
+    async def wait_for_update(self, timeout: float = 5.0) -> bool:
+        """Block until a status update arrives or timeout expires.
+
+        Returns True if notified (new data), False on timeout (heartbeat).
+        """
+        async with self._status_updated:
+            try:
+                await asyncio.wait_for(self._status_updated.wait(), timeout=timeout)
+                return True
+            except asyncio.TimeoutError:
+                return False
 
     async def _poll_loop(self):
         """Refresh STATUS cache for all instances every POLL_INTERVAL seconds."""
         while True:
             try:
                 await self.all_status()
+                await self._notify_update()
             except Exception as e:
                 logger.warning("Background poller error: %s", e)
             await asyncio.sleep(self.POLL_INTERVAL)

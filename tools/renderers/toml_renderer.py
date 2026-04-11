@@ -63,7 +63,9 @@ def render_docker_toml(cfg) -> str:
     )
     twofa.add("provider", rt.twofa.provider)
     twofa.add(tomlkit.comment("name of env var holding TOTP secret"))
-    twofa.add("secret_env", rt.twofa.secretEnv)
+    _secret_env = tomlkit.item(rt.twofa.secretEnv)
+    _secret_env.comment("pragma: allowlist secret")
+    twofa.add("secret_env", _secret_env)
     twofa.add(tomlkit.comment('"restart" (re-login) or "exit" (shutdown)'))
     twofa.add("timeout_action", rt.twofa.timeoutAction)
     twofa.add(tomlkit.comment("max wait for 2FA approval before timeout_action"))
@@ -134,7 +136,7 @@ def render_docker_toml(cfg) -> str:
     dash.add("enabled", rt.dashboard.enabled)
     dash.add("port", int(rt.dashboard.port))
     dash.add(tomlkit.comment("Bearer token for API auth (empty = no auth)"))
-    dash.add("token", "")
+    dash.add("token", rt.dashboard.token)
     dash.add(tomlkit.comment("enable debug endpoints"))
     dash.add("debug_mode", rt.dashboard.debugMode)
     dash.add(tomlkit.nl())
@@ -164,6 +166,21 @@ def render_docker_toml(cfg) -> str:
         )
     )
     dash.add("notifications_enabled", rt.dashboard.notificationsEnabled)
+    dash.add(
+        tomlkit.comment(
+            "Notification channel: ntfy | slack | telegram (env: IBCTL_NOTIFICATION_CHANNEL)"
+        )
+    )
+    dash.add("notification_channel", rt.dashboard.notificationChannel)
+    dash.add(tomlkit.nl())
+    dash.add(
+        tomlkit.comment(
+            "ZMQ PUB socket for external status subscribers (env: IBCTL_ZMQ_ENABLED)"
+        )
+    )
+    dash.add("zmq_enabled", rt.dashboard.zmqEnabled)
+    dash.add(tomlkit.comment("ZMQ PUB port (env: IBCTL_ZMQ_PORT)"))
+    dash.add("zmq_port", int(rt.dashboard.zmqPort))
     doc.add("dashboard", dash)
     doc.add(tomlkit.nl())
 

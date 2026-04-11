@@ -84,7 +84,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--target",
-        choices=["all", "toml", "compose", "env"],
+        choices=["all", "toml", "compose", "env", "failover"],
         default="all",
         help="Which artifacts to generate (default: all)",
     )
@@ -119,6 +119,13 @@ def main() -> None:
         print("Generating .env.example...")
         env_content = render_env_example(cfg)
         write_or_print(ROOT / "examples" / ".env.example", env_content, args.dry_run)
+
+    # Failover manifest generation
+    if targets_to_run in ("all", "failover"):
+        print("Generating failover sync manifest...")
+        from renderers.failover_manifest import generate_manifest
+        manifest_content = generate_manifest()
+        write_or_print(ROOT / "docker" / "failover-sync-manifest.json", manifest_content, args.dry_run)
 
     if not args.dry_run:
         print("Done.")

@@ -21,9 +21,13 @@ router = APIRouter()
 
 class NotificationConfigRequest(BaseModel):
     enabled: bool = False
+    channel: str = "ntfy"
     ntfy_url: str = "https://ntfy.sh"
     ntfy_topic: str = "ibctl"
     ntfy_token: str = ""
+    slack_webhook_url: str = ""
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
     events: dict = {}
 
 
@@ -38,6 +42,9 @@ async def get_notification_config(request: Request):
     return {"ok": True, "config": config_dict, "env_locked": env_locked, "persist_mounted": persist_mounted}
 
 
+MASKED_TOKEN = "••••••••"
+
+
 @router.post("/api/v1/notifications/config")
 async def save_notification_config(request: Request, body: NotificationConfigRequest):
     ns = getattr(request.app.state, "notification_service", None)
@@ -46,18 +53,28 @@ async def save_notification_config(request: Request, body: NotificationConfigReq
 
     env_locked = NotificationConfig.env_locked_fields()
 
-    # Preserve env-locked values; wrap token in SecretStr
-    token = ns.config.ntfy_token if env_locked.get("ntfy_token") else SecretStr(body.ntfy_token)
+    def _resolve_secret(field: str, new_val: str, old: SecretStr) -> SecretStr:
+        """Preserve env-locked or masked values; otherwise update."""
+        if env_locked.get(field):
+            return old
+        if not new_val or new_val == MASKED_TOKEN:
+            return old
+        return SecretStr(new_val)
+
     config = NotificationConfig(
         enabled=body.enabled,
+        channel=ns.config.channel if env_locked.get("channel") else body.channel,
         ntfy_url=ns.config.ntfy_url if env_locked.get("ntfy_url") else body.ntfy_url,
         ntfy_topic=ns.config.ntfy_topic if env_locked.get("ntfy_topic") else body.ntfy_topic,
-        ntfy_token=token,
+        ntfy_token=_resolve_secret("ntfy_token", body.ntfy_token, ns.config.ntfy_token),
+        slack_webhook_url=ns.config.slack_webhook_url if env_locked.get("slack_webhook_url") else body.slack_webhook_url,
+        telegram_bot_token=_resolve_secret("telegram_bot_token", body.telegram_bot_token, ns.config.telegram_bot_token),
+        telegram_chat_id=ns.config.telegram_chat_id if env_locked.get("telegram_chat_id") else body.telegram_chat_id,
         events=body.events,
     )
     config.save()
     ns.update_config(config)
-    logger.info("Notification config updated via API")
+    logger.info("Notification config updated via API (channel=%s)", config.channel)
     return {"ok": True}
 
 

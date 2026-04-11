@@ -148,6 +148,9 @@ class DashboardConfig(BaseModel):
     oidc_issuer: str = ""
     oidc_scopes: str = "openid profile email"
     notifications_enabled: bool = False
+    notification_channel: Literal["ntfy", "slack", "telegram"] = "ntfy"
+    zmq_enabled: bool = True
+    zmq_port: int = Field(default=5556, ge=1, le=65535)
 
 
 class IbSystemStatusConfig(BaseModel):
@@ -203,6 +206,7 @@ class IbctlConfig(BaseModel):
             "command_server.port": self.command_server.port,
             "command_server.paper_port": self.command_server.paper_port,
             "dashboard.port": self.dashboard.port,
+            "dashboard.zmq_port": self.dashboard.zmq_port,
         }
         seen: dict[int, str] = {}
         for name, port in ports.items():
@@ -253,6 +257,28 @@ class IbctlConfig(BaseModel):
                 "dashboard.notifications_enabled=true requires dashboard.enabled=true — "
                 "the notification service runs inside the dashboard daemon"
             )
+
+        # Notification channel credential warnings
+        if self.dashboard.notifications_enabled:
+            import os
+            ch = self.dashboard.notification_channel
+            if ch == "slack" and not os.environ.get("IBCTL_SLACK_WEBHOOK_URL"):
+                warnings.append(
+                    "notification_channel=slack but IBCTL_SLACK_WEBHOOK_URL is not set — "
+                    "Slack notifications will fail until a webhook URL is configured"
+                )
+            if ch == "telegram":
+                if not os.environ.get("IBCTL_TELEGRAM_BOT_TOKEN"):
+                    warnings.append(
+                        "notification_channel=telegram but IBCTL_TELEGRAM_BOT_TOKEN is not set"
+                    )
+                if not os.environ.get("IBCTL_TELEGRAM_CHAT_ID"):
+                    warnings.append(
+                        "notification_channel=telegram but IBCTL_TELEGRAM_CHAT_ID is not set"
+                    )
+
+        # ZMQ PUB socket: on by default, runs automatically when dashboard runs.
+        # No validation needed — silently inactive when dashboard is off.
 
         # Dual mode credential warning (env check happens in validator.py)
         # This only warns about TOML-level — env overrides are checked separately
@@ -323,6 +349,13 @@ ENV_MAP: dict[str, str] = {
     "dashboard.oidc_issuer": "IBCTL_OIDC_ISSUER",
     "dashboard.oidc_scopes": "IBCTL_OIDC_SCOPES",
     "dashboard.notifications_enabled": "IBCTL_NOTIFICATIONS_ENABLED",
+    "dashboard.notification_channel": "IBCTL_NOTIFICATION_CHANNEL",
+    "dashboard.zmq_enabled": "IBCTL_ZMQ_ENABLED",
+    "dashboard.zmq_port": "IBCTL_ZMQ_PORT",
+    # IB System Status
+    "ib_system_status.enabled": "IBCTL_IB_STATUS_ENABLED",
+    "ib_system_status.check_interval_seconds": "IB_STATUS_CHECK_INTERVAL",
+    "ib_system_status.region": "IB_STATUS_REGION",
     # Site
     "site.role": "IBCTL_SITE_ROLE",
     "site.auto_launch": "IBCTL_AUTO_LAUNCH",

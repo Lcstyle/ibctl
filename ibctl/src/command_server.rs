@@ -44,6 +44,8 @@ pub(crate) enum QueryType {
     Config,
     Logs(usize),
     Windows,
+    /// Long-lived subscription: pushes NDJSON status events on every state change.
+    Subscribe,
 }
 
 /// Parse a command string (case-insensitive) matching IBC's wire protocol,
@@ -111,6 +113,7 @@ pub(crate) fn parse_command(input: &str) -> Option<ParsedCommand> {
             Some(ParsedCommand::Query(QueryType::Logs(limit)))
         }
         Some("WINDOWS") => Some(ParsedCommand::Query(QueryType::Windows)),
+        Some("SUBSCRIBE") => Some(ParsedCommand::Query(QueryType::Subscribe)),
         _ => None,
     }
 }
@@ -239,6 +242,63 @@ async fn handle_connection(
                 }
             }
         }
+        Some(ParsedCommand::Query(QueryType::Subscribe)) => {
+            // Long-lived subscription: push NDJSON status events on every state change.
+            // Uses the watch channel — wakes instantly when the state machine publishes
+            // a new snapshot, zero polling. Holds the TCP connection open.
+            log::info!("SUBSCRIBE from {} — starting event stream", peer_addr);
+            let mut snap_rx = snapshot_rx.clone();
+
+            // Send initial snapshot — clone data out of borrow before awaiting
+            let (initial_line, initial_version) = {
+                let snap = snap_rx.borrow_and_update();
+                let line = format!(
+                    "{{\"type\":\"snapshot\",\"version\":{},\"status\":{}}}\n",
+                    snap.version, snap.status_json,
+                );
+                (line, snap.version)
+            };
+            writer.write_all(initial_line.as_bytes()).await?;
+
+            let mut last_version = initial_version;
+            loop {
+                tokio::select! {
+                    result = snap_rx.changed() => {
+                        match result {
+                            Ok(()) => {
+                                let (version, status_json) = {
+                                    let snap = snap_rx.borrow_and_update();
+                                    (snap.version, snap.status_json.clone())
+                                };
+                                if version == last_version { continue; }
+                                last_version = version;
+                                let line = format!(
+                                    "{{\"type\":\"status\",\"version\":{},\"status\":{}}}\n",
+                                    version, status_json,
+                                );
+                                if writer.write_all(line.as_bytes()).await.is_err() {
+                                    break; // client disconnected
+                                }
+                                if writer.flush().await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(_) => break, // watch channel closed (shutdown)
+                        }
+                    }
+                    // Keepalive every 30s to detect dead connections
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(30)) => {
+                        if writer.write_all(b"{\"type\":\"keepalive\"}\n").await.is_err() {
+                            break;
+                        }
+                        if writer.flush().await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+            log::info!("SUBSCRIBE from {} — stream ended", peer_addr);
+        }
         Some(ParsedCommand::Query(query_type)) => {
             // Hot-path queries: serve directly from the watch snapshot.
             // No mpsc round-trip, no blocking on the state machine loop.
@@ -246,7 +306,7 @@ async fn handle_connection(
                 QueryType::Status => Some(snapshot_rx.borrow().status_json.clone()),
                 QueryType::State => Some(snapshot_rx.borrow().state_json.clone()),
                 QueryType::Config => Some(snapshot_rx.borrow().config_json.clone()),
-                _ => None, // LOGS, WINDOWS go through mpsc
+                _ => None, // LOGS, WINDOWS, SUBSCRIBE go through other paths
             };
 
             if let Some(json) = snapshot_response {
@@ -257,7 +317,7 @@ async fn handle_connection(
                 let query = match query_type {
                     QueryType::Logs(n) => Query::Logs(n, resp_tx),
                     QueryType::Windows => Query::Windows(resp_tx),
-                    _ => unreachable!(), // STATUS/STATE/CONFIG handled above
+                    _ => unreachable!(), // STATUS/STATE/CONFIG/SUBSCRIBE handled above
                 };
 
                 match query_tx.send(query).await {

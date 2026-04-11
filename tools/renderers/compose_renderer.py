@@ -76,17 +76,8 @@ def render_compose(cfg) -> str:
     env["RUST_LOG"] = "${RUST_LOG:-ibctl=info}"
     env["IBCTL_LOG_DIR"] = "/opt/ibctl/persist/logs"
 
-    # Dashboard
-    dash_enabled = "true" if ct.enableDashboard else "false"
-    env["IBCTL_DASHBOARD_ENABLED"] = (
-        f"${{IBCTL_DASHBOARD_ENABLED:-{dash_enabled}}}"
-    )
-    env["IBCTL_DASHBOARD_PORT"] = (
-        f"${{IBCTL_DASHBOARD_PORT:-{int(rt.dashboard.port)}}}"
-    )
-    env["IBCTL_DASHBOARD_TOKEN"] = "${IBCTL_DASHBOARD_TOKEN:-}"
-    env["IBCTL_ROOT_PATH"] = "${IBCTL_ROOT_PATH:-}"
-    env["IBCTL_DEBUG_MODE"] = "${IBCTL_DEBUG_MODE:-false}"
+    # Command server
+    env["IBCTL_COMMAND_SERVER_ENABLED"] = "${IBCTL_COMMAND_SERVER_ENABLED:-}"
     env["IBCTL_COMMAND_HOST"] = "${IBCTL_COMMAND_HOST:-127.0.0.1}"
     env["IBCTL_COMMAND_PORT"] = (
         f"${{IBCTL_COMMAND_PORT:-{int(rt.commandServer.port)}}}"
@@ -96,20 +87,52 @@ def render_compose(cfg) -> str:
         f"${{IBCTL_COMMAND_PORT_PAPER:-{int(rt.commandServer.paperPort)}}}"
     )
 
-    # Notifications
-    env["IBCTL_NOTIFICATIONS_ENABLED"] = "${IBCTL_NOTIFICATIONS_ENABLED:-false}"
+    # Dashboard (empty = TOML default for all flags)
+    env["IBCTL_DASHBOARD_ENABLED"] = "${IBCTL_DASHBOARD_ENABLED:-}"
+    env["IBCTL_DASHBOARD_PORT"] = (
+        f"${{IBCTL_DASHBOARD_PORT:-{int(rt.dashboard.port)}}}"
+    )
+    env["IBCTL_DASHBOARD_TOKEN"] = "${IBCTL_DASHBOARD_TOKEN:-}"
+    env["IBCTL_DASHBOARD_AUTH_SECRET"] = "${IBCTL_DASHBOARD_AUTH_SECRET:-}"
+    env["IBCTL_ROOT_PATH"] = "${IBCTL_ROOT_PATH:-}"
+    env["IBCTL_DEBUG_MODE"] = "${IBCTL_DEBUG_MODE:-}"
+
+    # Notifications (empty = TOML default)
+    env["IBCTL_NOTIFICATIONS_ENABLED"] = "${IBCTL_NOTIFICATIONS_ENABLED:-}"
+    env["IBCTL_NOTIFICATION_CHANNEL"] = "${IBCTL_NOTIFICATION_CHANNEL:-}"
     env["IBCTL_NTFY_URL"] = "${IBCTL_NTFY_URL:-}"
     env["IBCTL_NTFY_TOPIC"] = "${IBCTL_NTFY_TOPIC:-}"
     env["IBCTL_NTFY_TOKEN"] = "${IBCTL_NTFY_TOKEN:-}"
+    env["IBCTL_SLACK_WEBHOOK_URL"] = "${IBCTL_SLACK_WEBHOOK_URL:-}"
+    env["IBCTL_TELEGRAM_BOT_TOKEN"] = "${IBCTL_TELEGRAM_BOT_TOKEN:-}"
+    env["IBCTL_TELEGRAM_CHAT_ID"] = "${IBCTL_TELEGRAM_CHAT_ID:-}"
 
-    # IB Status
+    # IB System Status
+    env["IBCTL_IB_STATUS_ENABLED"] = "${IBCTL_IB_STATUS_ENABLED:-}"
     env["IB_STATUS_CHECK_INTERVAL"] = (
         f"${{IB_STATUS_CHECK_INTERVAL:-{int(rt.ibSystemStatus.checkIntervalSeconds)}}}"
     )
     env["IB_STATUS_REGION"] = f"${{IB_STATUS_REGION:-{rt.ibSystemStatus.region}}}"
 
+    # ZMQ PUB socket
+    env["IBCTL_ZMQ_ENABLED"] = "${IBCTL_ZMQ_ENABLED:-}"
+    env["IBCTL_ZMQ_PORT"] = f"${{IBCTL_ZMQ_PORT:-{int(rt.dashboard.zmqPort)}}}"
+
+    # Optional overrides (empty = TOML default)
+    env["IBCTL_LOG_LEVEL"] = "${IBCTL_LOG_LEVEL:-}"
+    env["IBCTL_ACCEPT_INCOMING"] = "${IBCTL_ACCEPT_INCOMING:-}"
+    env["IBCTL_SESSION_ACTION"] = "${IBCTL_SESSION_ACTION:-}"
+    env["IBCTL_RESTART_DELAY"] = "${IBCTL_RESTART_DELAY:-}"
+    env["IBCTL_RELOGIN_FAILURE_ACTION"] = "${IBCTL_RELOGIN_FAILURE_ACTION:-}"
+    env["IBCTL_RELOGIN_ATTEMPTS"] = "${IBCTL_RELOGIN_ATTEMPTS:-}"
+    env["IBCTL_LOGIN_TIMEOUT"] = "${IBCTL_LOGIN_TIMEOUT:-}"
+
+    # Site role / failover
+    env["IBCTL_SITE_ROLE"] = "${IBCTL_SITE_ROLE:-}"
+    env["IBCTL_AUTO_LAUNCH"] = "${IBCTL_AUTO_LAUNCH:-}"
+
     # Auto-update
-    env["IBCTL_AUTO_UPDATE"] = "${IBCTL_AUTO_UPDATE:-false}"
+    env["IBCTL_AUTO_UPDATE"] = "${IBCTL_AUTO_UPDATE:-}"
     env["IBCTL_VERSION"] = "${IBCTL_VERSION:-latest}"
 
     service["environment"] = env

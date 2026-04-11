@@ -70,6 +70,8 @@ _BOOL_FIELDS = {
     "dashboard.github_oauth_enabled",
     "dashboard.oidc_enabled",
     "dashboard.notifications_enabled",
+    "dashboard.zmq_enabled",
+    "ib_system_status.enabled",
     "logging.futures_session_logging",
     "site.auto_launch",
 }
@@ -79,6 +81,8 @@ _INT_FIELDS = {
     "gateway.java_heap_size",
     "command_server.port",
     "dashboard.port",
+    "dashboard.zmq_port",
+    "ib_system_status.check_interval_seconds",
     "logging.session_reopen_hour",
     "timing.login_dialog_timeout_secs",
     "timing.restart_delay_secs",
@@ -98,8 +102,8 @@ def apply_env_overrides(config: dict) -> dict:
     """
     for toml_path, env_var in ENV_MAP.items():
         raw = env_or_file(env_var)
-        if raw is None:
-            continue
+        if raw is None or raw == "":
+            continue  # Unset or empty = use TOML default for ALL types
 
         # Apply type-appropriate coercion
         if toml_path in _BOOL_FIELDS:
@@ -112,7 +116,6 @@ def apply_env_overrides(config: dict) -> dict:
         elif toml_path in _COMMA_LIST_FIELDS:
             _set_nested(config, toml_path, [s.strip() for s in raw.split(",")])
         else:
-            # String or enum — pass through as-is, Pydantic validates
             _set_nested(config, toml_path, raw)
 
     return config

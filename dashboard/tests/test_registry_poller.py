@@ -69,18 +69,12 @@ class TestCachePopulationWithoutSSE:
         assert statuses[0].error is not None
 
     @pytest.mark.asyncio
-    async def test_cache_populated_after_poller_runs(self):
-        """After poller runs, cache should have real data."""
+    async def test_cache_populated_after_status_fetch(self):
+        """After fetching status, cache should have real data."""
         registry = _make_registry()
 
-        await registry.start_background_poller()
-
-        # Poll until cache is populated (deterministic, no fixed sleep)
-        for _ in range(50):
-            statuses = registry.cached_all_status()
-            if statuses[0].status is not None:
-                break
-            await asyncio.sleep(0.05)
+        # Directly fetch status (bypasses subscribe/poll infrastructure)
+        await registry.all_status()
 
         statuses = registry.cached_all_status()
         assert len(statuses) == 1
@@ -89,22 +83,16 @@ class TestCachePopulationWithoutSSE:
         assert statuses[0].status["clients"]["count"] == 0
         assert statuses[0].error is None
 
-        await registry.stop_background_poller()
-
     @pytest.mark.asyncio
     async def test_no_clients_monitor_sees_data_without_sse(self):
         """RED: the no-clients monitor must see real status even with no browser."""
         from unittest.mock import AsyncMock, MagicMock
-        from app.services.no_clients_monitor import NoClientsMonitor
+        from app.services.monitors.no_clients import NoClientsMonitor
 
         registry = _make_registry()
 
-        # Start poller to populate cache (poll until ready, no fixed sleep)
-        await registry.start_background_poller()
-        for _ in range(50):
-            if registry.cached_all_status()[0].status is not None:
-                break
-            await asyncio.sleep(0.05)
+        # Populate cache directly (simulates what subscribe/poller does)
+        await registry.all_status()
 
         # Create a mock notification service
         ns = MagicMock()
@@ -112,10 +100,10 @@ class TestCachePopulationWithoutSSE:
         ns.get_event_timeout.return_value = 0  # 0 = disabled timeout, won't alert
         ns.send_alert = AsyncMock()
 
-        monitor = NoClientsMonitor(registry, ns)
+        monitor = NoClientsMonitor()
 
         # Run one check cycle
-        await monitor._check()
+        await monitor.check(registry, ns)
 
         # The monitor should have seen real data (Connected + 0 clients)
         # and started the timer. With timeout=0 it won't alert, but the
@@ -125,5 +113,3 @@ class TestCachePopulationWithoutSSE:
             "Monitor's data source (cached_all_status) must have real data "
             "even without a browser SSE connection"
         )
-
-        await registry.stop_background_poller()
