@@ -223,8 +223,8 @@ impl StateMachine {
             self.connected_since = None;
         }
 
-        // Reset 2FA device state when starting a new login cycle
-        if matches!(next, State::WaitingForLogin | State::Launching | State::Restarting) {
+        // Reset 2FA device state when starting a new login or 2FA cycle
+        if matches!(next, State::WaitingForLogin | State::WaitingFor2fa | State::Launching | State::Restarting) {
             self.twofa_device_selected = false;
         }
 
@@ -839,13 +839,65 @@ impl StateMachine {
                         }
                     }
                 } else if self.twofa_seen {
-                    // Dialog was visible but now gone — track disappearance for 3s confirmation
+                    // FAIL-CLOSED 2FA verification (L4 architectural fix).
+                    //
+                    // 2FA dialog was seen but is now absent. This can mean:
+                    //   a) Device selection closed → challenge dialog about to open
+                    //   b) 2FA succeeded → Gateway is authenticated
+                    //   c) 2FA failed/cancelled → login form appeared
+                    //
+                    // We require POSITIVE CONFIRMATION of authentication:
+                    // the main Gateway window must exist with ZERO text fields
+                    // (no login form). We do NOT use timing-based checks or
+                    // absence-of-bad-state as proof of success.
+
+                    // First: check if 2FA dialog reappeared (case a — dialog swap)
+                    // Reset gone timer if dialog comes back within check window
                     if self.twofa_gone_at.is_none() {
                         self.twofa_gone_at = Some(Instant::now());
-                        log::info!("2FA dialog disappeared — confirming (3s)...");
-                    } else if self.twofa_gone_at.is_some_and(|t| t.elapsed() > std::time::Duration::from_secs(3)) {
-                        log::info!("2FA completed (confirmed — dialog gone for 3s)");
-                        return Ok(State::DismissingPopups);
+                        log::info!("2FA dialog absent — waiting for positive auth confirmation...");
+                    }
+
+                    // Wait at least 5 seconds for dialog swap to settle
+                    // (device selection → challenge dialog transition takes 1-3s)
+                    if self.twofa_gone_at.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(5)) {
+                        // Still in settling window — don't decide yet
+                    } else {
+                        // Settling window passed. Require POSITIVE CONFIRMATION via
+                        // active object inspection — not observation cache, not timers.
+                        let mut confirmed_authenticated = false;
+                        let mut confirmed_login_form = false;
+
+                        for w in &windows {
+                            let t = w.title.to_lowercase();
+                            if t.contains("ib gateway") || t.contains("ibkr gateway") {
+                                if let Ok(components) = self.agent_client.dump_components(w.id).await {
+                                    let has_textfields = components.get("textfields")
+                                        .and_then(|t| t.as_array())
+                                        .is_some_and(|a| !a.is_empty());
+                                    if has_textfields {
+                                        confirmed_login_form = true;
+                                    } else {
+                                        confirmed_authenticated = true;
+                                    }
+                                }
+                            }
+                        }
+
+                        if confirmed_login_form {
+                            log::warn!("2FA FAILED — login form detected via object inspection");
+                            self.handler_registry.reset();
+                            return Ok(State::WaitingForLogin);
+                        }
+
+                        if confirmed_authenticated {
+                            log::info!("2FA SUCCEEDED — Gateway authenticated (positive confirmation via object inspection)");
+                            return Ok(State::DismissingPopups);
+                        }
+
+                        // Neither confirmed — gateway window might not be visible yet.
+                        // Stay in WaitingFor2fa (will be caught by timeout if stuck).
+                        log::debug!("2FA verification inconclusive — no gateway window found, retrying");
                     }
                 } else {
                     // Never seen 2FA dialog — check grace period
@@ -978,64 +1030,99 @@ impl StateMachine {
             return Ok(State::Restarting);
         }
 
-        // Event-driven fast path (observation cache, no I/O)
-        if self.observation.synced {
-            if self.observation.has_2fa_dialog() {
-                log::info!("2FA dialog detected via observation while waiting for API ready");
-                return Ok(State::WaitingFor2fa);
-            }
-            if self.observation.has_relogin_dialog() {
-                log::info!("Re-login detected via observation while waiting for API ready");
-                return Ok(State::ReconnectingSession);
-            }
-            if self.observation.has_session_conflict() {
-                log::info!("Session conflict detected via observation while waiting for API ready");
-                return Ok(State::HandlingSessionConflict);
-            }
-
-            if let Some(main) = self.observation.main_gateway_window() {
-                if !main.has_login_button {
-                    log::info!("Gateway ready via observation (no login button, class={}) — proceeding to configure", main.class);
-                    return Ok(State::ConfiguringApi);
-                }
-            }
+        // Check for blocking dialogs (2FA, re-login, session conflict)
+        if self.observation.has_2fa_dialog() {
+            log::info!("2FA dialog detected via observation while waiting for API ready");
+            return Ok(State::WaitingFor2fa);
+        }
+        if self.observation.has_relogin_dialog() {
+            log::info!("Re-login detected via observation while waiting for API ready");
+            return Ok(State::ReconnectingSession);
+        }
+        if self.observation.has_session_conflict() {
+            log::info!("Session conflict detected via observation while waiting for API ready");
+            return Ok(State::HandlingSessionConflict);
+        }
+        if self.observation.has_login_form() {
+            log::warn!("Login form detected while waiting for API ready — session lost");
+            return Ok(State::WaitingForLogin);
         }
 
-        // HTTP fallback (when observation not synced)
-        if !self.observation.synced {
-            if let Some(next_state) = self.check_blocking_dialog().await {
-                log::info!("Blocking dialog detected while waiting for API — transitioning to {}", next_state);
-                return Ok(next_state);
-            }
+        if let Some(next_state) = self.check_blocking_dialog().await {
+            log::info!("Blocking dialog detected while waiting for API — transitioning to {}", next_state);
+            return Ok(next_state);
+        }
 
-            if let Ok(windows) = self.agent_client.list_windows().await {
-                let main_window = windows.iter().find(|w| {
-                    let t = w.title.to_lowercase();
-                    t.contains("ib gateway") || t.contains("ibkr gateway")
-                });
-
-                if let Some(main) = main_window {
-                    use crate::types::WindowId;
-                    let has_login_fields = if let Ok(components) = self.agent_client.dump_components(WindowId(main.id.0)).await {
-                        components.get("textfields")
+        // POSITIVE CONFIRMATION: Inspect Gateway window's Connection Status table.
+        // The definitive signal is "Interactive Brokers API Server: connected"
+        // visible in the JTable. Not absence of login form, not TCP probe.
+        if let Ok(windows) = self.agent_client.list_windows().await {
+            for w in &windows {
+                let t = w.title.to_lowercase();
+                if t.contains("ib gateway") || t.contains("ibkr gateway") {
+                    if let Ok(components) = self.agent_client.dump_components(w.id).await {
+                        // Check for login form (textfields present = not authenticated)
+                        let has_textfields = components.get("textfields")
                             .and_then(|t| t.as_array())
-                            .map(|a| !a.is_empty())
-                            .unwrap_or(false)
-                    } else {
-                        false
-                    };
+                            .is_some_and(|a| !a.is_empty());
+                        // Log component counts for diagnostics
+                        let n_labels = components.get("labels").and_then(|l| l.as_array()).map(|a| a.len()).unwrap_or(0);
+                        let n_tables = components.get("tables").and_then(|t| t.as_array()).map(|a| a.len()).unwrap_or(0);
+                        let n_buttons = components.get("buttons").and_then(|b| b.as_array()).map(|a| a.len()).unwrap_or(0);
+                        log::info!(
+                            "WaitingForApiReady: inspecting gateway window — {} textfields, {} labels, {} tables, {} buttons",
+                            if has_textfields { "HAS" } else { "0" }, n_labels, n_tables, n_buttons
+                        );
 
-                    if !has_login_fields {
-                        log::info!("Gateway ready (HTTP fallback, class={}) — proceeding to configure", main.class);
-                        return Ok(State::ConfiguringApi);
+                        if has_textfields {
+                            log::debug!("Login form still visible — not ready");
+                            break;
+                        }
+
+                        // Check labels for "connected" (Connection Status may use JLabels)
+                        if let Some(labels) = components.get("labels").and_then(|l| l.as_array()) {
+                            let has_connected = labels.iter().any(|l| {
+                                l.as_str().is_some_and(|s| s.to_lowercase() == "connected")
+                            });
+                            if has_connected {
+                                log::info!("Gateway API Server: connected (confirmed via label inspection)");
+                                return Ok(State::ConfiguringApi);
+                            }
+                        }
+
+                        // Check JTable rows for "API Server" + "connected"
+                        if let Some(tables) = components.get("tables").and_then(|t| t.as_array()) {
+                            for table in tables {
+                                if let Some(rows) = table.get("rows").and_then(|r| r.as_array()) {
+                                    for row in rows {
+                                        if let Some(cells) = row.as_array() {
+                                            let purpose = cells.first()
+                                                .and_then(|c| c.as_str())
+                                                .unwrap_or("");
+                                            let status = cells.get(1)
+                                                .and_then(|c| c.as_str())
+                                                .unwrap_or("");
+                                            if purpose.to_lowercase().contains("api server")
+                                                && status.to_lowercase().contains("connected")
+                                            {
+                                                log::info!(
+                                                    "Gateway API Server: connected (confirmed via Connection Status table)"
+                                                );
+                                                return Ok(State::ConfiguringApi);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
 
         // Deadline
-        if self.state_entered_at.elapsed() > std::time::Duration::from_secs(90) {
-            log::warn!("Gateway not ready after 90s — proceeding to ConfiguringApi anyway");
+        if self.state_entered_at.elapsed() > std::time::Duration::from_secs(120) {
+            log::warn!("Gateway API not ready after 120s — proceeding to ConfiguringApi anyway");
             return Ok(State::ConfiguringApi);
         }
 
@@ -1235,11 +1322,74 @@ impl StateMachine {
             }
         }
 
-        // --- Reconciliation poll (safety net, reduced frequency) ---
-        // Only poll if observation cache is stale or desynced.
-        // With events flowing, this rarely fires.
-        if !self.observation.synced || self.observation.last_updated.elapsed() > std::time::Duration::from_secs(15) {
+        // --- Active liveness verification (catches in-place window morphing) ---
+        // Gateway reuses the same window when session is lost — no window_opened event fires.
+        // The observation cache misses this. Every 30s, do an active HTTP check.
+        if self.state_entered_at.elapsed().as_secs() > 10
+            && self.observation.last_updated.elapsed() > std::time::Duration::from_secs(30)
+        {
             if let Ok(windows) = self.agent_client.list_windows().await {
+                // Check for 2FA dialog that wasn't caught by events
+                let has_2fa = windows.iter().any(|w| {
+                    w.title.to_lowercase().contains("second factor")
+                });
+                if has_2fa {
+                    log::warn!("Liveness check found 2FA dialog during Connected — transitioning to WaitingFor2fa");
+                    return Ok(State::WaitingFor2fa);
+                }
+
+                // Active liveness check via dump_components on main gateway window.
+                // Checks both for login form (textfields) and Connection Status
+                // table ("API Server: connected").
+                for w in &windows {
+                    let t = w.title.to_lowercase();
+                    if t.contains("ib gateway") || t.contains("ibkr gateway") {
+                        if let Ok(components) = self.agent_client.dump_components(w.id).await {
+                            // Login form check (textfields present = session lost)
+                            let has_login_fields = components.get("textfields")
+                                .and_then(|t| t.as_array())
+                                .is_some_and(|a| !a.is_empty());
+                            if has_login_fields {
+                                log::warn!("Liveness check FAILED — login form detected during Connected state");
+                                self.connected_window_class = None;
+                                self.handler_registry.reset();
+                                self.abort_client_id_task();
+                                self.stop_socat();
+                                return Ok(State::WaitingForLogin);
+                            }
+
+                            // Connection Status table check — "API Server: disconnected" = session lost
+                            if let Some(tables) = components.get("tables").and_then(|t| t.as_array()) {
+                                for table in tables {
+                                    if let Some(rows) = table.get("rows").and_then(|r| r.as_array()) {
+                                        for row in rows {
+                                            if let Some(cells) = row.as_array() {
+                                                let purpose = cells.first()
+                                                    .and_then(|c| c.as_str()).unwrap_or("");
+                                                let status = cells.get(1)
+                                                    .and_then(|c| c.as_str()).unwrap_or("");
+                                                if purpose.to_lowercase().contains("api server")
+                                                    && status.to_lowercase().contains("disconnected")
+                                                {
+                                                    log::warn!(
+                                                        "Liveness check FAILED — API Server status: disconnected"
+                                                    );
+                                                    self.connected_window_class = None;
+                                                    self.handler_registry.reset();
+                                                    self.abort_client_id_task();
+                                                    self.stop_socat();
+                                                    return Ok(State::WaitingForLogin);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Reconciliation: dispatch handlers for any unprocessed windows
                 for win in &windows {
                     let _ = self.handler_registry.dispatch(&self.agent_client, win).await;
                 }
@@ -1338,9 +1488,71 @@ impl StateMachine {
             });
 
             if dialog.is_none() {
-                log::info!("RE-LOGIN dialog disappeared — Gateway self-recovered");
-                self.relogin_attempts = 0;
-                return Ok(State::Connected);
+                // FAIL-CLOSED re-login verification (L4 architectural fix).
+                //
+                // Re-login dialog is gone. Require POSITIVE CONFIRMATION that
+                // Gateway is authenticated before returning to Connected.
+                // Check for 2FA dialog (auth still in progress) or login form
+                // (session lost). Only declare recovery if main Gateway window
+                // has zero text fields (authenticated state).
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+                // Check for 2FA dialog (re-login triggered new auth)
+                if self.observation.has_2fa_dialog() {
+                    log::info!("RE-LOGIN dialog gone, 2FA dialog visible — waiting for auth");
+                    self.handler_registry.reset();
+                    self.relogin_attempts = 0;
+                    return Ok(State::WaitingFor2fa);
+                }
+
+                // Active object inspection on main gateway window
+                let mut confirmed_authenticated = false;
+                let mut confirmed_login_form = false;
+
+                if let Ok(win_list) = self.agent_client.list_windows().await {
+                    // Check for 2FA dialog via window list
+                    let has_2fa = win_list.iter().any(|w| {
+                        w.title.to_lowercase().contains("second factor")
+                    });
+                    if has_2fa {
+                        log::info!("RE-LOGIN dialog gone, 2FA dialog found — waiting for auth");
+                        self.handler_registry.reset();
+                        self.relogin_attempts = 0;
+                        return Ok(State::WaitingFor2fa);
+                    }
+
+                    for w in &win_list {
+                        let t = w.title.to_lowercase();
+                        if t.contains("ib gateway") || t.contains("ibkr gateway") {
+                            if let Ok(components) = self.agent_client.dump_components(w.id).await {
+                                let has_textfields = components.get("textfields")
+                                    .and_then(|t| t.as_array())
+                                    .is_some_and(|a| !a.is_empty());
+                                if has_textfields {
+                                    confirmed_login_form = true;
+                                } else {
+                                    confirmed_authenticated = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if confirmed_login_form {
+                    log::warn!("RE-LOGIN: login form detected — session NOT recovered");
+                    self.handler_registry.reset();
+                    self.relogin_attempts = 0;
+                    return Ok(State::WaitingForLogin);
+                }
+
+                if confirmed_authenticated {
+                    log::info!("RE-LOGIN: Gateway authenticated (positive confirmation)");
+                    self.relogin_attempts = 0;
+                    return Ok(State::Connected);
+                }
+
+                // Inconclusive — stay in ReconnectingSession (retry next tick)
+                log::debug!("RE-LOGIN verification inconclusive — no gateway window confirmed, retrying");
             }
 
             if let Some(d) = dialog {

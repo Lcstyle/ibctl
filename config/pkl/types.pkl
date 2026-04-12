@@ -136,6 +136,9 @@ class SessionConfig {
   /// Cold restart time "HH:MM" 24h format, empty = disabled
   /// @env TWS_COLD_RESTART
   twsColdRestart: String = ""
+  /// Cold restart day of week (0=Sunday, 1=Monday, ..., 6=Saturday)
+  /// @env TWS_COLD_RESTART_DAY
+  twsColdRestartDay: UInt8 = 0
 }
 
 /// TCP command server (IBC-compatible).

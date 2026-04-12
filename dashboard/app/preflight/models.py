@@ -72,6 +72,7 @@ class SessionConfig(BaseModel):
     action: SessionAction = "primary"
     accept_incoming: AcceptIncoming = "accept"
     tws_cold_restart: str = ""
+    tws_cold_restart_day: int = Field(default=0, ge=0, le=6)
 
     @model_validator(mode="after")
     def validate_cold_restart_format(self) -> "SessionConfig":
@@ -324,6 +325,7 @@ ENV_MAP: dict[str, str] = {
     "session.action": "IBCTL_SESSION_ACTION",
     "session.accept_incoming": "IBCTL_ACCEPT_INCOMING",
     "session.tws_cold_restart": "TWS_COLD_RESTART",
+    "session.tws_cold_restart_day": "TWS_COLD_RESTART_DAY",
     # Command server
     "command_server.enabled": "IBCTL_COMMAND_SERVER_ENABLED",
     "command_server.port": "IBCTL_COMMAND_PORT",

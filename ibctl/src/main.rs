@@ -173,8 +173,10 @@ async fn async_main(config: ValidConfig) -> Result<(), Box<dyn std::error::Error
     // the JVM, and the state machine relaunches with full re-auth.
     let (cold_restart_tx, cold_restart_rx) = tokio::sync::mpsc::channel(1);
     let cold_restart_time = config.session.cold_restart_time.clone();
+    let cold_restart_day = config.session.tws_cold_restart_day;
     if let Some(cold_restart_fut) = cold_restart::cold_restart_scheduler(
         cold_restart_time,
+        cold_restart_day,
         cold_restart_tx,
     ) {
         tasks.spawn(cold_restart_fut);

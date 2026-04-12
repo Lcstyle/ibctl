@@ -324,6 +324,9 @@ pub struct SessionConfig {
     /// Cold restart time in "HH:MM" 24h format (e.g., "09:00"). Empty = disabled.
     #[serde(default, rename = "tws_cold_restart")]
     pub cold_restart_time: String,
+    /// Cold restart day of week (0=Sunday, 1=Monday, ..., 6=Saturday). Default: 0 (Sunday).
+    #[serde(default)]
+    pub tws_cold_restart_day: u8,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -484,6 +487,7 @@ impl Default for SessionConfig {
             action: SessionAction::Primary,
             accept_incoming: AcceptIncoming::Accept,
             cold_restart_time: String::new(),
+            tws_cold_restart_day: 0, // Sunday
         }
     }
 }
@@ -671,6 +675,15 @@ impl Config {
         }
         if let Some(v) = env_nonempty("TWS_COLD_RESTART") {
             self.session.cold_restart_time = v;
+        }
+        if let Some(v) = env_nonempty("TWS_COLD_RESTART_DAY") {
+            if let Ok(day) = v.parse::<u8>() {
+                if day <= 6 {
+                    self.session.tws_cold_restart_day = day;
+                } else {
+                    log::warn!("TWS_COLD_RESTART_DAY={} out of range (0-6), keeping default", day);
+                }
+            }
         }
 
         // Command server

@@ -54,6 +54,10 @@
         "toml_path": "session.tws_cold_restart",
         "env_var": "TWS_COLD_RESTART"
       },
+      "TWS_COLD_RESTART_DAY": {
+        "toml_path": "session.tws_cold_restart_day",
+        "env_var": "TWS_COLD_RESTART_DAY"
+      },
       "IBCTL_COMMAND_SERVER_ENABLED": {
         "toml_path": "command_server.enabled",
         "env_var": "IBCTL_COMMAND_SERVER_ENABLED"

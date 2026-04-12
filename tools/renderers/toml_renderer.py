@@ -107,6 +107,12 @@ def render_docker_toml(cfg) -> str:
     sess.add("accept_incoming", rt.session.acceptIncoming)
     sess.add(tomlkit.comment('"HH:MM" 24h format for Sunday cold restart (empty = disabled)'))
     sess.add("tws_cold_restart", rt.session.twsColdRestart)
+    sess.add(
+        tomlkit.comment(
+            "Cold restart day of week: 0=Sunday, 1=Monday, ..., 6=Saturday"
+        )
+    )
+    sess.add("tws_cold_restart_day", int(rt.session.twsColdRestartDay))
     doc.add("session", sess)
     doc.add(tomlkit.nl())
 

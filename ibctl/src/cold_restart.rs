@@ -79,8 +79,13 @@ fn write_marker(marker_path: &Path, year: i32, day_of_year: u32) {
 /// - Tracks startup time to distinguish "started before scheduled time" from
 ///   "started after scheduled time" (the latter waits for next Sunday)
 /// - Persists via marker file in TWS_SETTINGS_PATH (volume-mounted)
+const DAY_NAMES: [&str; 7] = [
+    "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+];
+
 pub fn cold_restart_scheduler(
     cold_restart_time: String,
+    cold_restart_day: u8,
     tx: mpsc::Sender<ColdRestartSignal>,
 ) -> Option<impl std::future::Future<Output = ()>> {
     let (target_hour, target_minute) = match parse_cold_restart_time(&cold_restart_time) {
@@ -97,10 +102,12 @@ pub fn cold_restart_scheduler(
         .unwrap_or_else(|_| "/home/ibgateway/Jts".to_string());
     let marker_path = PathBuf::from(&settings_dir).join(".ibctl-cold-restart-marker");
 
+    let target_day = cold_restart_day.min(6) as u32;
+    let day_name = DAY_NAMES[target_day as usize];
     let tz = std::env::var("TZ").unwrap_or_else(|_| "(system default)".to_string());
     log::info!(
-        "Cold restart timer active: Sundays at {:02}:{:02} (TZ={}, marker={})",
-        target_hour, target_minute, tz, marker_path.display()
+        "Cold restart timer active: {}s at {:02}:{:02} (TZ={}, marker={})",
+        day_name, target_hour, target_minute, tz, marker_path.display()
     );
 
     // Record the minute we started so we can detect "started after target time"
@@ -112,7 +119,7 @@ pub fn cold_restart_scheduler(
         // Determine if we started AFTER the target time on a Sunday
         // If so, we must NOT fire — wait for next Sunday
         let started_past_target = if let Some(ref now) = startup_time {
-            now.weekday == 0  // Sunday
+            now.weekday == target_day
                 && (now.hour > target_hour
                     || (now.hour == target_hour && now.minute > target_minute))
         } else {
@@ -121,8 +128,8 @@ pub fn cold_restart_scheduler(
 
         if started_past_target {
             log::info!(
-                "Cold restart: started after target time on Sunday — will fire next Sunday at {:02}:{:02}",
-                target_hour, target_minute
+                "Cold restart: started after target time — will fire next {} at {:02}:{:02}",
+                day_name, target_hour, target_minute
             );
         }
 
@@ -142,8 +149,8 @@ pub fn cold_restart_scheduler(
                 None => continue,
             };
 
-            // Only fire on Sunday
-            if now.weekday != 0 {
+            // Only fire on the configured day
+            if now.weekday != target_day {
                 continue;
             }
 
@@ -159,9 +166,17 @@ pub fn cold_restart_scheduler(
 
             // Fire only when current time matches target (within the current minute)
             if now.hour == target_hour && now.minute == target_minute {
+                log::warn!(
+                    "Cold restart PENDING — {} {:02}:{:02} — firing in 30 seconds (2FA will be required)",
+                    day_name, target_hour, target_minute
+                );
+
+                // Phase 1: Wait 30 seconds (gives time for ntfy alert delivery + phone pickup)
+                tokio::time::sleep(Duration::from_secs(30)).await;
+
                 log::info!(
-                    "Cold restart firing now (Sunday {:02}:{:02})",
-                    target_hour, target_minute
+                    "Cold restart firing now ({} {:02}:{:02})",
+                    day_name, target_hour, target_minute
                 );
 
                 // Write marker before sending signal

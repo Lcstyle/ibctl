@@ -82,6 +82,7 @@ _INT_FIELDS = {
     "command_server.port",
     "dashboard.port",
     "dashboard.zmq_port",
+    "session.tws_cold_restart_day",
     "ib_system_status.check_interval_seconds",
     "logging.session_reopen_hour",
     "timing.login_dialog_timeout_secs",

@@ -85,6 +85,7 @@ class NotificationConfig:
         "relogin_failed": {"enabled": True},
         "warm_restart": {"enabled": False},
         "ib_maintenance": {"enabled": False},
+        "cold_restart_pending": {"enabled": True, "lead_seconds": 30},
     })
 
     def to_dict(self, mask_token: bool = True) -> dict:

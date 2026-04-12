@@ -100,6 +100,7 @@ var EVENT_LABELS = {
     'relogin_failed': {label: 'Re-login Failed', desc: 'Alert when re-login attempts exhausted', hasTimeout: false},
     'warm_restart': {label: 'Warm Restart', desc: 'Alert when Gateway JVM warm restart occurs', hasTimeout: false},
     'ib_maintenance': {label: 'IB Maintenance', desc: 'Alert when IB status changes to maintenance or outage', hasTimeout: false},
+    'cold_restart_pending': {label: 'Cold Restart Warning', desc: 'Critical alert before scheduled cold restart (2FA required)', hasTimeout: false},
 };
 
 function toggleChannelForms() {

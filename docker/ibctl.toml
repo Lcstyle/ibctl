@@ -47,6 +47,8 @@ action = "primary"
 accept_incoming = "accept"
 # "HH:MM" 24h format for Sunday cold restart (empty = disabled)
 tws_cold_restart = ""
+# Cold restart day of week: 0=Sunday, 1=Monday, ..., 6=Saturday
+tws_cold_restart_day = 0
 
 [command_server]
 enabled = false

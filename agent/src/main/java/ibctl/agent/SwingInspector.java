@@ -493,6 +493,42 @@ public class SwingInspector {
             sb.append("]}");
         }
 
+        // Labels (JLabel text — includes Connection Status fields)
+        sb.append("],\"labels\":[");
+        List<JLabel> labels = new ArrayList<>();
+        collectComponents(window, JLabel.class, labels);
+        first = true;
+        for (JLabel l : labels) {
+            String text = l.getText();
+            if (text == null || text.isEmpty()) continue;
+            if (!first) sb.append(",");
+            first = false;
+            sb.append(jsonString(text));
+        }
+
+        // Tables (JTable rows — Connection Status window uses this)
+        sb.append("],\"tables\":[");
+        List<JTable> tables = new ArrayList<>();
+        collectComponents(window, JTable.class, tables);
+        first = true;
+        for (JTable table : tables) {
+            if (!first) sb.append(",");
+            first = false;
+            sb.append("{\"rows\":[");
+            javax.swing.table.TableModel model = table.getModel();
+            for (int row = 0; row < Math.min(model.getRowCount(), 20); row++) {
+                if (row > 0) sb.append(",");
+                sb.append("[");
+                for (int col = 0; col < model.getColumnCount(); col++) {
+                    if (col > 0) sb.append(",");
+                    Object val = model.getValueAt(row, col);
+                    sb.append(jsonString(val != null ? val.toString() : ""));
+                }
+                sb.append("]");
+            }
+            sb.append("]}");
+        }
+
         sb.append("]}");
         return sb.toString();
     }
