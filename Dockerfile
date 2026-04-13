@@ -179,8 +179,10 @@ RUN chmod +x /opt/ibctl/ibctl /opt/ibctl/entrypoint.sh \
 USER ${USER_ID}:${USER_GID}
 WORKDIR /home/ibgateway
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-    CMD bash -c 'echo STATUS > /dev/tcp/127.0.0.1/7462 && exit 0 || exit 1'
+# No Docker HEALTHCHECK — ibctl manages its own lifecycle, liveness checks,
+# and notifications. A Docker healthcheck with restart: unless-stopped is
+# destructive: it kills the container during legitimate 2FA waits, destroying
+# authenticated sessions and forcing re-authentication.
 
 ENTRYPOINT ["/opt/ibctl/entrypoint.sh"]
 
