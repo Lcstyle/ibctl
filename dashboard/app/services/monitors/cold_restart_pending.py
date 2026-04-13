@@ -31,7 +31,7 @@ class ColdRestartPendingMonitor(Monitor):
         if not ns.is_event_enabled(self.event_type):
             return []
 
-        cold_restart_time = os.environ.get("TWS_COLD_RESTART", "")
+        cold_restart_time = os.environ.get("TWS_COLD_RESTART", "").strip()
         if not cold_restart_time:
             return []
 
@@ -42,7 +42,8 @@ class ColdRestartPendingMonitor(Monitor):
         except (ValueError, IndexError):
             return []
 
-        target_day = int(os.environ.get("TWS_COLD_RESTART_DAY", "0"))
+        day_raw = os.environ.get("TWS_COLD_RESTART_DAY", "").strip()
+        target_day = int(day_raw) if day_raw else 0  # 0 = Sunday default
         lead_seconds = ns.config.events.get(self.event_type, {}).get("lead_seconds", 30)
 
         now = datetime.now()

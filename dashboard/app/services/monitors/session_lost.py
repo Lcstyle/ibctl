@@ -32,7 +32,8 @@ def _within_restart_window() -> bool:
 
     # Check cold restart time
     cold_time = os.environ.get("TWS_COLD_RESTART", "")
-    cold_day = int(os.environ.get("TWS_COLD_RESTART_DAY", "0"))
+    day_raw = os.environ.get("TWS_COLD_RESTART_DAY", "").strip()
+    cold_day = int(day_raw) if day_raw else 0
     current_day = (now.weekday() + 1) % 7  # Python: 0=Mon; convert to 0=Sun
 
     if cold_time and current_day == cold_day:
