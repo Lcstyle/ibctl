@@ -68,6 +68,11 @@ public class MultiplexedServer {
         broadcaster.setDaemon(true);
         broadcaster.start();
 
+        // Start the connection status monitor thread
+        Thread statusMonitor = new Thread(() -> connectionStatusMonitorLoop(), "ibctl-conn-status");
+        statusMonitor.setDaemon(true);
+        statusMonitor.start();
+
         // Accept loop — one thread per connection
         while (true) {
             try {
@@ -395,6 +400,90 @@ public class MultiplexedServer {
         while (buf.hasRemaining()) {
             if (client.write(buf) == -1) {
                 throw new IOException("Client closed");
+            }
+        }
+    }
+
+    // --- Connection status monitor (daemon thread) ---
+
+    /** Last known API Server connection status per Gateway window. */
+    private static volatile String lastApiServerStatus = "";
+
+    /**
+     * Periodically inspects JLabels in the main Gateway window for
+     * Connection Status changes ("connected" / "disconnected").
+     * Fires a connection_status_changed event when the status changes.
+     * Runs every 5 seconds on a dedicated daemon thread.
+     */
+    private static void connectionStatusMonitorLoop() {
+        try { Thread.sleep(10000); } catch (InterruptedException e) { return; }
+
+        while (true) {
+            try {
+                Thread.sleep(5000);
+
+                // Find the main Gateway window
+                Window gatewayWindow = null;
+                for (Window w : WindowMonitor.getOpenWindows()) {
+                    String title = getWindowTitle(w);
+                    if (title != null) {
+                        String lower = title.toLowerCase();
+                        if ((lower.contains("ib gateway") || lower.contains("ibkr gateway"))
+                                && !lower.contains("configuration")) {
+                            gatewayWindow = w;
+                            break;
+                        }
+                    }
+                }
+                if (gatewayWindow == null) continue;
+
+                // Read JLabels on the AWT thread
+                final Window gw = gatewayWindow;
+                final String[] status = {null};
+                try {
+                    javax.swing.SwingUtilities.invokeAndWait(() -> {
+                        java.util.List<JLabel> labels = new java.util.ArrayList<>();
+                        SwingInspector.collectComponents(gw, JLabel.class, labels);
+                        for (JLabel label : labels) {
+                            String text = label.getText();
+                            if (text != null) {
+                                String lower = text.trim().toLowerCase();
+                                if (lower.equals("connected") || lower.equals("disconnected")) {
+                                    status[0] = lower;
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                } catch (Exception e) {
+                    continue;
+                }
+
+                if (status[0] == null) continue;
+
+                // Emit event only on change
+                if (!status[0].equals(lastApiServerStatus)) {
+                    String prev = lastApiServerStatus;
+                    lastApiServerStatus = status[0];
+
+                    // Don't emit for the initial reading
+                    if (prev.isEmpty()) continue;
+
+                    long seq = sequence.incrementAndGet();
+                    String event = "{\"type\":\"connection_status_changed\""
+                            + ",\"seq\":" + seq
+                            + ",\"from\":" + SwingInspector.jsonString(prev)
+                            + ",\"to\":" + SwingInspector.jsonString(status[0])
+                            + ",\"ts\":" + System.currentTimeMillis()
+                            + "}";
+                    eventQueue.offer(event);
+                    System.out.println("[ibctl-agent] Connection status: " + prev + " -> " + status[0]);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (Exception e) {
+                // Non-fatal — retry next cycle
             }
         }
     }

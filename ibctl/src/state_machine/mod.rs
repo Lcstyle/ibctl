@@ -414,6 +414,10 @@ impl StateMachine {
                     window_title, message, buttons
                 );
             }
+            AgentEvent::ConnectionStatusChanged { ref from, ref to, .. } => {
+                log::warn!("Event: connection_status_changed {} -> {}", from, to);
+                self.api_server_connected = to == "connected";
+            }
         }
 
         // Re-publish snapshot so dashboard sees latest state
@@ -1277,6 +1281,23 @@ impl StateMachine {
         if !socat_alive {
             log::warn!("Socat process died — restarting port forwarding");
             self.start_socat(api_port, socat_port);
+        }
+
+        // --- API Server disconnect detection (real-time event from Java agent) ---
+        if !self.api_server_connected {
+            log::warn!("API Server DISCONNECTED (detected via connection_status_changed event)");
+            self.stop_socat();
+            self.abort_client_id_task();
+            self.connected_window_class = None;
+            self.handler_registry.reset();
+            // Click OK on any error dialogs before restarting
+            if let Ok(windows) = self.agent_client.list_windows().await {
+                for w in &windows {
+                    let _ = self.agent_client.click_button(w.id, "OK").await;
+                }
+            }
+            self.api_server_connected = true; // Reset for next cycle
+            return Ok(State::Restarting);
         }
 
         // --- Event-driven dialog detection (observation cache) ---

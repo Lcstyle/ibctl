@@ -623,7 +623,7 @@ public class SwingInspector {
         return "";
     }
 
-    private static <T extends Component> void collectComponents(Container container, Class<T> type, List<T> result) {
+    static <T extends Component> void collectComponents(Container container, Class<T> type, List<T> result) {
         for (Component c : container.getComponents()) {
             if (type.isInstance(c)) {
                 result.add(type.cast(c));

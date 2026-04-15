@@ -206,6 +206,9 @@ pub struct StateMachine {
     /// session loss: if the main window's class changes (e.g. ibgateway.ay → ibgateway.az),
     /// Gateway reverted to the login form without showing a RE-LOGIN dialog.
     pub(super) connected_window_class: Option<String>,
+    /// API Server connection status from Java agent's connection_status_changed event.
+    /// Updated in real-time by the event stream. Checked by do_connected handler.
+    pub(super) api_server_connected: bool,
     /// 2FA device selection state — survives tokio::select! cancellation.
     /// Set true after device is selected and OK clicked. Reset on state transitions
     /// that start a new login cycle.
@@ -273,6 +276,7 @@ impl StateMachine {
             client_id_rx: None,
             relogin_attempts: 0,
             connected_window_class: None,
+            api_server_connected: true,
             twofa_device_selected: false,
             twofa_seen: false,
             twofa_gone_at: None,

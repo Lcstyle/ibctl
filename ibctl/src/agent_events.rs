@@ -59,6 +59,12 @@ pub enum AgentEvent {
         message: Option<String>,
         buttons: Vec<String>,
     },
+    /// Connection Status label changed ("connected" ↔ "disconnected").
+    /// Fired by the Java agent's connection status monitor thread.
+    ConnectionStatusChanged {
+        from: String,
+        to: String,
+    },
 }
 
 /// Window data from agent snapshot. Fields populated by serde, read by
