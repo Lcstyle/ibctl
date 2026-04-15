@@ -46,13 +46,13 @@ impl DialogHandler for SessionConflictHandler {
                 self.action
             );
 
-            // Button labels from IBC's ExistingSessionDetectedDialogHandler:
-            // PRIMARY: tries "OK" -> "Continue Login" -> "Reconnect This Session"
-            // SECONDARY: tries "Cancel" -> "Exit Application"
-            // PRIMARYOVERRIDE: tries "OK" -> "Continue Login" -> "Reconnect This Session"
+            // Button labels — try most specific first to avoid clicking
+            // "OK" on a different dialog (e.g., "Connection failed" error).
+            // PRIMARY/PRIMARYOVERRIDE: reconnect and take over the session.
+            // SECONDARY: cancel and exit.
             let button_candidates: &[&str] = match self.action {
                 SessionAction::Secondary => &["Cancel", "Exit Application"],
-                _ => &["OK", "Continue Login", "Reconnect This Session"],
+                _ => &["Reconnect This Session", "Continue Login", "OK"],
             };
 
             for label in button_candidates {
