@@ -1299,6 +1299,71 @@ impl StateMachine {
             return Ok(State::HandlingSessionConflict);
         }
 
+        // Error dialog detection: "Connection to server failed" or similar
+        // error dialogs during Connected state indicate server-side disconnect.
+        // These dialogs have title "IBKR Gateway" with an OK button and are
+        // NOT login forms or re-login dialogs — they're connection errors.
+        // Click OK and immediately verify connection status.
+        {
+            let has_error_dialog = self.observation.windows.iter().any(|w| {
+                let t = w.title.to_lowercase();
+                (t.contains("ibkr gateway") || t.contains("ib gateway"))
+                    && !t.contains("configuration")
+                    && w.id != self.observation.main_gateway_window()
+                        .map(|m| m.id).unwrap_or(0)
+            });
+            if has_error_dialog {
+                log::warn!("Error dialog detected during Connected state — running immediate liveness check");
+                // Click OK on error dialogs to dismiss them
+                if let Ok(windows) = self.agent_client.list_windows().await {
+                    for w in &windows {
+                        let t = w.title.to_lowercase();
+                        if (t.contains("ibkr gateway") || t.contains("ib gateway"))
+                            && !t.contains("configuration")
+                        {
+                            let _ = self.agent_client.click_button(w.id, "OK").await;
+                        }
+                    }
+                }
+                // Immediate liveness check via label inspection
+                if let Ok(windows) = self.agent_client.list_windows().await {
+                    for w in &windows {
+                        let t = w.title.to_lowercase();
+                        if t.contains("ib gateway") || t.contains("ibkr gateway") {
+                            if let Ok(components) = self.agent_client.dump_components(w.id).await {
+                                // Check labels for "disconnected"
+                                if let Some(labels) = components.get("labels").and_then(|l| l.as_array()) {
+                                    let has_disconnected = labels.iter().any(|l| {
+                                        l.as_str().is_some_and(|s| s.to_lowercase() == "disconnected")
+                                    });
+                                    if has_disconnected {
+                                        log::warn!("API Server DISCONNECTED confirmed via label inspection — session lost");
+                                        self.connected_window_class = None;
+                                        self.handler_registry.reset();
+                                        self.abort_client_id_task();
+                                        self.stop_socat();
+                                        return Ok(State::Restarting);
+                                    }
+                                }
+                                // Check for login form
+                                let has_textfields = components.get("textfields")
+                                    .and_then(|t| t.as_array())
+                                    .is_some_and(|a| !a.is_empty());
+                                if has_textfields {
+                                    log::warn!("Login form detected after error dialog — session lost");
+                                    self.connected_window_class = None;
+                                    self.handler_registry.reset();
+                                    self.abort_client_id_task();
+                                    self.stop_socat();
+                                    return Ok(State::WaitingForLogin);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Silent session loss: check if main window now has text fields
         // (login form reappeared without a re-login dialog)
         if let Some(main) = self.observation.main_gateway_window() {
@@ -1322,11 +1387,12 @@ impl StateMachine {
             }
         }
 
-        // --- Active liveness verification (catches in-place window morphing) ---
-        // Gateway reuses the same window when session is lost — no window_opened event fires.
-        // The observation cache misses this. Every 30s, do an active HTTP check.
+        // --- Active liveness verification (unconditional, every 30s) ---
+        // Always runs regardless of observation cache freshness. Error dialog
+        // events were keeping the cache "fresh" and suppressing this check,
+        // allowing 20-minute delays in detecting disconnected state.
         if self.state_entered_at.elapsed().as_secs() > 10
-            && self.observation.last_updated.elapsed() > std::time::Duration::from_secs(30)
+            && self.state_entered_at.elapsed().as_secs() % 30 < 3
         {
             if let Ok(windows) = self.agent_client.list_windows().await {
                 // Check for 2FA dialog that wasn't caught by events
