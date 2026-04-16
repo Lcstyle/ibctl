@@ -1088,51 +1088,25 @@ impl StateMachine {
                             break;
                         }
 
-                        // Check labels for "connected" (Connection Status may use JLabels)
-                        if let Some(labels) = components.get("labels").and_then(|l| l.as_array()) {
-                            let has_connected = labels.iter().any(|l| {
-                                l.as_str().is_some_and(|s| s.to_lowercase() == "connected")
-                            });
-                            if has_connected {
-                                log::info!("Gateway API Server: connected (confirmed via label inspection)");
-                                return Ok(State::ConfiguringApi);
-                            }
-                        }
-
-                        // Check JTable rows for "API Server" + "connected"
-                        if let Some(tables) = components.get("tables").and_then(|t| t.as_array()) {
-                            for table in tables {
-                                if let Some(rows) = table.get("rows").and_then(|r| r.as_array()) {
-                                    for row in rows {
-                                        if let Some(cells) = row.as_array() {
-                                            let purpose = cells.first()
-                                                .and_then(|c| c.as_str())
-                                                .unwrap_or("");
-                                            let status = cells.get(1)
-                                                .and_then(|c| c.as_str())
-                                                .unwrap_or("");
-                                            if purpose.to_lowercase().contains("api server")
-                                                && status.to_lowercase().contains("connected")
-                                            {
-                                                log::info!(
-                                                    "Gateway API Server: connected (confirmed via Connection Status table)"
-                                                );
-                                                return Ok(State::ConfiguringApi);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                        // Positive confirmation via label inspection.
+                        // See components_indicate_connected for label shape details.
+                        if components_indicate_connected(&components) {
+                            log::info!("Gateway API Server: connected (confirmed via label inspection)");
+                            return Ok(State::ConfiguringApi);
                         }
                     }
                 }
             }
         }
 
-        // Deadline
+        // Deadline — fail-CLOSED: if we never saw "connected" after 120s, the
+        // Gateway is in an unknown state. Proceeding to ConfiguringApi pretending
+        // the session is valid produces a false-Connected state where the dashboard
+        // lies to the user. Restart the JVM for a clean slate instead.
         if self.state_entered_at.elapsed() > std::time::Duration::from_secs(120) {
-            log::warn!("Gateway API not ready after 120s — proceeding to ConfiguringApi anyway");
-            return Ok(State::ConfiguringApi);
+            log::warn!("Gateway API not ready after 120s — restarting JVM (fail-closed)");
+            self.abort_client_id_task();
+            return Ok(State::Restarting);
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -1179,14 +1153,17 @@ impl StateMachine {
                 self.dismiss_menus().await;
 
                 if self.config_retries >= MAX_CONFIG_RETRIES {
-                    // Configuration is best-effort — don't restart Gateway for config failures.
-                    // Proceed to Connected and let the user configure manually if needed.
+                    // Configuration dialog not being reachable after 3 attempts means
+                    // Gateway is not in the expected Connected-with-UI state — likely
+                    // still at login form or showing an error. Fail-CLOSED: restart
+                    // the JVM instead of pretending we're Connected.
                     log::warn!(
-                        "API configuration failed {} times — proceeding without config: {}",
+                        "API configuration failed {} times — restarting JVM (fail-closed): {}",
                         MAX_CONFIG_RETRIES, e
                     );
                     self.config_retries = 0;
-                    Ok(State::Connected)
+                    self.abort_client_id_task();
+                    Ok(State::Restarting)
                 } else {
                     log::error!("API configuration FAILED: {} — will retry ({}/{})", e, self.config_retries, MAX_CONFIG_RETRIES);
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -1421,10 +1398,7 @@ impl StateMachine {
                     if t.contains("ib gateway") || t.contains("ibkr gateway") {
                         if let Ok(components) = self.agent_client.dump_components(w.id).await {
                             // Login form check (textfields present = session lost)
-                            let has_login_fields = components.get("textfields")
-                                .and_then(|t| t.as_array())
-                                .is_some_and(|a| !a.is_empty());
-                            if has_login_fields {
+                            if components_have_login_form(&components) {
                                 log::warn!("Liveness check FAILED — login form detected during Connected state");
                                 self.connected_window_class = None;
                                 self.handler_registry.reset();
@@ -1433,32 +1407,17 @@ impl StateMachine {
                                 return Ok(State::WaitingForLogin);
                             }
 
-                            // Connection Status table check — "API Server: disconnected" = session lost
-                            if let Some(tables) = components.get("tables").and_then(|t| t.as_array()) {
-                                for table in tables {
-                                    if let Some(rows) = table.get("rows").and_then(|r| r.as_array()) {
-                                        for row in rows {
-                                            if let Some(cells) = row.as_array() {
-                                                let purpose = cells.first()
-                                                    .and_then(|c| c.as_str()).unwrap_or("");
-                                                let status = cells.get(1)
-                                                    .and_then(|c| c.as_str()).unwrap_or("");
-                                                if purpose.to_lowercase().contains("api server")
-                                                    && status.to_lowercase().contains("disconnected")
-                                                {
-                                                    log::warn!(
-                                                        "Liveness check FAILED — API Server status: disconnected"
-                                                    );
-                                                    self.connected_window_class = None;
-                                                    self.handler_registry.reset();
-                                                    self.abort_client_id_task();
-                                                    self.stop_socat();
-                                                    return Ok(State::WaitingForLogin);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                            // Connection Status label check — see components_indicate_disconnected
+                            // doc comment for details on the label shape.
+                            if components_indicate_disconnected(&components) {
+                                log::warn!(
+                                    "Liveness check FAILED — API Server label: disconnected"
+                                );
+                                self.connected_window_class = None;
+                                self.handler_registry.reset();
+                                self.abort_client_id_task();
+                                self.stop_socat();
+                                return Ok(State::WaitingForLogin);
                             }
                         }
                     }
@@ -1888,6 +1847,50 @@ impl StateMachine {
     }
 }
 
+// --- Pure helpers for component inspection ---
+//
+// Extracted as free functions so they can be unit-tested against real JSON
+// fixtures captured from the Java agent's `/windows/<id>/dump` endpoint.
+// Gateway's Connection Status is rendered as adjacent JLabels
+// (`["Purpose","Status","API Server","disconnected","IBKR GATEWAY"]`),
+// NOT as JTable rows — so we must inspect the labels array.
+
+/// Returns true if the component dump shows "API Server: disconnected" in labels.
+/// Requires BOTH "api server" (case-insensitive) and "disconnected" as labels
+/// to avoid false-positives on benign windows that happen to contain one term.
+fn components_indicate_disconnected(components: &serde_json::Value) -> bool {
+    let labels = match components.get("labels").and_then(|l| l.as_array()) {
+        Some(arr) => arr,
+        None => return false,
+    };
+    let texts: Vec<String> = labels.iter()
+        .filter_map(|l| l.as_str())
+        .map(|s| s.to_lowercase())
+        .collect();
+    let has_api_server = texts.iter().any(|s| s.contains("api server"));
+    let has_disconnected = texts.iter().any(|s| s == "disconnected");
+    has_api_server && has_disconnected
+}
+
+/// Returns true if the component dump shows "connected" as a standalone label.
+/// Used by WaitingForApiReady to positively confirm the Gateway is ready.
+fn components_indicate_connected(components: &serde_json::Value) -> bool {
+    components.get("labels")
+        .and_then(|l| l.as_array())
+        .is_some_and(|labels| {
+            labels.iter().any(|l| {
+                l.as_str().is_some_and(|s| s.to_lowercase() == "connected")
+            })
+        })
+}
+
+/// Returns true if the component dump indicates a login form (non-empty textfields).
+fn components_have_login_form(components: &serde_json::Value) -> bool {
+    components.get("textfields")
+        .and_then(|t| t.as_array())
+        .is_some_and(|a| !a.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2110,5 +2113,150 @@ login_dialog_timeout_secs = 0
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {} // expected
             other => panic!("expected Disconnected, got {:?}", other),
         }
+    }
+
+    // --- Liveness check label inspection tests (incident 2026-04-16) ---
+    //
+    // Gateway renders the Connection Status info as JLabels, not JTable. A prior
+    // version of the liveness check inspected `components["tables"]` for
+    // "API Server: disconnected" — but the tables array was always empty on
+    // the main Gateway window. This allowed the state machine to stay in
+    // Connected for an hour while Gateway was actually at the login form.
+    //
+    // These tests use real JSON captured from the `/windows/<id>/dump` endpoint
+    // on zion during the incident. Regression guards:
+    //
+    //   1. MUST detect "API Server: disconnected" from labels alone
+    //   2. MUST NOT false-positive when Gateway is in a benign no-connection-status state
+    //   3. MUST detect login form via non-empty textfields
+    //   4. MUST confirm "connected" when labels say so
+
+    /// Real zion dump of the main Gateway window in the disconnected state
+    /// (captured 2026-04-16 ~06:00 UTC during the incident).
+    const FIXTURE_MAIN_DISCONNECTED: &str = r#"{
+        "buttons": [
+            {"class":"trader.common.tag.r","text":"Show log","visible":true,"enabled":false,"selected":false,"type":"r"},
+            {"class":"trader.common.tag.r","text":"Show API messages","visible":true,"enabled":false,"selected":false,"type":"r"},
+            {"class":"jtscomponents.in","text":"File","visible":true,"enabled":true,"selected":false,"type":"in"}
+        ],
+        "textfields": [],
+        "trees": [],
+        "labels": ["Purpose","Status","API Server","disconnected","IBKR GATEWAY"],
+        "tables": []
+    }"#;
+
+    /// Hypothetical but faithfully-shaped "connected" dump — same labels array
+    /// except the status word differs.
+    const FIXTURE_MAIN_CONNECTED: &str = r#"{
+        "buttons": [{"class":"jtscomponents.in","text":"File","visible":true,"enabled":true,"selected":false,"type":"in"}],
+        "textfields": [],
+        "trees": [],
+        "labels": ["Purpose","Status","API Server","connected","IBKR GATEWAY"],
+        "tables": []
+    }"#;
+
+    /// Dump of the login-form window — has populated textfields. Labels contain
+    /// neither "api server" nor "disconnected", so the disconnect check must
+    /// NOT false-positive on this case (the login-form check catches it instead).
+    const FIXTURE_LOGIN_FORM: &str = r#"{
+        "buttons": [
+            {"class":"javax.swing.JButton","text":"Log In","visible":true,"enabled":false,"selected":false,"type":"JButton"},
+            {"class":"twslaunch.jtscomponents.V","text":"Live Trading","visible":true,"enabled":true,"selected":true,"type":"V"}
+        ],
+        "textfields": [
+            {"class":"javax.swing.JTextField","text":"rongonz2029","visible":true,"enabled":true,"type":"JTextField"}
+        ],
+        "labels": ["Username","Password"],
+        "tables": []
+    }"#;
+
+    fn parse(json: &str) -> serde_json::Value {
+        serde_json::from_str(json).expect("fixture is valid JSON")
+    }
+
+    #[test]
+    fn test_label_check_detects_disconnected_in_real_dump() {
+        let components = parse(FIXTURE_MAIN_DISCONNECTED);
+        assert!(
+            components_indicate_disconnected(&components),
+            "must detect 'API Server: disconnected' from real zion dump"
+        );
+    }
+
+    #[test]
+    fn test_label_check_does_not_trigger_on_connected() {
+        let components = parse(FIXTURE_MAIN_CONNECTED);
+        assert!(
+            !components_indicate_disconnected(&components),
+            "must NOT false-positive on a connected Gateway"
+        );
+    }
+
+    #[test]
+    fn test_label_check_does_not_trigger_on_login_form() {
+        let components = parse(FIXTURE_LOGIN_FORM);
+        assert!(
+            !components_indicate_disconnected(&components),
+            "must NOT false-positive on login form (login-form check catches this case)"
+        );
+    }
+
+    #[test]
+    fn test_label_check_handles_missing_labels_array() {
+        let components = serde_json::json!({"buttons": [], "textfields": []});
+        assert!(
+            !components_indicate_disconnected(&components),
+            "must NOT panic or false-positive when labels array is absent"
+        );
+    }
+
+    #[test]
+    fn test_label_check_requires_both_markers() {
+        // "disconnected" alone without "API Server" context — shouldn't fire.
+        // (e.g. some other label that happens to equal "disconnected" in a
+        // benign window)
+        let components = serde_json::json!({
+            "labels": ["Some Other Thing", "disconnected"]
+        });
+        assert!(
+            !components_indicate_disconnected(&components),
+            "must require both 'api server' AND 'disconnected' labels"
+        );
+    }
+
+    #[test]
+    fn test_label_check_detects_connected_when_label_present() {
+        let components = parse(FIXTURE_MAIN_CONNECTED);
+        assert!(
+            components_indicate_connected(&components),
+            "must detect 'connected' label for positive confirmation"
+        );
+    }
+
+    #[test]
+    fn test_label_check_does_not_confirm_connected_on_disconnected() {
+        let components = parse(FIXTURE_MAIN_DISCONNECTED);
+        assert!(
+            !components_indicate_connected(&components),
+            "must not confirm connected when label says disconnected"
+        );
+    }
+
+    #[test]
+    fn test_login_form_detected_via_textfields() {
+        let components = parse(FIXTURE_LOGIN_FORM);
+        assert!(
+            components_have_login_form(&components),
+            "must detect login form via non-empty textfields array"
+        );
+    }
+
+    #[test]
+    fn test_login_form_not_detected_on_main_window() {
+        let components = parse(FIXTURE_MAIN_DISCONNECTED);
+        assert!(
+            !components_have_login_form(&components),
+            "must not flag main Gateway window as login form (textfields is empty)"
+        );
     }
 }
