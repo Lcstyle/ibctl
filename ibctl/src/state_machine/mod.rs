@@ -1250,7 +1250,17 @@ impl StateMachine {
             self.client_id_rx = Some(ids_rx);
         }
 
-        // Check JVM health
+        // ================================================================
+        // Revocation bus: every contradiction source funnels through
+        // self.revocation.observe(RevocationSource::X). Sources with zero
+        // debounce (JvmDied, ReloginDialog, SessionConflict) fire on first
+        // observation; debounced sources (LoginFormVisible, DisconnectedLabel,
+        // ErrorDialog) require sustained contradiction. On maturation, we
+        // log a structured "proof revoked" line + perform per-source cleanup
+        // + return the source's designated next_state(). See verifier.rs.
+        // ================================================================
+
+        // --- JVM health (immediate) ---
         if !self.supervisor.is_running() {
             log::info!("JVM exited — checking for autorestart token");
             let autorestart_hash = self.supervisor.find_autorestart_path();
@@ -1264,10 +1274,16 @@ impl StateMachine {
             self.warm_restart_pending = autorestart_hash;
             self.abort_client_id_task();
             let _ = std::fs::remove_file(&self.config.agent.socket_path);
-            return Ok(State::Restarting);
+            // Record & fire — zero debounce ⇒ matures immediately.
+            let src = verifier::RevocationSource::JvmDied;
+            let next = src.next_state();
+            if self.revocation.observe(src).is_some() {
+                log::warn!("proof revoked source=jvm_died next={}", next);
+            }
+            return Ok(next);
         }
 
-        // Check socat health — restart if it died
+        // --- Socat health (not a revocation — just self-heal) ---
         let socat_alive = self.socat_process.as_mut()
             .map(|c| c.try_wait().ok().flatten().is_none())
             .unwrap_or(false);
@@ -1276,103 +1292,80 @@ impl StateMachine {
             self.start_socat(api_port, socat_port);
         }
 
-        // --- Event-driven dialog detection (observation cache) ---
-        // Check the observation cache for re-login dialogs and session loss.
-        // Events update the cache in real-time; this is instant (no I/O).
-
-        // Re-login dialog detection
+        // --- Re-login dialog (immediate) ---
         if self.observation.has_relogin_dialog() {
-            log::info!("RE-LOGIN dialog detected via observation cache — transitioning to ReconnectingSession");
-            self.abort_client_id_task();
-            self.stop_socat();
-            return Ok(State::ReconnectingSession);
+            let src = verifier::RevocationSource::ReloginDialog;
+            if self.revocation.observe(src.clone()).is_some() {
+                let next = src.next_state();
+                log::warn!("proof revoked source=relogin_dialog next={}", next);
+                self.abort_client_id_task();
+                self.stop_socat();
+                return Ok(next);
+            }
+        } else {
+            self.revocation.clear("relogin_dialog");
         }
 
-        // Session conflict detection
+        // --- Session conflict dialog (immediate) ---
         if self.observation.has_session_conflict() {
-            log::info!("Session conflict detected via observation cache — transitioning to HandlingSessionConflict");
-            self.abort_client_id_task();
-            self.stop_socat();
-            return Ok(State::HandlingSessionConflict);
+            let src = verifier::RevocationSource::SessionConflict;
+            if self.revocation.observe(src.clone()).is_some() {
+                let next = src.next_state();
+                log::warn!("proof revoked source=session_conflict next={}", next);
+                self.abort_client_id_task();
+                self.stop_socat();
+                return Ok(next);
+            }
+        } else {
+            self.revocation.clear("session_conflict");
         }
 
-        // Error dialog detection: "Connection to server failed" or similar
-        // error dialogs during Connected state indicate server-side disconnect.
-        // These dialogs have title "IBKR Gateway" with an OK button and are
-        // NOT login forms or re-login dialogs — they're connection errors.
-        // Click OK and immediately verify connection status.
-        {
-            let has_error_dialog = self.observation.windows.iter().any(|w| {
-                let t = w.title.to_lowercase();
-                (t.contains("ibkr gateway") || t.contains("ib gateway"))
-                    && !t.contains("configuration")
-                    && w.id != self.observation.main_gateway_window()
-                        .map(|m| m.id).unwrap_or(0)
-            });
-            if has_error_dialog {
-                log::warn!("Error dialog detected during Connected state — running immediate liveness check");
-                // Click OK on error dialogs to dismiss them
-                if let Ok(windows) = self.agent_client.list_windows().await {
-                    for w in &windows {
-                        let t = w.title.to_lowercase();
-                        if (t.contains("ibkr gateway") || t.contains("ib gateway"))
-                            && !t.contains("configuration")
-                        {
-                            let _ = self.agent_client.click_button(w.id, "OK").await;
-                        }
-                    }
-                }
-                // Immediate liveness check via label inspection
-                if let Ok(windows) = self.agent_client.list_windows().await {
-                    for w in &windows {
-                        let t = w.title.to_lowercase();
-                        if t.contains("ib gateway") || t.contains("ibkr gateway") {
-                            if let Ok(components) = self.agent_client.dump_components(w.id).await {
-                                // Check labels for "disconnected"
-                                if let Some(labels) = components.get("labels").and_then(|l| l.as_array()) {
-                                    let has_disconnected = labels.iter().any(|l| {
-                                        l.as_str().is_some_and(|s| s.to_lowercase() == "disconnected")
-                                    });
-                                    if has_disconnected {
-                                        log::warn!("API Server DISCONNECTED confirmed via label inspection — session lost");
-                                        self.connected_window_class = None;
-                                        self.handler_registry.reset();
-                                        self.abort_client_id_task();
-                                        self.stop_socat();
-                                        return Ok(State::Restarting);
-                                    }
-                                }
-                                // Check for login form
-                                let has_textfields = components.get("textfields")
-                                    .and_then(|t| t.as_array())
-                                    .is_some_and(|a| !a.is_empty());
-                                if has_textfields {
-                                    log::warn!("Login form detected after error dialog — session lost");
-                                    self.connected_window_class = None;
-                                    self.handler_registry.reset();
-                                    self.abort_client_id_task();
-                                    self.stop_socat();
-                                    return Ok(State::WaitingForLogin);
-                                }
-                            }
-                        }
+        // --- Error dialog on Gateway window (500 ms debounce) ---
+        // Match non-config "IBKR Gateway"-titled dialogs that aren't the main
+        // window itself. We also opportunistically click OK on them (benign
+        // recovery action, orthogonal to revocation).
+        let error_dialog_title = self.observation.windows.iter().find_map(|w| {
+            let t = w.title.to_lowercase();
+            let is_error = (t.contains("ibkr gateway") || t.contains("ib gateway"))
+                && !t.contains("configuration")
+                && w.id != self.observation.main_gateway_window().map(|m| m.id).unwrap_or(0);
+            is_error.then(|| w.title.clone())
+        });
+        if let Some(title) = error_dialog_title {
+            // Click OK (idempotent recovery action — separate from revocation)
+            if let Ok(windows) = self.agent_client.list_windows().await {
+                for w in &windows {
+                    let t = w.title.to_lowercase();
+                    if (t.contains("ibkr gateway") || t.contains("ib gateway"))
+                        && !t.contains("configuration")
+                    {
+                        let _ = self.agent_client.click_button(w.id, "OK").await;
                     }
                 }
             }
-        }
-
-        // Silent session loss: check if main window now has text fields
-        // (login form reappeared without a re-login dialog)
-        if let Some(main) = self.observation.main_gateway_window() {
-            if main.has_login_button {
-                log::warn!("Session lost — login form detected in observation cache (has_login_button=true)");
+            let src = verifier::RevocationSource::ErrorDialog(title);
+            if let Some(fired) = self.revocation.observe(src) {
+                let next = fired.next_state();
+                log::warn!("proof revoked source=error_dialog next={}", next);
                 self.connected_window_class = None;
                 self.handler_registry.reset();
                 self.abort_client_id_task();
-                return Ok(State::WaitingForLogin);
+                self.stop_socat();
+                return Ok(next);
             }
+        } else {
+            self.revocation.clear("error_dialog");
+        }
 
-            // Track class changes (benign UI updates)
+        // --- Login form via observation cache (1s debounce) ---
+        // Event-driven detection: the agent's has_login_button flag is set
+        // when window_opened/dump events detect login textfields.
+        let observed_login_button = self.observation.main_gateway_window()
+            .map(|m| m.has_login_button)
+            .unwrap_or(false);
+
+        // Track class changes (informational; not a revocation source in Phase 1)
+        if let Some(main) = self.observation.main_gateway_window() {
             if let Some(ref expected_class) = self.connected_window_class {
                 if main.class != *expected_class && !main.has_login_button {
                     log::info!(
@@ -1384,61 +1377,78 @@ impl StateMachine {
             }
         }
 
-        // --- Active liveness verification (unconditional, every 30s) ---
-        // Always runs regardless of observation cache freshness. Error dialog
-        // events were keeping the cache "fresh" and suppressing this check,
-        // allowing 20-minute delays in detecting disconnected state.
-        if self.state_entered_at.elapsed().as_secs() > 10
-            && self.state_entered_at.elapsed().as_secs() % 30 < 3
-        {
-            if let Ok(windows) = self.agent_client.list_windows().await {
-                // Check for 2FA dialog that wasn't caught by events
-                let has_2fa = windows.iter().any(|w| {
-                    w.title.to_lowercase().contains("second factor")
-                });
-                if has_2fa {
-                    log::warn!("Liveness check found 2FA dialog during Connected — transitioning to WaitingFor2fa");
-                    return Ok(State::WaitingFor2fa);
+        // --- Active probe: dump_components on main window ---
+        // Runs every do_connected tick (not gated by modulo timer anymore) so
+        // debounce timers can mature on schedule. Per-source clear() resets
+        // the debounce when the contradiction stops.
+        let mut probe_login_form = false;
+        let mut probe_disconnected_label = false;
+        let mut probe_twofa = false;
+        if let Ok(windows) = self.agent_client.list_windows().await {
+            for w in &windows {
+                let t = w.title.to_lowercase();
+                if t.contains("second factor") {
+                    probe_twofa = true;
                 }
-
-                // Active liveness check via dump_components on main gateway window.
-                // Checks both for login form (textfields) and Connection Status
-                // table ("API Server: connected").
-                for w in &windows {
-                    let t = w.title.to_lowercase();
-                    if t.contains("ib gateway") || t.contains("ibkr gateway") {
-                        if let Ok(components) = self.agent_client.dump_components(w.id).await {
-                            // Login form check (textfields present = session lost)
-                            if components_have_login_form(&components) {
-                                log::warn!("Liveness check FAILED — login form detected during Connected state");
-                                self.connected_window_class = None;
-                                self.handler_registry.reset();
-                                self.abort_client_id_task();
-                                self.stop_socat();
-                                return Ok(State::WaitingForLogin);
-                            }
-
-                            // Connection Status label check — see components_indicate_disconnected
-                            // doc comment for details on the label shape.
-                            if components_indicate_disconnected(&components) {
-                                log::warn!(
-                                    "Liveness check FAILED — API Server label: disconnected"
-                                );
-                                self.connected_window_class = None;
-                                self.handler_registry.reset();
-                                self.abort_client_id_task();
-                                self.stop_socat();
-                                return Ok(State::WaitingForLogin);
-                            }
+                if t.contains("ib gateway") || t.contains("ibkr gateway") {
+                    if let Ok(components) = self.agent_client.dump_components(w.id).await {
+                        if components_have_login_form(&components) {
+                            probe_login_form = true;
+                        }
+                        if components_indicate_disconnected(&components) {
+                            probe_disconnected_label = true;
                         }
                     }
                 }
-
-                // Reconciliation: dispatch handlers for any unprocessed windows
-                for win in &windows {
-                    let _ = self.handler_registry.dispatch(&self.agent_client, win).await;
-                }
             }
+
+            // Reconciliation: dispatch handlers for any unprocessed windows.
+            // Preserves the existing behavior of letting dialog handlers
+            // auto-dismiss popups, etc.
+            for win in &windows {
+                let _ = self.handler_registry.dispatch(&self.agent_client, win).await;
+            }
+        }
+
+        // 2FA dialog during Connected — unusual but possible. Not strictly a
+        // revocation; we transition to WaitingFor2fa and the proof is dropped
+        // when we leave Connected (apply_transition.clear_all()).
+        if probe_twofa {
+            log::warn!("2FA dialog observed during Connected — transitioning to WaitingFor2fa");
+            return Ok(State::WaitingFor2fa);
+        }
+
+        // --- Login form revocation (1s debounce) ---
+        let login_form_observed = observed_login_button || probe_login_form;
+        if login_form_observed {
+            let src = verifier::RevocationSource::LoginFormVisible;
+            if let Some(fired) = self.revocation.observe(src) {
+                let next = fired.next_state();
+                log::warn!("proof revoked source=login_form_visible next={}", next);
+                self.connected_window_class = None;
+                self.handler_registry.reset();
+                self.abort_client_id_task();
+                self.stop_socat();
+                return Ok(next);
+            }
+        } else {
+            self.revocation.clear("login_form_visible");
+        }
+
+        // --- Disconnected label revocation (2s debounce) ---
+        if probe_disconnected_label {
+            let src = verifier::RevocationSource::DisconnectedLabelStable;
+            if let Some(fired) = self.revocation.observe(src) {
+                let next = fired.next_state();
+                log::warn!("proof revoked source=disconnected_label next={}", next);
+                self.connected_window_class = None;
+                self.handler_registry.reset();
+                self.abort_client_id_task();
+                self.stop_socat();
+                return Ok(next);
+            }
+        } else {
+            self.revocation.clear("disconnected_label");
         }
 
         // Sync client IDs from background task (lock-free watch channel)
@@ -2468,11 +2478,17 @@ login_dialog_timeout_secs = 0
 
         let mut sm = make_test_state_machine(mock);
         sm.state = State::Connected(verifier::ConnectedProof::forced());
-        // Position the liveness timer in the 30-second check window so the
-        // periodic check actually fires this iteration.
         sm.state_entered_at = Instant::now() - Duration::from_secs(30);
         sm.connected_window_class = Some("ibgateway.ay".to_string());
         sm.observation.synced = true;
+        // Seed the revocation tracker as if the disconnected label were first
+        // observed 3s ago — past its 2s debounce — so the next `observe()`
+        // call matures immediately. Without this seed, the test would need
+        // two calls to `do_connected()` with a real 2s wait between them.
+        sm.revocation.seed_first_seen_for_tests(
+            verifier::RevocationSource::DisconnectedLabelStable,
+            Duration::from_secs(3),
+        );
 
         // Act
         let result = sm.do_connected().await.expect("handler should not error");
@@ -2480,7 +2496,7 @@ login_dialog_timeout_secs = 0
         // Assert: label-based liveness catches the disconnect, transitions to WaitingForLogin.
         assert_eq!(
             result, State::WaitingForLogin,
-            "Connected state liveness check must detect 'API Server: disconnected' label and transition to WaitingForLogin"
+            "Connected state liveness check must detect 'API Server: disconnected' label and transition to WaitingForLogin once debounce matures"
         );
     }
 
@@ -2514,6 +2530,91 @@ login_dialog_timeout_secs = 0
             matches!(result, State::Connected(_)),
             "no API settings configured ⇒ skip dialog ⇒ Connected (valid no-op path), got {:?}",
             result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_connected_liveness_respects_debounce_on_first_tick() {
+        // Arrange: Gateway shows "disconnected" label but this is the first
+        // observation — the 2s debounce must NOT have matured yet, so the
+        // state machine stays Connected on this tick. This guards against
+        // transient label-refresh glitches where a single-frame "disconnected"
+        // reading during a window morph would otherwise cause a false demotion.
+        let mock = MockAgent {
+            windows: vec![gateway_window()],
+            dump_response: serde_json::json!({
+                "labels": ["Purpose", "Status", "API Server", "disconnected", "IBKR GATEWAY"],
+                "textfields": [],
+                "buttons": [],
+                "tables": []
+            }),
+            ..Default::default()
+        };
+
+        let mut sm = make_test_state_machine(mock);
+        sm.state = State::Connected(verifier::ConnectedProof::forced());
+        sm.state_entered_at = Instant::now() - Duration::from_secs(30);
+        sm.connected_window_class = Some("ibgateway.ay".to_string());
+        sm.observation.synced = true;
+        // No seed — this is the FIRST observation.
+
+        let result = sm.do_connected().await.expect("handler should not error");
+
+        assert!(
+            matches!(result, State::Connected(_)),
+            "single-tick 'disconnected' observation must NOT fire the 2s-debounced revocation; got {:?}",
+            result
+        );
+        assert!(
+            sm.revocation.is_pending("disconnected_label"),
+            "the disconnected_label source should be in its debounce window"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_connected_liveness_transient_disconnect_does_not_revoke() {
+        // Arrange: first tick sees "disconnected" — debounce starts. Second
+        // tick sees "connected" — debounce must be cleared. No revocation.
+        let mut dump = serde_json::json!({
+            "labels": ["Purpose", "Status", "API Server", "disconnected", "IBKR GATEWAY"],
+            "textfields": [], "buttons": [], "tables": []
+        });
+        let mock = MockAgent {
+            windows: vec![gateway_window()],
+            dump_response: dump.clone(),
+            ..Default::default()
+        };
+
+        let mut sm = make_test_state_machine(mock);
+        sm.state = State::Connected(verifier::ConnectedProof::forced());
+        sm.state_entered_at = Instant::now() - Duration::from_secs(30);
+        sm.connected_window_class = Some("ibgateway.ay".to_string());
+        sm.observation.synced = true;
+
+        // Tick 1: disconnected observed — pending, stays Connected.
+        let r1 = sm.do_connected().await.unwrap();
+        assert!(matches!(r1, State::Connected(_)), "tick 1 still Connected");
+        assert!(sm.revocation.is_pending("disconnected_label"));
+
+        // Now the "disconnect" clears — Gateway's labels refresh to "connected".
+        dump["labels"] = serde_json::json!(
+            ["Purpose", "Status", "API Server", "connected", "IBKR GATEWAY"]
+        );
+        // Swap in the healed dump via a fresh mock (MockAgent.dump_response
+        // is read-only per AgentApi trait, so we rebuild the state machine).
+        let healed_mock = MockAgent {
+            windows: vec![gateway_window()],
+            dump_response: dump,
+            ..Default::default()
+        };
+        sm.agent_client = AgentClient::mock(healed_mock);
+
+        // Tick 2: healthy — debounce must clear, still Connected.
+        let r2 = sm.do_connected().await.unwrap();
+        assert!(matches!(r2, State::Connected(_)), "tick 2 still Connected after heal");
+        assert!(
+            !sm.revocation.is_pending("disconnected_label"),
+            "debounce must clear when contradiction stops (transient disconnect resolved)"
         );
     }
 

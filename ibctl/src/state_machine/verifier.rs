@@ -320,6 +320,20 @@ impl RevocationTracker {
     pub fn is_pending(&self, tag: &str) -> bool {
         self.first_seen.contains_key(tag)
     }
+
+    /// Test helper: seed the first-seen timestamp for a source to an
+    /// artificially earlier time so the next `observe()` call matures
+    /// without requiring real wall-clock elapsed time.
+    #[cfg(test)]
+    pub(in crate::state_machine) fn seed_first_seen_for_tests(
+        &mut self,
+        source: RevocationSource,
+        elapsed: Duration,
+    ) {
+        let tag = source.tag();
+        self.first_seen
+            .insert(tag, (Instant::now() - elapsed, source));
+    }
 }
 
 #[cfg(test)]
