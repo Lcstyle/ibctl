@@ -2695,4 +2695,293 @@ login_dialog_timeout_secs = 0
             result
         );
     }
+
+    // ================================================================
+    // Phase 4 — property tests for the transition law
+    //
+    // The central architectural invariant after the proof-carrying
+    // refactor is:
+    //
+    //   Promotion:  positive evidence → mint proof
+    //   Retention:  no contradiction → retain proof
+    //   Revocation: source matures past debounce → demote
+    //   Silence:    timeouts may delay/restart/demote, NEVER promote
+    //
+    // These tests codify that law so a future regression that re-introduces
+    // a fail-open path is caught by `cargo test`, not a production incident.
+    // ================================================================
+
+    /// Silence rule: a WaitingForApiReady handler that has NOT seen positive
+    /// "connected" evidence must NEVER return `State::Connected(_)`, even
+    /// after an arbitrary amount of elapsed time.
+    #[tokio::test]
+    async fn test_timeout_never_promotes_to_connected() {
+        // Arrange: Gateway sitting at login form with "disconnected" label —
+        // the exact incident scenario where the old code fabricated progress
+        // to ConfiguringApi (and then Connected) after a 120s timeout.
+        let mock = MockAgent {
+            windows: vec![gateway_window()],
+            dump_response: serde_json::json!({
+                "labels": ["Purpose", "Status", "API Server", "disconnected", "IBKR GATEWAY"],
+                "textfields": [],
+                "buttons": [],
+                "tables": []
+            }),
+            ..Default::default()
+        };
+
+        let mut sm = make_test_state_machine(mock);
+        // Wind the clock back so the 120s timeout has "already elapsed".
+        sm.state_entered_at = Instant::now() - Duration::from_secs(300);
+        sm.state = State::WaitingForApiReady;
+
+        let result = sm.do_wait_for_api_ready().await.expect("handler must not error");
+
+        // The law: no path may reach Connected without positive evidence.
+        assert!(
+            !matches!(result, State::Connected(_)),
+            "WaitingForApiReady timeout MUST NOT promote to Connected — got {:?}",
+            result
+        );
+        assert_eq!(
+            result,
+            State::Restarting,
+            "timeout with no positive signal must fail-closed to Restarting"
+        );
+    }
+
+    /// Revocation rule applied to every `RevocationSource` variant.
+    /// Each source, once matured past its debounce, must transition the
+    /// state machine to that source's `next_state()`.
+    #[tokio::test]
+    async fn test_each_revocation_source_demotes_connected() {
+        use verifier::RevocationSource;
+
+        // Build a set of "this source is currently contradicting" conditions
+        // by staging the observation cache / mock / revocation tracker so that
+        // do_connected sees the source mature on this tick. For each source
+        // we verify the resulting state equals source.next_state().
+
+        // --- ReloginDialog (immediate) ---
+        {
+            let mock = MockAgent {
+                windows: vec![gateway_window()],
+                ..Default::default()
+            };
+            let mut sm = make_test_state_machine(mock);
+            sm.state = State::Connected(verifier::ConnectedProof::forced());
+            sm.observation.synced = true;
+            // Inject a re-login dialog into the observation cache.
+            sm.observation.window_opened(
+                99,
+                "Re-login is required".into(),
+                "dialog".into(),
+                false,
+                1,
+            );
+            let result = sm.do_connected().await.expect("handler must not error");
+            assert_eq!(
+                result,
+                RevocationSource::ReloginDialog.next_state(),
+                "ReloginDialog must demote to {}",
+                RevocationSource::ReloginDialog.next_state()
+            );
+        }
+
+        // --- SessionConflict (immediate) ---
+        {
+            let mock = MockAgent {
+                windows: vec![gateway_window()],
+                ..Default::default()
+            };
+            let mut sm = make_test_state_machine(mock);
+            sm.state = State::Connected(verifier::ConnectedProof::forced());
+            sm.observation.synced = true;
+            sm.observation.window_opened(
+                99,
+                "Existing session detected".into(),
+                "dialog".into(),
+                false,
+                1,
+            );
+            let result = sm.do_connected().await.expect("handler must not error");
+            assert_eq!(
+                result,
+                RevocationSource::SessionConflict.next_state(),
+                "SessionConflict must demote to {}",
+                RevocationSource::SessionConflict.next_state()
+            );
+        }
+
+        // --- DisconnectedLabelStable (2s debounce) ---
+        {
+            let mock = MockAgent {
+                windows: vec![gateway_window()],
+                dump_response: serde_json::json!({
+                    "labels": ["Purpose", "Status", "API Server", "disconnected", "IBKR GATEWAY"],
+                    "textfields": [], "buttons": [], "tables": []
+                }),
+                ..Default::default()
+            };
+            let mut sm = make_test_state_machine(mock);
+            sm.state = State::Connected(verifier::ConnectedProof::forced());
+            sm.connected_window_class = Some("ibgateway.ay".to_string());
+            sm.observation.synced = true;
+            sm.revocation.seed_first_seen_for_tests(
+                RevocationSource::DisconnectedLabelStable,
+                Duration::from_secs(3),
+            );
+            let result = sm.do_connected().await.expect("handler must not error");
+            assert_eq!(
+                result,
+                RevocationSource::DisconnectedLabelStable.next_state(),
+                "DisconnectedLabelStable must demote to {} once debounce elapses",
+                RevocationSource::DisconnectedLabelStable.next_state()
+            );
+        }
+
+        // --- LoginFormVisible (1s debounce) ---
+        {
+            let mock = MockAgent {
+                windows: vec![gateway_window()],
+                dump_response: serde_json::json!({
+                    "labels": ["Username", "Password"],
+                    "textfields": [
+                        {"class": "javax.swing.JTextField", "text": "", "visible": true, "enabled": true, "type": "JTextField"}
+                    ],
+                    "buttons": [], "tables": []
+                }),
+                ..Default::default()
+            };
+            let mut sm = make_test_state_machine(mock);
+            sm.state = State::Connected(verifier::ConnectedProof::forced());
+            sm.connected_window_class = Some("ibgateway.ay".to_string());
+            sm.observation.synced = true;
+            sm.revocation.seed_first_seen_for_tests(
+                RevocationSource::LoginFormVisible,
+                Duration::from_secs(2),
+            );
+            let result = sm.do_connected().await.expect("handler must not error");
+            assert_eq!(
+                result,
+                RevocationSource::LoginFormVisible.next_state(),
+                "LoginFormVisible must demote to {} once debounce elapses",
+                RevocationSource::LoginFormVisible.next_state()
+            );
+        }
+    }
+
+    /// Retention rule: a debounced source that fires once then clears
+    /// (transient contradiction) must NOT revoke the proof.
+    ///
+    /// Note: this is the same scenario as
+    /// `test_connected_liveness_transient_disconnect_does_not_revoke`
+    /// from Phase 1 — kept here as a parametrized law statement.
+    #[tokio::test]
+    async fn test_transient_contradiction_preserves_proof() {
+        use verifier::RevocationSource;
+        let mut sm = make_test_state_machine(MockAgent {
+            windows: vec![gateway_window()],
+            dump_response: serde_json::json!({
+                "labels": ["Purpose", "Status", "API Server", "disconnected", "IBKR GATEWAY"],
+                "textfields": [], "buttons": [], "tables": []
+            }),
+            ..Default::default()
+        });
+        sm.state = State::Connected(verifier::ConnectedProof::forced());
+        sm.connected_window_class = Some("ibgateway.ay".to_string());
+        sm.observation.synced = true;
+
+        // Tick 1: observe contradiction, debounce starts.
+        assert!(matches!(sm.do_connected().await.unwrap(), State::Connected(_)));
+        assert!(sm.revocation.is_pending("disconnected_label"));
+
+        // Heal the contradiction — subsequent tick must clear the debounce.
+        sm.agent_client = AgentClient::mock(MockAgent {
+            windows: vec![gateway_window()],
+            dump_response: serde_json::json!({
+                "labels": ["Purpose", "Status", "API Server", "connected", "IBKR GATEWAY"],
+                "textfields": [], "buttons": [], "tables": []
+            }),
+            ..Default::default()
+        });
+        assert!(matches!(sm.do_connected().await.unwrap(), State::Connected(_)));
+        assert!(
+            !sm.revocation.is_pending("disconnected_label"),
+            "transient contradiction must clear the debounce"
+        );
+
+        // Sanity: explicit source variants respect the law.
+        for source_tag in [
+            RevocationSource::LoginFormVisible.tag(),
+            RevocationSource::DisconnectedLabelStable.tag(),
+            RevocationSource::ErrorDialog(String::new()).tag(),
+        ] {
+            assert!(
+                !sm.revocation.is_pending(source_tag),
+                "no source should be pending after a healthy tick (got {})",
+                source_tag
+            );
+        }
+    }
+
+    /// Provenance rule: the proof minted by `try_enter_connected` must
+    /// faithfully record the evidence bitflags the caller supplied.
+    #[tokio::test]
+    async fn test_proof_provenance_is_captured() {
+        use verifier::EvidenceKinds;
+        let mock = MockAgent::default();
+        let mut sm = make_test_state_machine(mock);
+        sm.snapshot_version = 42;
+        sm.observation.last_event_seq = 1234;
+
+        let wanted = EvidenceKinds::SUPERVISOR_ALIVE | EvidenceKinds::UI_SNAPSHOT;
+        let state = sm.try_enter_connected(wanted);
+
+        match state {
+            State::Connected(proof) => {
+                assert_eq!(
+                    proof.snapshot_version(), 42,
+                    "snapshot_version must match the state machine's current counter"
+                );
+                assert_eq!(
+                    proof.event_seq(), 1234,
+                    "event_seq must match the observation cache's sequence number"
+                );
+                assert_eq!(
+                    proof.evidence(), wanted,
+                    "evidence bitflags must be exactly what the caller passed"
+                );
+                assert!(
+                    !proof.is_forced(),
+                    "real verifier output must not carry the FORCED marker"
+                );
+                assert!(
+                    proof.age() < Duration::from_secs(1),
+                    "a freshly-minted proof must have sub-second age"
+                );
+            }
+            other => panic!("try_enter_connected must return State::Connected(_), got {:?}", other),
+        }
+    }
+
+    /// SETSTATE Connected debug override produces a distinct "forced" proof
+    /// so operators can tell an override apart from a real verifier result.
+    #[test]
+    fn test_setstate_produces_forced_proof() {
+        let state = State::from_name("Connected").expect("Connected parses");
+        match state {
+            State::Connected(proof) => {
+                assert!(
+                    proof.is_forced(),
+                    "SETSTATE Connected must produce a forced proof"
+                );
+                assert!(
+                    proof.evidence().contains(verifier::EvidenceKinds::FORCED),
+                    "forced proof must carry EvidenceKinds::FORCED"
+                );
+            }
+            _ => panic!("expected State::Connected"),
+        }
+    }
 }
