@@ -469,6 +469,41 @@ impl StateMachine {
         self.client_id_rx = None;
     }
 
+    /// Mint a `ConnectedProof` via the verifier and wrap it in `State::Connected`.
+    ///
+    /// This is the single choke-point for entering `Connected`. No handler
+    /// should construct `State::Connected(...)` directly — the compiler
+    /// enforces this because `ConnectedProof::mint` is crate-private to
+    /// `state_machine::verifier` (only reachable via this helper).
+    ///
+    /// The revocation bus in `do_connected` provides ongoing verification;
+    /// this helper is for the promotion side and simply records what evidence
+    /// the caller had at mint time. The resulting proof carries
+    /// `snapshot_version` + `event_seq` for provenance, and `evidence`
+    /// bitflags for the family-level source inventory.
+    ///
+    /// Every successful mint logs a structured line so that postmortems can
+    /// reconstruct the full lifecycle of a Connected session by grepping
+    /// `"proof minted"` and `"proof revoked"`.
+    pub(super) fn try_enter_connected(
+        &mut self,
+        evidence: verifier::EvidenceKinds,
+    ) -> State {
+        let proof = verifier::ConnectedProof::mint(
+            self.snapshot_version,
+            self.observation.last_event_seq,
+            evidence,
+        );
+        log::info!(
+            "proof minted version={} seq={} evidence={:?} verifier_version={}",
+            proof.snapshot_version(),
+            proof.event_seq(),
+            proof.evidence().tags(),
+            proof.verifier_version(),
+        );
+        State::Connected(proof)
+    }
+
     /// Execute the transition for the current state, returning the next state.
     async fn transition(&mut self) -> Result<State, StateMachineError> {
         match &self.state {
@@ -1154,10 +1189,16 @@ impl StateMachine {
             Ok(()) => {
                 log::info!("API configuration complete");
                 self.config_retries = 0;
-                // Phase 0: use forced sentinel so the enum-shape change is a
-                // no-op behavior change. Phase 2 replaces this with a real
-                // `try_enter_connected(...)` call backed by the verifier.
-                Ok(State::Connected(verifier::ConnectedProof::forced()))
+                // Config success implies UI is responsive (we just drove the
+                // Configure → Settings dialog) and JVM is alive. Mint a proof
+                // with that evidence set. Ongoing verification is the job of
+                // the revocation bus in do_connected, not a gate here — we
+                // don't want a post-config label flicker to cause a restart
+                // loop (ConfiguringApi → Restarting → Launching → ...).
+                Ok(self.try_enter_connected(
+                    verifier::EvidenceKinds::SUPERVISOR_ALIVE
+                        | verifier::EvidenceKinds::WINDOW_INVENTORY,
+                ))
             }
             Err(e) => {
                 // Close any menu left open by the failed attempt
@@ -1466,10 +1507,11 @@ impl StateMachine {
         // This sleep is now just a reconciliation tick — events handle the fast path.
 
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-        // Phase 0: stay-Connected self-return. Phase 1 will replace this path
-        // entirely — the revocation bus drives demotion; otherwise the existing
-        // proof is retained without re-verification.
-        Ok(State::Connected(verifier::ConnectedProof::forced()))
+        // Stay-Connected self-return. RETAIN the existing proof (don't re-mint)
+        // — continuous re-verification every tick would defeat the debounce
+        // semantics on the promotion side. The revocation bus decides when
+        // to demote; until it does, the original proof remains valid.
+        Ok(self.state.clone())
     }
 
     /// Single-step graduated session recovery.
@@ -1606,8 +1648,12 @@ impl StateMachine {
                 if confirmed_authenticated {
                     log::info!("RE-LOGIN: Gateway authenticated (positive confirmation)");
                     self.relogin_attempts = 0;
-                    // Phase 0 sentinel — Phase 2 routes through verifier.
-                    return Ok(State::Connected(verifier::ConnectedProof::forced()));
+                    // Positive confirmation was via UI inspection — record
+                    // UI_SNAPSHOT as the evidence source backing this mint.
+                    return Ok(self.try_enter_connected(
+                        verifier::EvidenceKinds::SUPERVISOR_ALIVE
+                            | verifier::EvidenceKinds::UI_SNAPSHOT,
+                    ));
                 }
 
                 // Inconclusive — stay in ReconnectingSession (retry next tick)
