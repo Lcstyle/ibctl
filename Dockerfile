@@ -32,7 +32,8 @@ ARG ZULU_URL=https://cdn.azul.com/zulu/bin/${ZULU_FILE}
 
 WORKDIR /tmp/setup
 
-RUN apt-get update -y \
+RUN sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g; s|http://security.ubuntu.com|https://security.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true \
+    && apt-get update -y \
     && apt-get install --no-install-recommends --yes curl ca-certificates \
     && apt-get clean && rm -rf /var/lib/apt/lists/* \
     # Validate supported architectures
@@ -66,7 +67,8 @@ COPY docker/jts.ini.tmpl /root/Jts/jts.ini.tmpl
 ##############################################################################
 FROM ubuntu:24.04 AS prebuilt-downloader
 ARG IBCTL_VERSION
-RUN apt-get update -qq \
+RUN sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g; s|http://security.ubuntu.com|https://security.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true \
+    && apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 RUN mkdir -p /prebuilt \
@@ -129,8 +131,12 @@ ENV HOME=/home/ibgateway \
 COPY --from=setup /usr/local/ /usr/local/
 COPY --from=setup /root/Jts /home/ibgateway/Jts
 
-# Install runtime packages (same as gnzsnz, minus IBC deps) + Python for dashboard
-RUN apt-get update -y \
+# Install runtime packages (same as gnzsnz, minus IBC deps) + Python for dashboard.
+# Use HTTPS mirrors — archive.ubuntu.com's HTTP endpoint has intermittent
+# timeouts observed from zion (incident 2026-04-16). HTTPS served via CDN
+# and is reliable.
+RUN sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g; s|http://security.ubuntu.com|https://security.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true \
+    && apt-get update -y \
     && apt-get upgrade -y \
     && apt-get install --no-install-recommends --yes \
         gettext-base socat xvfb x11vnc sshpass openssh-client telnet iputils-ping \
