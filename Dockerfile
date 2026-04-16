@@ -32,9 +32,20 @@ ARG ZULU_URL=https://cdn.azul.com/zulu/bin/${ZULU_FILE}
 
 WORKDIR /tmp/setup
 
-RUN sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g; s|http://security.ubuntu.com|https://security.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true \
+# Two-phase mirror setup:
+#  1) Install ca-certificates from a reliable HTTP mirror (csclub.uwaterloo.ca)
+#     — we can't use HTTPS yet because the base image has no CA trust store,
+#     and archive.ubuntu.com HTTP has intermittent regional outages (zion,
+#     2026-04-16).
+#  2) Switch all sources to HTTPS (archive.ubuntu.com HTTPS is CDN-backed and
+#     reliable). From now on package fetches are authenticated + integrity-
+#     checked via TLS.
+RUN sed -i 's|http://archive.ubuntu.com|http://mirror.csclub.uwaterloo.ca|g; s|http://security.ubuntu.com|http://mirror.csclub.uwaterloo.ca|g' /etc/apt/sources.list.d/ubuntu.sources \
     && apt-get update -y \
-    && apt-get install --no-install-recommends --yes curl ca-certificates \
+    && apt-get install --no-install-recommends --yes ca-certificates \
+    && sed -i 's|http://mirror.csclub.uwaterloo.ca|https://archive.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources \
+    && apt-get update -y \
+    && apt-get install --no-install-recommends --yes curl \
     && apt-get clean && rm -rf /var/lib/apt/lists/* \
     # Validate supported architectures
     && if [ "${TARGETARCH}" != "amd64" ] && [ "${TARGETARCH}" != "arm64" ]; then \
@@ -67,9 +78,13 @@ COPY docker/jts.ini.tmpl /root/Jts/jts.ini.tmpl
 ##############################################################################
 FROM ubuntu:24.04 AS prebuilt-downloader
 ARG IBCTL_VERSION
-RUN sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g; s|http://security.ubuntu.com|https://security.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true \
+# Two-phase mirror setup (see Stage 1 for rationale)
+RUN sed -i 's|http://archive.ubuntu.com|http://mirror.csclub.uwaterloo.ca|g; s|http://security.ubuntu.com|http://mirror.csclub.uwaterloo.ca|g' /etc/apt/sources.list.d/ubuntu.sources \
     && apt-get update -qq \
-    && apt-get install -y -qq --no-install-recommends curl ca-certificates \
+    && apt-get install -y -qq --no-install-recommends ca-certificates \
+    && sed -i 's|http://mirror.csclub.uwaterloo.ca|https://archive.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources \
+    && apt-get update -qq \
+    && apt-get install -y -qq --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 RUN mkdir -p /prebuilt \
     && if [ -n "${IBCTL_VERSION}" ]; then \
@@ -131,11 +146,13 @@ ENV HOME=/home/ibgateway \
 COPY --from=setup /usr/local/ /usr/local/
 COPY --from=setup /root/Jts /home/ibgateway/Jts
 
-# Install runtime packages (same as gnzsnz, minus IBC deps) + Python for dashboard.
-# Use HTTPS mirrors — archive.ubuntu.com's HTTP endpoint has intermittent
-# timeouts observed from zion (incident 2026-04-16). HTTPS served via CDN
-# and is reliable.
-RUN sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g; s|http://security.ubuntu.com|https://security.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true \
+# Install runtime packages + Python for dashboard.
+# Two-phase mirror: csclub HTTP → install ca-certificates → switch to
+# archive.ubuntu.com HTTPS → install the rest. See Stage 1 for rationale.
+RUN sed -i 's|http://archive.ubuntu.com|http://mirror.csclub.uwaterloo.ca|g; s|http://security.ubuntu.com|http://mirror.csclub.uwaterloo.ca|g' /etc/apt/sources.list.d/ubuntu.sources \
+    && apt-get update -y \
+    && apt-get install --no-install-recommends --yes ca-certificates \
+    && sed -i 's|http://mirror.csclub.uwaterloo.ca|https://archive.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources \
     && apt-get update -y \
     && apt-get upgrade -y \
     && apt-get install --no-install-recommends --yes \
