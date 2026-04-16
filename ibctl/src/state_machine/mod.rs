@@ -10,9 +10,12 @@
 mod queries;
 mod socat;
 mod types;
+mod verifier;
 
 // Re-export public API
 pub use types::{Channels, State, StateMachine, StateMachineError};
+#[allow(unused_imports)] // surfaced in later phases
+pub(super) use verifier::{ConnectedProof, EvidenceKinds, RevocationSource, RevocationTracker};
 
 use std::path::Path;
 use std::time::Instant;
@@ -216,11 +219,16 @@ impl StateMachine {
         self.state_entered_at = Instant::now();
         self.consecutive_agent_failures = 0;
 
-        if next == State::Connected && self.state != State::Connected {
+        let next_is_connected = matches!(next, State::Connected(_));
+        let curr_is_connected = matches!(self.state, State::Connected(_));
+        if next_is_connected && !curr_is_connected {
             self.connected_since = Some(Instant::now());
             self.relogin_attempts = 0;
-        } else if next != State::Connected {
+        } else if !next_is_connected {
             self.connected_since = None;
+            // Leaving Connected — reset per-source revocation debounce state
+            // so the next Connected session starts with a clean slate.
+            self.revocation.clear_all();
         }
 
         // Reset 2FA device state when starting a new login or 2FA cycle
@@ -254,7 +262,7 @@ impl StateMachine {
         // so window events may carry stale has_login_button=true during
         // the authentication animation.
         if matches!(next, State::DismissingPopups | State::WaitingFor2fa
-            | State::WaitingForApiReady | State::ConfiguringApi | State::Connected)
+            | State::WaitingForApiReady | State::ConfiguringApi | State::Connected(_))
         {
             self.observation.clear_login_buttons();
         }
@@ -475,7 +483,7 @@ impl StateMachine {
             State::DismissingPopups => self.do_dismiss_popups().await,
             State::WaitingForApiReady => self.do_wait_for_api_ready().await,
             State::ConfiguringApi => self.do_configure_api().await,
-            State::Connected => self.do_connected().await,
+            State::Connected(_) => self.do_connected().await,
             State::ReconnectingSession => self.do_reconnecting_session().await,
             State::Restarting => self.do_restart().await,
             State::WaitingForIB => self.do_waiting_for_ib().await,
@@ -1146,7 +1154,10 @@ impl StateMachine {
             Ok(()) => {
                 log::info!("API configuration complete");
                 self.config_retries = 0;
-                Ok(State::Connected)
+                // Phase 0: use forced sentinel so the enum-shape change is a
+                // no-op behavior change. Phase 2 replaces this with a real
+                // `try_enter_connected(...)` call backed by the verifier.
+                Ok(State::Connected(verifier::ConnectedProof::forced()))
             }
             Err(e) => {
                 // Close any menu left open by the failed attempt
@@ -1445,7 +1456,10 @@ impl StateMachine {
         // This sleep is now just a reconciliation tick — events handle the fast path.
 
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-        Ok(State::Connected)
+        // Phase 0: stay-Connected self-return. Phase 1 will replace this path
+        // entirely — the revocation bus drives demotion; otherwise the existing
+        // proof is retained without re-verification.
+        Ok(State::Connected(verifier::ConnectedProof::forced()))
     }
 
     /// Single-step graduated session recovery.
@@ -1582,7 +1596,8 @@ impl StateMachine {
                 if confirmed_authenticated {
                     log::info!("RE-LOGIN: Gateway authenticated (positive confirmation)");
                     self.relogin_attempts = 0;
-                    return Ok(State::Connected);
+                    // Phase 0 sentinel — Phase 2 routes through verifier.
+                    return Ok(State::Connected(verifier::ConnectedProof::forced()));
                 }
 
                 // Inconclusive — stay in ReconnectingSession (retry next tick)
@@ -2452,7 +2467,7 @@ login_dialog_timeout_secs = 0
         };
 
         let mut sm = make_test_state_machine(mock);
-        sm.state = State::Connected;
+        sm.state = State::Connected(verifier::ConnectedProof::forced());
         // Position the liveness timer in the 30-second check window so the
         // periodic check actually fires this iteration.
         sm.state_entered_at = Instant::now() - Duration::from_secs(30);
@@ -2495,9 +2510,10 @@ login_dialog_timeout_secs = 0
         sm.state = State::ConfiguringApi;
 
         let result = sm.do_configure_api().await.expect("handler should not error");
-        assert_eq!(
-            result, State::Connected,
-            "no API settings configured ⇒ skip dialog ⇒ Connected (valid no-op path)"
+        assert!(
+            matches!(result, State::Connected(_)),
+            "no API settings configured ⇒ skip dialog ⇒ Connected (valid no-op path), got {:?}",
+            result
         );
     }
 
@@ -2516,7 +2532,7 @@ login_dialog_timeout_secs = 0
         };
 
         let mut sm = make_test_state_machine(mock);
-        sm.state = State::Connected;
+        sm.state = State::Connected(verifier::ConnectedProof::forced());
         sm.state_entered_at = Instant::now() - Duration::from_secs(30);
         sm.connected_window_class = Some("ibgateway.ay".to_string());
         sm.observation.synced = true;
@@ -2525,9 +2541,11 @@ login_dialog_timeout_secs = 0
         let result = sm.do_connected().await.expect("handler should not error");
 
         // Assert: no transition — stays Connected (handler returns next state to loop back).
-        assert_eq!(
-            result, State::Connected,
-            "healthy Connected state must not self-transition just because a liveness tick fired"
+        // Uses matches! rather than assert_eq! because proof instances differ by issued_at.
+        assert!(
+            matches!(result, State::Connected(_)),
+            "healthy Connected state must not self-transition just because a liveness tick fired, got {:?}",
+            result
         );
     }
 }

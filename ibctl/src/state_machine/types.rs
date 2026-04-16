@@ -15,6 +15,8 @@ use crate::handlers::DialogHandlerRegistry;
 use crate::types::Signal;
 use crate::supervisor::Supervisor;
 
+use super::verifier::{ConnectedProof, RevocationTracker};
+
 #[derive(Debug, Error)]
 pub enum StateMachineError {
     #[error("supervisor error: {0}")]
@@ -52,8 +54,14 @@ pub enum State {
     WaitingForApiReady,
     /// Applying post-login API configuration (master client ID, read-only, etc.)
     ConfiguringApi,
-    /// Fully connected and monitoring for new dialogs
-    Connected,
+    /// Fully connected and monitoring for new dialogs.
+    ///
+    /// The `ConnectedProof` payload is the verifier's evidence that Gateway
+    /// is actually ready. It can only be constructed via `verifier::mint()`
+    /// or `verifier::forced()` (for SETSTATE debug override). No handler can
+    /// accidentally return `Ok(State::Connected(...))` without going through
+    /// the verifier — see `state_machine::verifier` module docs.
+    Connected(ConnectedProof),
     /// Recovering from connection loss — graduated re-login flow.
     /// Waits 30s, clicks Re-login, tracks attempts. If failed, restarts JVM.
     ReconnectingSession,
@@ -82,7 +90,11 @@ impl State {
             "DismissingPopups" => Some(State::DismissingPopups),
             "WaitingForApiReady" => Some(State::WaitingForApiReady),
             "ConfiguringApi" => Some(State::ConfiguringApi),
-            "Connected" => Some(State::Connected),
+            // SETSTATE Connected produces a synthetic "forced" proof.
+            // This is a debug-override path — operators should see the
+            // `evidence=[forced]` marker in logs and STATUS JSON so they can
+            // tell a forced Connected apart from a verifier-minted one.
+            "Connected" => Some(State::Connected(ConnectedProof::forced())),
             "ReconnectingSession" => Some(State::ReconnectingSession),
             "Restarting" => Some(State::Restarting),
             "WaitingForIB" => Some(State::WaitingForIB),
@@ -96,6 +108,10 @@ impl std::fmt::Display for State {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             State::Error(msg) => write!(f, "Error({})", msg),
+            // Display ignores the proof payload to preserve external JSON
+            // contract: STATUS still reports `"state":"Connected"`. Proof
+            // provenance is exposed via a separate `proof` field (Phase 3).
+            State::Connected(_) => write!(f, "Connected"),
             other => write!(f, "{:?}", other),
         }
     }
@@ -237,6 +253,12 @@ pub struct StateMachine {
     pub(super) snapshot_tx: watch::Sender<Arc<QuerySnapshot>>,
     /// Monotonic version counter for snapshots.
     pub(super) snapshot_version: u64,
+    /// Source-tagged revocation bus for `Connected` state. Tracks per-source
+    /// debounce timers for contradictions (login form reappears, "disconnected"
+    /// label stabilizes, window class morph, etc.). See `verifier::RevocationSource`.
+    /// Used by `do_connected` to decide when a contradiction has persisted
+    /// long enough to revoke the proof and transition out.
+    pub(super) revocation: RevocationTracker,
 }
 
 impl StateMachine {
@@ -282,6 +304,7 @@ impl StateMachine {
             stats: Stats::default(),
             snapshot_tx,
             snapshot_version: 0,
+            revocation: RevocationTracker::new(),
         }
     }
 
@@ -311,7 +334,7 @@ pub(crate) fn client_advisory(state: &State) -> (bool, bool, Option<&'static str
         State::WaitingFor2fa => (false, true, Some("2fa_pending")),
         State::HandlingSessionConflict => (false, true, Some("session_conflict")),
         State::DismissingPopups | State::WaitingForApiReady | State::ConfiguringApi => (false, true, Some("configuring")),
-        State::Connected => (true, false, None),
+        State::Connected(_) => (true, false, None),
         State::ReconnectingSession => (false, true, Some("reconnecting")),
         State::Restarting => (false, true, Some("restarting")),
         State::WaitingForIB => (false, true, Some("ib_maintenance")),
@@ -337,7 +360,8 @@ mod tests {
 
     #[test]
     fn test_connected_should_connect() {
-        let (should_connect, should_wait, reason, stale) = client_advisory(&State::Connected);
+        let (should_connect, should_wait, reason, stale) =
+            client_advisory(&State::Connected(ConnectedProof::forced()));
         assert!(should_connect);
         assert!(!should_wait);
         assert!(reason.is_none());
@@ -406,12 +430,13 @@ mod tests {
             State::WaitingForLogin, State::Authenticating,
             State::WaitingFor2fa, State::HandlingSessionConflict,
             State::DismissingPopups, State::ConfiguringApi,
-            State::Connected, State::Restarting, State::Shutdown,
+            State::Connected(ConnectedProof::forced()),
+            State::Restarting, State::Shutdown,
             State::Error("test".into()),
         ];
         for state in &states {
             let (sc, sw, _, _) = client_advisory(state);
-            if matches!(state, State::Connected) {
+            if matches!(state, State::Connected(_)) {
                 assert!(sc, "Connected should allow connect");
                 assert!(!sw, "Connected should not wait");
             }
@@ -421,7 +446,11 @@ mod tests {
     #[test]
     fn test_state_display() {
         assert_eq!(State::Init.to_string(), "Init");
-        assert_eq!(State::Connected.to_string(), "Connected");
+        assert_eq!(
+            State::Connected(ConnectedProof::forced()).to_string(),
+            "Connected",
+            "Display must ignore the proof payload to preserve JSON contract"
+        );
         assert_eq!(State::WaitingFor2fa.to_string(), "WaitingFor2fa");
         assert_eq!(State::Error("boom".into()).to_string(), "Error(boom)");
     }

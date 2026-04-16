@@ -90,7 +90,7 @@ impl StateMachine {
             .unwrap_or(false);
         let socat_pid = self.socat_process.as_ref().map(|c| c.id());
 
-        let is_connected = self.state == State::Connected;
+        let is_connected = matches!(self.state, State::Connected(_));
         let (should_connect, should_wait, wait_reason, client_id_likely_stale) =
             client_advisory(&self.state);
 
