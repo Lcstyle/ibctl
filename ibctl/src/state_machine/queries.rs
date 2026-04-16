@@ -99,10 +99,27 @@ impl StateMachine {
         // Use cached client IDs (refreshed every 30s in do_connected)
         let client_ids = &self.cached_client_ids;
 
+        // Extract ConnectedProof provenance for external observers. Present
+        // only when state is Connected; null otherwise. Strictly additive —
+        // existing STATUS consumers that ignore unknown fields keep working.
+        let proof_json = if let State::Connected(ref proof) = self.state {
+            serde_json::json!({
+                "snapshot_version": proof.snapshot_version(),
+                "event_seq": proof.event_seq(),
+                "evidence": proof.evidence().tags(),
+                "verifier_version": proof.verifier_version(),
+                "age_secs": proof.age().as_secs(),
+                "forced": proof.is_forced(),
+            })
+        } else {
+            serde_json::Value::Null
+        };
+
         serde_json::json!({
             "version": env!("IBCTL_VERSION"),
             "ready": is_connected && socat_running,
             "state": self.state.to_string(),
+            "proof": proof_json,
             "trading_mode": self.config.auth.trading_mode.to_string(),
             "uptime_secs": uptime,
             "connected_uptime_secs": connected_uptime,
