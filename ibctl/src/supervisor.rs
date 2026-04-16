@@ -77,6 +77,11 @@ pub struct Supervisor {
     shutdown_timeout_secs: u64,
     launched_at: Option<std::time::Instant>,
     settings_path_resolved: String,
+    /// Test-only override: when `Some(b)`, `is_running()` returns `b` regardless of
+    /// the actual child process state. Lets state-machine integration tests
+    /// exercise handlers without spawning a real JVM.
+    #[cfg(test)]
+    test_force_running: Option<bool>,
 }
 
 impl Supervisor {
@@ -94,7 +99,15 @@ impl Supervisor {
             shutdown_timeout_secs,
             launched_at: None,
             settings_path_resolved: String::new(),
+            #[cfg(test)]
+            test_force_running: None,
         }
+    }
+
+    /// Test-only helper: pin `is_running()` to a fixed value.
+    #[cfg(test)]
+    pub fn set_test_force_running(&mut self, running: bool) {
+        self.test_force_running = Some(running);
     }
 
     /// Launch the IB Gateway/TWS JVM process with the ibctl agent attached.
@@ -288,6 +301,10 @@ impl Supervisor {
 
     /// Check if the JVM process is still running.
     pub fn is_running(&mut self) -> bool {
+        #[cfg(test)]
+        if let Some(forced) = self.test_force_running {
+            return forced;
+        }
         match self.child.as_mut() {
             Some(child) => match child.try_wait() {
                 Ok(Some(_)) => false, // Process has exited

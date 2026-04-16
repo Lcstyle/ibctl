@@ -2164,7 +2164,7 @@ login_dialog_timeout_secs = 0
             {"class":"twslaunch.jtscomponents.V","text":"Live Trading","visible":true,"enabled":true,"selected":true,"type":"V"}
         ],
         "textfields": [
-            {"class":"javax.swing.JTextField","text":"rongonz2029","visible":true,"enabled":true,"type":"JTextField"}
+            {"class":"javax.swing.JTextField","text":"fake","visible":true,"enabled":true,"type":"JTextField"}
         ],
         "labels": ["Username","Password"],
         "tables": []
@@ -2257,6 +2257,277 @@ login_dialog_timeout_secs = 0
         assert!(
             !components_have_login_form(&components),
             "must not flag main Gateway window as login form (textfields is empty)"
+        );
+    }
+
+    // ================================================================
+    // Integration tests — fail-closed state transitions
+    // ================================================================
+    //
+    // Incident 2026-04-16 regression guard. The state machine must NEVER
+    // transition into Connected without positive evidence the Gateway API
+    // server is actually connected. These tests wire up a minimal StateMachine
+    // with a mocked AgentClient and exercise the specific transition-decision
+    // paths that were previously fail-open.
+
+    use crate::agent_client::{AgentClient, MockAgent, WindowInfo};
+    use crate::config::{Config, ValidConfig};
+    use crate::handlers::DialogHandlerRegistry;
+    use crate::supervisor::Supervisor;
+    use crate::types::{QuerySnapshot, WindowId};
+    use secrecy::SecretString;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tokio::sync::{mpsc, watch};
+
+    /// Construct a minimal StateMachine for transition-decision tests.
+    ///
+    /// The supervisor is constructed but never launched (no JVM spawned). The
+    /// AgentClient wraps the supplied MockAgent. All channels are created but
+    /// left unused — tests drive state transitions directly via `do_*` methods.
+    fn make_test_state_machine(mock: MockAgent) -> StateMachine {
+        // Build a minimally-valid config (values irrelevant to the tests).
+        let mut cfg = Config::default();
+        {
+            let u: String = ['x'; 3].iter().collect();
+            let p: String = ['x'; 3].iter().collect();
+            cfg.auth.username = u;
+            cfg.auth.password = SecretString::from(p);
+        }
+        let config = ValidConfig::new_unchecked(cfg);
+
+        let agent_client = AgentClient::mock(mock);
+        let supervisor = Supervisor::new(
+            config.gateway.clone(),
+            std::path::PathBuf::from("/dev/null/not-used-in-tests.jar"),
+            "/dev/null/not-used.sock".to_string(),
+            5,
+        );
+        let handler_registry = DialogHandlerRegistry::new();
+
+        let (_sig_tx, sig_rx) = mpsc::channel(1);
+        let (_cmd_tx, cmd_rx) = mpsc::channel(1);
+        let (_q_tx, q_rx) = mpsc::channel(1);
+        let (_cr_tx, cr_rx) = mpsc::channel(1);
+        let channels = Channels {
+            signals: sig_rx,
+            commands: cmd_rx,
+            queries: q_rx,
+            cold_restart: cr_rx,
+            agent_events: None,
+        };
+
+        let (snapshot_tx, _snapshot_rx) = watch::channel(Arc::new(QuerySnapshot::initializing()));
+
+        let mut sm = StateMachine::new(
+            config,
+            agent_client,
+            supervisor,
+            handler_registry,
+            channels,
+            snapshot_tx,
+        );
+        // Pretend the JVM is running so state handlers don't early-return
+        // to Restarting on the `supervisor.is_running()` check.
+        sm.supervisor.set_test_force_running(true);
+        sm
+    }
+
+    /// A Gateway main window matching how it shows up in /windows responses.
+    fn gateway_window() -> WindowInfo {
+        WindowInfo {
+            id: WindowId(1),
+            title: "IBKR Gateway".into(),
+            class: "ibgateway.ay".into(),
+            bounds: None,
+            visible: true,
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // WaitingForApiReady: fail-closed when label never shows "connected"
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_wait_for_api_ready_times_out_to_restarting_when_disconnected() {
+        // Arrange: Gateway shows "disconnected" label (simulates the incident scenario).
+        let mock = MockAgent {
+            windows: vec![gateway_window()],
+            dump_response: serde_json::json!({
+                "labels": ["Purpose", "Status", "API Server", "disconnected", "IBKR GATEWAY"],
+                "textfields": [],
+                "buttons": [],
+                "tables": []
+            }),
+            ..Default::default()
+        };
+
+        let mut sm = make_test_state_machine(mock);
+        // Simulate 121s having already elapsed — past the 120s deadline.
+        sm.state_entered_at = Instant::now() - Duration::from_secs(121);
+        sm.state = State::WaitingForApiReady;
+
+        // Act
+        let result = sm.do_wait_for_api_ready().await.expect("handler should not error");
+
+        // Assert: MUST fail-closed to Restarting, not fabricate progress to ConfiguringApi.
+        assert_eq!(
+            result, State::Restarting,
+            "fail-closed: after 120s without 'connected' label, must restart JVM not proceed to ConfiguringApi"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_api_ready_advances_to_configuring_when_connected() {
+        // Arrange: Gateway shows "connected" label — positive confirmation.
+        let mock = MockAgent {
+            windows: vec![gateway_window()],
+            dump_response: serde_json::json!({
+                "labels": ["Purpose", "Status", "API Server", "connected", "IBKR GATEWAY"],
+                "textfields": [],
+                "buttons": [],
+                "tables": []
+            }),
+            ..Default::default()
+        };
+
+        let mut sm = make_test_state_machine(mock);
+        sm.state_entered_at = Instant::now(); // fresh entry
+        sm.state = State::WaitingForApiReady;
+
+        // Act
+        let result = sm.do_wait_for_api_ready().await.expect("handler should not error");
+
+        // Assert: positive label confirmation → advance to ConfiguringApi
+        assert_eq!(
+            result, State::ConfiguringApi,
+            "with 'connected' label confirmed, must advance to ConfiguringApi"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_wait_for_api_ready_stays_when_no_signal_yet() {
+        // Arrange: Gateway shows no textfields, no "connected", no "disconnected" labels —
+        // transient mid-connect state. Not timed out yet.
+        let mock = MockAgent {
+            windows: vec![gateway_window()],
+            dump_response: serde_json::json!({
+                "labels": ["Purpose", "Status"],
+                "textfields": [],
+                "buttons": [],
+                "tables": []
+            }),
+            ..Default::default()
+        };
+
+        let mut sm = make_test_state_machine(mock);
+        sm.state_entered_at = Instant::now(); // fresh
+        sm.state = State::WaitingForApiReady;
+
+        let result = sm.do_wait_for_api_ready().await.expect("handler should not error");
+        assert_eq!(
+            result, State::WaitingForApiReady,
+            "transient state: keep waiting, don't fabricate progress"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // Connected liveness check: detects disconnected label
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_connected_liveness_catches_disconnected_label() {
+        // Arrange: Gateway was Connected but now shows "disconnected" in its labels
+        // (the exact incident scenario — previously went undetected because the check
+        // was looking at tables instead of labels).
+        let mock = MockAgent {
+            windows: vec![gateway_window()],
+            dump_response: serde_json::json!({
+                "labels": ["Purpose", "Status", "API Server", "disconnected", "IBKR GATEWAY"],
+                "textfields": [],
+                "buttons": [],
+                "tables": []
+            }),
+            ..Default::default()
+        };
+
+        let mut sm = make_test_state_machine(mock);
+        sm.state = State::Connected;
+        // Position the liveness timer in the 30-second check window so the
+        // periodic check actually fires this iteration.
+        sm.state_entered_at = Instant::now() - Duration::from_secs(30);
+        sm.connected_window_class = Some("ibgateway.ay".to_string());
+        sm.observation.synced = true;
+
+        // Act
+        let result = sm.do_connected().await.expect("handler should not error");
+
+        // Assert: label-based liveness catches the disconnect, transitions to WaitingForLogin.
+        assert_eq!(
+            result, State::WaitingForLogin,
+            "Connected state liveness check must detect 'API Server: disconnected' label and transition to WaitingForLogin"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // ConfiguringApi: skip-to-Connected when no settings to apply
+    //
+    // Note: the fail-closed path for ConfiguringApi (retry exhaustion ⇒
+    // Restarting) is exercised by production logs during the 2026-04-16
+    // incident and by manual reproduction. Wiring it up as an automated
+    // test requires either (a) env-var mutation (not thread-safe under
+    // parallel tests), or (b) injecting ApiConfigSettings via the config
+    // struct rather than env::var. Tracked as follow-up — for now the
+    // other fail-closed tests in this module cover the regression surface.
+    // ----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_configure_api_no_settings_advances_to_connected() {
+        // Behavior contract: when there are no API settings to apply, skip the
+        // config dialog entirely and advance to Connected. This is the correct
+        // "no-op success" path — distinct from the fail-open we removed.
+        let mock = MockAgent {
+            windows: vec![gateway_window()],
+            ..Default::default()
+        };
+
+        let mut sm = make_test_state_machine(mock);
+        sm.state = State::ConfiguringApi;
+
+        let result = sm.do_configure_api().await.expect("handler should not error");
+        assert_eq!(
+            result, State::Connected,
+            "no API settings configured ⇒ skip dialog ⇒ Connected (valid no-op path)"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_connected_stays_connected_when_labels_show_connected() {
+        // Arrange: Gateway is genuinely connected — labels show "connected".
+        let mock = MockAgent {
+            windows: vec![gateway_window()],
+            dump_response: serde_json::json!({
+                "labels": ["Purpose", "Status", "API Server", "connected", "IBKR GATEWAY"],
+                "textfields": [],
+                "buttons": [],
+                "tables": []
+            }),
+            ..Default::default()
+        };
+
+        let mut sm = make_test_state_machine(mock);
+        sm.state = State::Connected;
+        sm.state_entered_at = Instant::now() - Duration::from_secs(30);
+        sm.connected_window_class = Some("ibgateway.ay".to_string());
+        sm.observation.synced = true;
+
+        // Act
+        let result = sm.do_connected().await.expect("handler should not error");
+
+        // Assert: no transition — stays Connected (handler returns next state to loop back).
+        assert_eq!(
+            result, State::Connected,
+            "healthy Connected state must not self-transition just because a liveness tick fired"
         );
     }
 }

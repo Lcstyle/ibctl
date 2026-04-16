@@ -382,6 +382,10 @@ pub struct MockAgent {
     pub windows: Vec<WindowInfo>,
     pub healthy: bool,
     pub click_result: bool,
+    /// Response returned by `dump_components()` for ALL window IDs.
+    /// Tests set this to simulate specific Gateway UI states
+    /// (e.g. labels = ["API Server","disconnected"] for a disconnected gateway).
+    pub dump_response: serde_json::Value,
 }
 
 #[cfg(test)]
@@ -391,6 +395,7 @@ impl Default for MockAgent {
             windows: Vec::new(),
             healthy: true,
             click_result: true,
+            dump_response: serde_json::json!({}),
         }
     }
 }
@@ -406,7 +411,7 @@ impl AgentApi for MockAgent {
     async fn select_list_item(&self, _: WindowId, _: &str) -> Result<bool, AgentError> { Ok(true) }
     async fn click_at(&self, _: WindowId, _: i32, _: i32) -> Result<bool, AgentError> { Ok(true) }
     async fn select_tree_node(&self, _: WindowId, _: &str) -> Result<bool, AgentError> { Ok(true) }
-    async fn dump_components(&self, _: WindowId) -> Result<serde_json::Value, AgentError> { Ok(serde_json::json!({})) }
+    async fn dump_components(&self, _: WindowId) -> Result<serde_json::Value, AgentError> { Ok(self.dump_response.clone()) }
     async fn list_tabs(&self, _: WindowId) -> Result<serde_json::Value, AgentError> { Ok(serde_json::json!({"tabs": []})) }
     async fn send_key(&self, _: WindowId, _: &str) -> Result<bool, AgentError> { Ok(true) }
 }
