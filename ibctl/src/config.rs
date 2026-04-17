@@ -381,46 +381,31 @@ impl Default for TwoFaBackoffConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TwoFaOnTimeout {
+    #[default]
     RestartThenHitl,
     RestartForever,
     HitlImmediately,
 }
 
-impl Default for TwoFaOnTimeout {
-    fn default() -> Self {
-        Self::RestartThenHitl
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HitlStrategy {
     Disabled,
+    #[default]
     Periodic,
     NtfyCallback,
     Both,
 }
 
-impl Default for HitlStrategy {
-    fn default() -> Self {
-        Self::Periodic
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CounterResetScope {
+    #[default]
     AnyReach,
     Stable,
-}
-
-impl Default for CounterResetScope {
-    fn default() -> Self {
-        Self::AnyReach
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -471,7 +456,7 @@ pub struct AgentConfig {
     pub socket_path: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct IbStatusConfig {
     /// When a dashboard-pushed IBSTATUS arrives marking IB unavailable, should
@@ -488,14 +473,6 @@ pub struct IbStatusConfig {
     /// IBSTATUS push transitions Connected → WaitingForIB. Only useful if you
     /// trust the scraper more than the Gateway UI label.
     pub kick_active_session: bool,
-}
-
-impl Default for IbStatusConfig {
-    fn default() -> Self {
-        Self {
-            kick_active_session: false,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
