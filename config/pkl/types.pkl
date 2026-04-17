@@ -59,6 +59,7 @@ class RuntimeConfig {
   agent: AgentConfig = new AgentConfig {}
   dashboard: DashboardConfig = new DashboardConfig {}
   ibSystemStatus: IbSystemStatusConfig = new IbSystemStatusConfig {}
+  ibStatus: IbStatusConfig = new IbStatusConfig {}
   logging: LoggingConfig = new LoggingConfig {}
   timing: TimingConfig = new TimingConfig {}
 }
@@ -99,7 +100,70 @@ class TwoFaConfig {
   device: String = ""
   /// Force re-login after 2FA timeout (env: RELOGIN_AFTER_TWOFA_TIMEOUT)
   reloginAfterTimeout: Boolean = false
+  /// Human-in-the-loop 2FA backoff policy.
+  backoff: TwoFaBackoffConfig = new TwoFaBackoffConfig {}
 }
+
+/// Policy for stopping the tight 2FA-restart loop after repeated failures
+/// (operator asleep, unavailable). After `maxImmediateAttempts` consecutive
+/// 2FA timeouts, ibctl enters WaitingForHitl2fa — a cooperative state that
+/// either auto-retries on a schedule, waits for an operator ntfy callback,
+/// or both. Prevents overnight IB Key prompt spam.
+class TwoFaBackoffConfig {
+  /// After this many consecutive 2FA timeouts, stop the tight restart loop.
+  /// 0 = disabled (legacy behavior: loop forever).
+  /// @env IBCTL_TWOFA_MAX_IMMEDIATE_ATTEMPTS
+  maxImmediateAttempts: UInt = 3
+
+  /// What to do when twofa.exitInterval fires.
+  ///   "restart_then_hitl" — kill JVM, relaunch, count attempt; hit HITL on exhaustion (default)
+  ///   "restart_forever"   — legacy pre-HITL behavior (never stop)
+  ///   "hitl_immediately"  — first timeout goes straight to HITL (no restarts at all)
+  /// @env IBCTL_TWOFA_ON_TIMEOUT
+  onTimeout: TwoFaOnTimeout = "restart_then_hitl"
+
+  /// HITL resume strategy. "disabled" = stay in HITL forever (dashboard still
+  /// reflects state; operator must send HITL_RESUME manually via dashboard).
+  /// @env IBCTL_TWOFA_STRATEGY
+  strategy: HitlStrategy = "periodic"
+
+  /// Retry cadence for periodic / both. Single value = constant. List =
+  /// traverse then hold at last element. Must be non-empty for non-disabled
+  /// strategies that include a timer.
+  intervalsMinutes: Listing<UInt> = new Listing { 60 }
+
+  /// Hours the signed ntfy-action URL stays valid. One-shot — redeemed on
+  /// first successful click. 0 < value <= 168 (one week ceiling).
+  /// @env IBCTL_TWOFA_CALLBACK_VALID_HOURS
+  callbackValidHours: UInt = 12
+
+  /// Counter-reset policy after a successful reach of Connected.
+  ///   "any_reach" — reset as soon as Connected (default)
+  ///   "stable"    — require Connected sustained for stableSecs before reset
+  /// @env IBCTL_TWOFA_COUNTER_RESET
+  counterReset: CounterResetScope = "any_reach"
+
+  /// Seconds Connected must persist before resetting the attempt counter
+  /// when counterReset = "stable". Ignored for "any_reach".
+  /// @env IBCTL_TWOFA_STABLE_SECS
+  stableSecs: UInt = 300
+
+  /// Does a scheduled cold restart preempt WaitingForHitl2fa?
+  /// true  — cold restart wins; exit HITL, run restart, re-enter login (default)
+  /// false — cold restart deferred until HITL exits via its normal path
+  /// @env IBCTL_TWOFA_COLD_RESTART_PREEMPTS_HITL
+  coldRestartPreemptsHitl: Boolean = true
+
+  /// If the initial ntfy push fails (network blip, ntfy server down), how many
+  /// times to retry the send on subsequent scheduled-retry wakeups. 0 = give up.
+  /// Only meaningful when strategy includes ntfy_callback.
+  /// @env IBCTL_TWOFA_NTFY_SEND_RETRIES
+  ntfySendRetries: UInt = 1
+}
+
+typealias TwoFaOnTimeout = "restart_then_hitl" | "restart_forever" | "hitl_immediately"
+typealias HitlStrategy = "disabled" | "periodic" | "ntfy_callback" | "both"
+typealias CounterResetScope = "any_reach" | "stable"
 
 /// Gateway/TWS installation and port settings.
 class GatewayConfig {
@@ -203,6 +267,24 @@ class DashboardConfig {
   zmqPort: UInt16 = 5556
 }
 
+/// ibctl-side policy for IBSTATUS pushes (consumed by ibctl state machine).
+/// Separate from IbSystemStatusConfig which is the dashboard-side scraper.
+class IbStatusConfig {
+  /// When the dashboard pushes IBSTATUS=unavailable, should ibctl interrupt
+  /// an already-authenticated session? Default: false.
+  ///
+  /// IBSTATUS was designed as a retry-gate — if IBKR backends are unreachable,
+  /// don't hammer them with login attempts. It was never meant to kill active
+  /// sessions. The scraper can be wrong (CDN blips, slow page updates) and
+  /// Gateway's own UI label is the authoritative "my session is healthy"
+  /// signal — detected via label inspection in the revocation bus, not via
+  /// the public status page.
+  ///
+  /// Set to true only to restore the historical behavior where any unavailable
+  /// push transitions Connected → WaitingForIB.
+  kickActiveSession: Boolean = false
+}
+
 /// IB system status scraper settings (consumed by dashboard daemon).
 class IbSystemStatusConfig {
   /// Enable status monitoring (requires dashboard)
@@ -264,6 +346,18 @@ class TimingConfig {
   /// Action after exhausting re-login attempts: "reauth" re-uses the login form,
   /// "restart" kills and relaunches the JVM. (env: IBCTL_RELOGIN_FAILURE_ACTION)
   reloginFailureAction: "reauth"|"restart" = "reauth"
+
+  /// TCP probe interval to Gateway's API port during post-auth states. Ground-
+  /// truth check for "is Gateway actually listening?" — independent of Swing
+  /// UI labels. 0 = disabled; rely on label probe + other revocation sources.
+  /// Range: 0 | 1..=3600 seconds.
+  /// @env IBCTL_API_PORT_PROBE_INTERVAL_SECS
+  apiPortProbeIntervalSecs: UInt = 5
+
+  /// Consecutive TCP probe failures before firing ApiPortListenerLost revocation.
+  /// Absorbs transient OS-level blips. Range: 1..=10.
+  /// @env IBCTL_API_PORT_PROBE_FAILS_BEFORE_REVOKE
+  apiPortProbeFailsBeforeRevoke: UInt = 3
 }
 
 // --- Container Layer ---

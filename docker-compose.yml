@@ -106,6 +106,28 @@ services:
       IBCTL_TELEGRAM_BOT_TOKEN: ${IBCTL_TELEGRAM_BOT_TOKEN:-}
       IBCTL_TELEGRAM_CHAT_ID: ${IBCTL_TELEGRAM_CHAT_ID:-}
 
+      # --- HITL 2FA (ntfy action callback + backoff policy) ---
+      # Dashboard base URL reachable from the operator's phone (e.g. https://host.domain).
+      # Required when twofa.backoff.strategy = ntfy_callback | both.
+      IBCTL_DASHBOARD_EXTERNAL_URL: ${IBCTL_DASHBOARD_EXTERNAL_URL:-}
+      # HMAC-SHA256 signing key for ntfy action URLs. Secret — Infisical-injected.
+      # Generate with: openssl rand -hex 32
+      IBCTL_NTFY_ACTION_SIGNING_KEY: ${IBCTL_NTFY_ACTION_SIGNING_KEY:-}
+      # Backoff knobs — all empty = TOML default. See docs/hitl-2fa.md
+      IBCTL_TWOFA_MAX_IMMEDIATE_ATTEMPTS: ${IBCTL_TWOFA_MAX_IMMEDIATE_ATTEMPTS:-}
+      IBCTL_TWOFA_ON_TIMEOUT: ${IBCTL_TWOFA_ON_TIMEOUT:-}
+      IBCTL_TWOFA_STRATEGY: ${IBCTL_TWOFA_STRATEGY:-}
+      IBCTL_TWOFA_INTERVALS_MINUTES: ${IBCTL_TWOFA_INTERVALS_MINUTES:-}
+      IBCTL_TWOFA_CALLBACK_VALID_HOURS: ${IBCTL_TWOFA_CALLBACK_VALID_HOURS:-}
+      IBCTL_TWOFA_COUNTER_RESET: ${IBCTL_TWOFA_COUNTER_RESET:-}
+      IBCTL_TWOFA_STABLE_SECS: ${IBCTL_TWOFA_STABLE_SECS:-}
+      IBCTL_TWOFA_COLD_RESTART_PREEMPTS_HITL: ${IBCTL_TWOFA_COLD_RESTART_PREEMPTS_HITL:-}
+      IBCTL_TWOFA_NTFY_SEND_RETRIES: ${IBCTL_TWOFA_NTFY_SEND_RETRIES:-}
+
+      # --- TCP port probe (ground-truth Gateway health check) ---
+      IBCTL_API_PORT_PROBE_INTERVAL_SECS: ${IBCTL_API_PORT_PROBE_INTERVAL_SECS:-}
+      IBCTL_API_PORT_PROBE_FAILS_BEFORE_REVOKE: ${IBCTL_API_PORT_PROBE_FAILS_BEFORE_REVOKE:-}
+
       # --- IB System Status Scraper ---
       IBCTL_IB_STATUS_ENABLED: ${IBCTL_IB_STATUS_ENABLED:-}
       IB_STATUS_CHECK_INTERVAL: ${IB_STATUS_CHECK_INTERVAL:-300}

@@ -25,6 +25,26 @@ device = ""
 # force re-login even if timeout_action != restart
 relogin_after_timeout = false
 
+[twofa.backoff]
+# Max consecutive 2FA timeouts before entering WaitingForHitl2fa
+max_immediate_attempts = 3
+# Action on 2FA timeout: "restart_then_hitl" | "restart_forever" | "hitl_immediately"
+on_timeout = "restart_then_hitl"
+# HITL resume strategy: "disabled" | "periodic" | "ntfy_callback" | "both"
+strategy = "periodic"
+# retry cadence (minutes); list traversed then held at last
+intervals_minutes = [60]
+# hours the signed ntfy-action URL stays valid (one-shot)
+callback_valid_hours = 12
+# when to reset attempt counter: "any_reach" | "stable"
+counter_reset = "any_reach"
+# seconds Connected must persist under counter_reset=stable
+stable_secs = 300
+# cold restart preempts HITL; false defers cold restart
+cold_restart_preempts_hitl = true
+# retries for initial ntfy send failure (0 = give up silently)
+ntfy_send_retries = 1
+
 [gateway]
 tws_path = "/home/ibgateway/Jts"
 # empty = use tws_path
@@ -61,6 +81,11 @@ control_from = ["127.0.0.1", "172.0.0.0/8"]
 
 [agent]
 socket_path = "/run/ibctl/agent.sock"
+
+[ib_status]
+# When IBSTATUS=unavailable arrives, should ibctl kick a Connected session?
+# Default false — IBSTATUS gates login retry, not active sessions.
+kick_active_session = false
 
 [dashboard]
 # set IBCTL_DASHBOARD_ENABLED=true to start the web dashboard
@@ -140,6 +165,10 @@ restart_delay_secs = 90
 relogin_max_attempts = 1
 # action after exhausting re-login attempts: "reauth" or "restart" (env: IBCTL_RELOGIN_FAILURE_ACTION)
 relogin_failure_action = "reauth"
+# TCP probe to Gateway API port during Connected; 0 = disabled
+api_port_probe_interval_secs = 5
+# consecutive failures before revoking (absorbs OS-level blips)
+api_port_probe_fails_before_revoke = 3
 
 [site]
 # "primary" or "standby" (env: IBCTL_SITE_ROLE)

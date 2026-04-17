@@ -30,6 +30,30 @@ timeout_action = "restart"
 # Seconds to wait for 2FA completion (env: TWOFA_EXIT_INTERVAL)
 exit_interval = 180
 
+[twofa.backoff]
+# After this many consecutive 2FA timeouts, stop the tight restart loop
+# and enter WaitingForHitl2fa. 0 = disabled (loop forever).
+max_immediate_attempts = 3
+# "restart_then_hitl" | "restart_forever" | "hitl_immediately"
+on_timeout = "restart_then_hitl"
+# HITL strategy: "disabled" | "periodic" | "ntfy_callback" | "both"
+strategy = "periodic"
+# Retry cadence in minutes; list traversed then held at last value
+intervals_minutes = [60]
+# ntfy action URL validity window (1..=168 hours)
+callback_valid_hours = 12
+# "any_reach" | "stable" — when to reset the attempt counter
+counter_reset = "any_reach"
+# seconds Connected must persist under counter_reset=stable
+stable_secs = 300
+# true: cold restart always interrupts HITL; false: defers
+cold_restart_preempts_hitl = true
+# retries for initial ntfy send failure (only with ntfy_callback/both)
+ntfy_send_retries = 1
+
+# HMAC-SHA256 key for signing ntfy action URLs. Env only — never in TOML.
+# # Env: IBCTL_NTFY_ACTION_SIGNING_KEY
+
 [gateway]
 # Path to TWS/Gateway installation (env: TWS_PATH)
 tws_path = "/home/ibgateway/Jts"
@@ -62,6 +86,19 @@ control_from = ["127.0.0.1"]
 # Unix domain socket path for Rust<->Java agent IPC (env: IBCTL_AGENT_SOCKET)
 socket_path = "/tmp/ibctl.sock"
 
+[ib_status]
+# When IBSTATUS=unavailable arrives, should ibctl kick a Connected session?
+# Default false — IBSTATUS gates login retry, not active sessions.
+kick_active_session = false
+
 [logging]
 # Log level: debug | info | warn | error (env: IBCTL_LOG_LEVEL)
 level = "info"
+
+[timing]
+# TCP probe interval to Gateway's API port during post-auth states.
+# 0 = disabled (rely on label probe only). (env: IBCTL_API_PORT_PROBE_INTERVAL_SECS)
+api_port_probe_interval_secs = 5
+# Consecutive TCP probe failures before firing ApiPortListenerLost revocation.
+# (env: IBCTL_API_PORT_PROBE_FAILS_BEFORE_REVOKE)
+api_port_probe_fails_before_revoke = 3

@@ -74,6 +74,43 @@ def render_docker_toml(cfg) -> str:
     twofa.add("device", rt.twofa.device)
     twofa.add(tomlkit.comment("force re-login even if timeout_action != restart"))
     twofa.add("relogin_after_timeout", rt.twofa.reloginAfterTimeout)
+
+    # [twofa.backoff] — HITL 2FA policy (nested sub-section)
+    backoff = tomlkit.table()
+    backoff.add(
+        tomlkit.comment(
+            "Max consecutive 2FA timeouts before entering WaitingForHitl2fa"
+        )
+    )
+    backoff.add("max_immediate_attempts", int(rt.twofa.backoff.maxImmediateAttempts))
+    backoff.add(
+        tomlkit.comment(
+            'Action on 2FA timeout: "restart_then_hitl" | "restart_forever" | "hitl_immediately"'
+        )
+    )
+    backoff.add("on_timeout", rt.twofa.backoff.onTimeout)
+    backoff.add(
+        tomlkit.comment(
+            'HITL resume strategy: "disabled" | "periodic" | "ntfy_callback" | "both"'
+        )
+    )
+    backoff.add("strategy", rt.twofa.backoff.strategy)
+    backoff.add(tomlkit.comment("retry cadence (minutes); list traversed then held at last"))
+    backoff.add(
+        "intervals_minutes",
+        [int(m) for m in _listing_to_list(rt.twofa.backoff.intervalsMinutes)],
+    )
+    backoff.add(tomlkit.comment("hours the signed ntfy-action URL stays valid (one-shot)"))
+    backoff.add("callback_valid_hours", int(rt.twofa.backoff.callbackValidHours))
+    backoff.add(tomlkit.comment('when to reset attempt counter: "any_reach" | "stable"'))
+    backoff.add("counter_reset", rt.twofa.backoff.counterReset)
+    backoff.add(tomlkit.comment("seconds Connected must persist under counter_reset=stable"))
+    backoff.add("stable_secs", int(rt.twofa.backoff.stableSecs))
+    backoff.add(tomlkit.comment("cold restart preempts HITL; false defers cold restart"))
+    backoff.add("cold_restart_preempts_hitl", rt.twofa.backoff.coldRestartPreemptsHitl)
+    backoff.add(tomlkit.comment("retries for initial ntfy send failure (0 = give up silently)"))
+    backoff.add("ntfy_send_retries", int(rt.twofa.backoff.ntfySendRetries))
+    twofa.add("backoff", backoff)
     doc.add("twofa", twofa)
     doc.add(tomlkit.nl())
 
@@ -132,6 +169,22 @@ def render_docker_toml(cfg) -> str:
     agent = tomlkit.table()
     agent.add("socket_path", rt.agent.socketPath)
     doc.add("agent", agent)
+    doc.add(tomlkit.nl())
+
+    # [ib_status] — ibctl-side policy for IBSTATUS pushes
+    ibs_policy = tomlkit.table()
+    ibs_policy.add(
+        tomlkit.comment(
+            "When IBSTATUS=unavailable arrives, should ibctl kick a Connected session?"
+        )
+    )
+    ibs_policy.add(
+        tomlkit.comment(
+            "Default false — IBSTATUS gates login retry, not active sessions."
+        )
+    )
+    ibs_policy.add("kick_active_session", rt.ibStatus.kickActiveSession)
+    doc.add("ib_status", ibs_policy)
     doc.add(tomlkit.nl())
 
     # [dashboard]
@@ -318,6 +371,10 @@ def render_docker_toml(cfg) -> str:
         )
     )
     tm.add("relogin_failure_action", rt.timing.reloginFailureAction)
+    tm.add(tomlkit.comment("TCP probe to Gateway API port during Connected; 0 = disabled"))
+    tm.add("api_port_probe_interval_secs", int(rt.timing.apiPortProbeIntervalSecs))
+    tm.add(tomlkit.comment("consecutive failures before revoking (absorbs OS-level blips)"))
+    tm.add("api_port_probe_fails_before_revoke", int(rt.timing.apiPortProbeFailsBeforeRevoke))
     doc.add("timing", tm)
     doc.add(tomlkit.nl())
 
@@ -399,6 +456,63 @@ def render_example_toml(cfg) -> str:
     )
     # Example uses Rust code default (180), not Docker deployment default (120)
     twofa.add("exit_interval", 180)
+
+    # [twofa.backoff] — HITL policy (nested sub-section)
+    ex_backoff = tomlkit.table()
+    ex_backoff.add(
+        tomlkit.comment(
+            "After this many consecutive 2FA timeouts, stop the tight restart loop"
+        )
+    )
+    ex_backoff.add(
+        tomlkit.comment("and enter WaitingForHitl2fa. 0 = disabled (loop forever).")
+    )
+    ex_backoff.add("max_immediate_attempts", int(rt.twofa.backoff.maxImmediateAttempts))
+    ex_backoff.add(
+        tomlkit.comment(
+            '"restart_then_hitl" | "restart_forever" | "hitl_immediately"'
+        )
+    )
+    ex_backoff.add("on_timeout", rt.twofa.backoff.onTimeout)
+    ex_backoff.add(
+        tomlkit.comment(
+            'HITL strategy: "disabled" | "periodic" | "ntfy_callback" | "both"'
+        )
+    )
+    ex_backoff.add("strategy", rt.twofa.backoff.strategy)
+    ex_backoff.add(
+        tomlkit.comment(
+            "Retry cadence in minutes; list traversed then held at last value"
+        )
+    )
+    ex_backoff.add(
+        "intervals_minutes",
+        [int(m) for m in _listing_to_list(rt.twofa.backoff.intervalsMinutes)],
+    )
+    ex_backoff.add(
+        tomlkit.comment("ntfy action URL validity window (1..=168 hours)")
+    )
+    ex_backoff.add("callback_valid_hours", int(rt.twofa.backoff.callbackValidHours))
+    ex_backoff.add(tomlkit.comment('"any_reach" | "stable" — when to reset the attempt counter'))
+    ex_backoff.add("counter_reset", rt.twofa.backoff.counterReset)
+    ex_backoff.add(tomlkit.comment("seconds Connected must persist under counter_reset=stable"))
+    ex_backoff.add("stable_secs", int(rt.twofa.backoff.stableSecs))
+    ex_backoff.add(
+        tomlkit.comment("true: cold restart always interrupts HITL; false: defers")
+    )
+    ex_backoff.add("cold_restart_preempts_hitl", rt.twofa.backoff.coldRestartPreemptsHitl)
+    ex_backoff.add(tomlkit.comment("retries for initial ntfy send failure (only with ntfy_callback/both)"))
+    ex_backoff.add("ntfy_send_retries", int(rt.twofa.backoff.ntfySendRetries))
+    ex_backoff.add(tomlkit.nl())
+    ex_backoff.add(
+        tomlkit.comment(
+            "HMAC-SHA256 key for signing ntfy action URLs. Env only — never in TOML."
+        )
+    )
+    ex_backoff.add(
+        tomlkit.comment("# Env: IBCTL_NTFY_ACTION_SIGNING_KEY")
+    )
+    twofa.add("backoff", ex_backoff)
     doc.add("twofa", twofa)
     doc.add(tomlkit.nl())
 
@@ -470,10 +584,49 @@ def render_example_toml(cfg) -> str:
     doc.add("agent", agent)
     doc.add(tomlkit.nl())
 
+    # [ib_status]
+    ibs_policy = tomlkit.table()
+    ibs_policy.add(
+        tomlkit.comment(
+            "When IBSTATUS=unavailable arrives, should ibctl kick a Connected session?"
+        )
+    )
+    ibs_policy.add(
+        tomlkit.comment(
+            "Default false — IBSTATUS gates login retry, not active sessions."
+        )
+    )
+    ibs_policy.add("kick_active_session", rt.ibStatus.kickActiveSession)
+    doc.add("ib_status", ibs_policy)
+    doc.add(tomlkit.nl())
+
     # [logging]
     log = tomlkit.table()
     log.add(tomlkit.comment("Log level: debug | info | warn | error (env: IBCTL_LOG_LEVEL)"))
     log.add("level", rt.logging.level)
     doc.add("logging", log)
+    doc.add(tomlkit.nl())
+
+    # [timing]
+    tm = tomlkit.table()
+    tm.add(
+        tomlkit.comment(
+            "TCP probe interval to Gateway's API port during post-auth states."
+        )
+    )
+    tm.add(
+        tomlkit.comment(
+            "0 = disabled (rely on label probe only). (env: IBCTL_API_PORT_PROBE_INTERVAL_SECS)"
+        )
+    )
+    tm.add("api_port_probe_interval_secs", int(rt.timing.apiPortProbeIntervalSecs))
+    tm.add(
+        tomlkit.comment(
+            "Consecutive TCP probe failures before firing ApiPortListenerLost revocation."
+        )
+    )
+    tm.add(tomlkit.comment("(env: IBCTL_API_PORT_PROBE_FAILS_BEFORE_REVOKE)"))
+    tm.add("api_port_probe_fails_before_revoke", int(rt.timing.apiPortProbeFailsBeforeRevoke))
+    doc.add("timing", tm)
 
     return tomlkit.dumps(doc)

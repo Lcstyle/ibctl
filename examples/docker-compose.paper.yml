@@ -83,11 +83,9 @@ services:
     volumes:
     - ibctl-persist:/opt/ibctl/persist
     ports:
-    - ${IBCTL_LIVE_API_BIND:-127.0.0.1}:${IBCTL_LIVE_API_PORT:-4001}:4003
     - ${IBCTL_PAPER_API_BIND:-127.0.0.1}:${IBCTL_PAPER_API_PORT:-4002}:4004
     - ${IBCTL_VNC_BIND:-127.0.0.1}:5900:5900
     - ${IBCTL_VNC_BIND:-127.0.0.1}:6080:6080
-    - 127.0.0.1:7462:7462
     - 127.0.0.1:7463:7463
     - ${IBCTL_DASHBOARD_BIND:-127.0.0.1}:${IBCTL_DASHBOARD_PORT:-3080}:${IBCTL_DASHBOARD_PORT:-3080}
     tty: true

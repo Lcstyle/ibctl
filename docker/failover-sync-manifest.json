@@ -34,6 +34,42 @@
         "toml_path": "twofa.relogin_after_timeout",
         "env_var": "RELOGIN_AFTER_TWOFA_TIMEOUT"
       },
+      "IBCTL_TWOFA_MAX_IMMEDIATE_ATTEMPTS": {
+        "toml_path": "twofa.backoff.max_immediate_attempts",
+        "env_var": "IBCTL_TWOFA_MAX_IMMEDIATE_ATTEMPTS"
+      },
+      "IBCTL_TWOFA_ON_TIMEOUT": {
+        "toml_path": "twofa.backoff.on_timeout",
+        "env_var": "IBCTL_TWOFA_ON_TIMEOUT"
+      },
+      "IBCTL_TWOFA_STRATEGY": {
+        "toml_path": "twofa.backoff.strategy",
+        "env_var": "IBCTL_TWOFA_STRATEGY"
+      },
+      "IBCTL_TWOFA_INTERVALS_MINUTES": {
+        "toml_path": "twofa.backoff.intervals_minutes",
+        "env_var": "IBCTL_TWOFA_INTERVALS_MINUTES"
+      },
+      "IBCTL_TWOFA_CALLBACK_VALID_HOURS": {
+        "toml_path": "twofa.backoff.callback_valid_hours",
+        "env_var": "IBCTL_TWOFA_CALLBACK_VALID_HOURS"
+      },
+      "IBCTL_TWOFA_COUNTER_RESET": {
+        "toml_path": "twofa.backoff.counter_reset",
+        "env_var": "IBCTL_TWOFA_COUNTER_RESET"
+      },
+      "IBCTL_TWOFA_STABLE_SECS": {
+        "toml_path": "twofa.backoff.stable_secs",
+        "env_var": "IBCTL_TWOFA_STABLE_SECS"
+      },
+      "IBCTL_TWOFA_COLD_RESTART_PREEMPTS_HITL": {
+        "toml_path": "twofa.backoff.cold_restart_preempts_hitl",
+        "env_var": "IBCTL_TWOFA_COLD_RESTART_PREEMPTS_HITL"
+      },
+      "IBCTL_TWOFA_NTFY_SEND_RETRIES": {
+        "toml_path": "twofa.backoff.ntfy_send_retries",
+        "env_var": "IBCTL_TWOFA_NTFY_SEND_RETRIES"
+      },
       "JAVA_HEAP_SIZE": {
         "toml_path": "gateway.java_heap_size",
         "env_var": "JAVA_HEAP_SIZE"
@@ -114,6 +150,7 @@
       "IBCTL_DASHBOARD_AUTH_SECRET",
       "IBCTL_DASHBOARD_TOKEN",
       "IBCTL_GITHUB_OAUTH_CLIENT_SECRET",
+      "IBCTL_NTFY_ACTION_SIGNING_KEY",
       "IBCTL_NTFY_TOKEN",
       "IBCTL_OIDC_CLIENT_SECRET",
       "IBCTL_SLACK_WEBHOOK_URL",
@@ -161,6 +198,14 @@
         "toml_path": "logging.session_reopen_hour",
         "env_var": "IBCTL_SESSION_REOPEN_HOUR"
       },
+      "IBCTL_API_PORT_PROBE_INTERVAL_SECS": {
+        "toml_path": "timing.api_port_probe_interval_secs",
+        "env_var": "IBCTL_API_PORT_PROBE_INTERVAL_SECS"
+      },
+      "IBCTL_API_PORT_PROBE_FAILS_BEFORE_REVOKE": {
+        "toml_path": "timing.api_port_probe_fails_before_revoke",
+        "env_var": "IBCTL_API_PORT_PROBE_FAILS_BEFORE_REVOKE"
+      },
       "IBCTL_DEBUG_MODE": {
         "toml_path": "dashboard.debug_mode",
         "env_var": "IBCTL_DEBUG_MODE"
@@ -196,6 +241,10 @@
       "IBCTL_ZMQ_PORT": {
         "toml_path": "dashboard.zmq_port",
         "env_var": "IBCTL_ZMQ_PORT"
+      },
+      "IBCTL_DASHBOARD_EXTERNAL_URL": {
+        "toml_path": "dashboard.external_url",
+        "env_var": "IBCTL_DASHBOARD_EXTERNAL_URL"
       },
       "IBCTL_IB_STATUS_ENABLED": {
         "toml_path": "ib_system_status.enabled",
