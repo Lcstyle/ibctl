@@ -60,6 +60,11 @@ pub enum Command {
     IbStatus(String, String), // (status, reason)
     /// Set auto-restart time via Gateway Settings UI (UTC, "HH:MM AM/PM" or "HH:MM")
     SetRestartTime(String),
+    /// Resume from HITL 2FA wait — operator signal that 2FA is approved.
+    ///
+    /// Privileged (localhost-only). Only takes effect when the state machine
+    /// is in `State::WaitingForHitl2fa`; ignored in all other states.
+    HitlResume,
 }
 
 /// Query commands that expect a JSON response via oneshot channel.

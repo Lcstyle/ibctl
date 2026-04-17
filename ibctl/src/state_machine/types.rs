@@ -15,7 +15,7 @@ use crate::handlers::DialogHandlerRegistry;
 use crate::types::Signal;
 use crate::supervisor::Supervisor;
 
-use super::verifier::{ConnectedProof, RevocationTracker};
+use super::revocation::RevocationTracker;
 
 #[derive(Debug, Error)]
 pub enum StateMachineError {
@@ -56,12 +56,17 @@ pub enum State {
     ConfiguringApi,
     /// Fully connected and monitoring for new dialogs.
     ///
-    /// The `ConnectedProof` payload is the verifier's evidence that Gateway
-    /// is actually ready. It can only be constructed via `verifier::mint()`
-    /// or `verifier::forced()` (for SETSTATE debug override). No handler can
-    /// accidentally return `Ok(State::Connected(...))` without going through
-    /// the verifier — see `state_machine::verifier` module docs.
-    Connected(ConnectedProof),
+    /// Normal path to this state: positive label confirmation at one of
+    /// three sites in mod.rs (the only code that returns `Ok(State::Connected)`
+    /// via the state-transition flow):
+    ///   * WaitingForApiReady — `components_indicate_connected()` returned true
+    ///   * ConfiguringApi — `apply_api_config()` succeeded (UI was responsive)
+    ///   * ReconnectingSession — positive authentication confirmation
+    ///
+    /// Debug path: SETSTATE Connected (localhost-only, privileged command)
+    /// forces the state for the dashboard's state-machine dialog so
+    /// operators can observe Connected-state behavior without a full login.
+    Connected,
     /// Recovering from connection loss — graduated re-login flow.
     /// Waits 30s, clicks Re-login, tracks attempts. If failed, restarts JVM.
     ReconnectingSession,
@@ -69,6 +74,11 @@ pub enum State {
     Restarting,
     /// Waiting for IB system to become available (maintenance/outage/no internet)
     WaitingForIB,
+    /// Human-in-the-loop 2FA: repeated 2FA timeouts exhausted the immediate
+    /// retry budget. Exits via timer (intervals_minutes), via HITL_RESUME
+    /// command (typically from a dashboard ntfy callback), or preempted by
+    /// cold restart.
+    WaitingForHitl2fa,
     /// Shutting down cleanly
     Shutdown,
     /// Unrecoverable error state
@@ -90,14 +100,24 @@ impl State {
             "DismissingPopups" => Some(State::DismissingPopups),
             "WaitingForApiReady" => Some(State::WaitingForApiReady),
             "ConfiguringApi" => Some(State::ConfiguringApi),
-            // SETSTATE Connected produces a synthetic "forced" proof.
-            // This is a debug-override path — operators should see the
-            // `evidence=[forced]` marker in logs and STATUS JSON so they can
-            // tell a forced Connected apart from a verifier-minted one.
-            "Connected" => Some(State::Connected(ConnectedProof::forced())),
+            // SETSTATE Connected is accepted as a localhost-only debug tool
+            // (the command server's is_privileged_command list gates SETSTATE
+            // to 127.0.0.1 peers, which in practice means the dashboard's
+            // state-machine dialog). Forcing Connected kicks off the normal
+            // `do_connected` work — socat, client-ID refresh task, revocation
+            // bus, active probe — so operators can observe Connected-state
+            // behavior without driving a full login flow.
+            //
+            // This is NOT a fake or "forced" state. State::Connected is a
+            // unit variant; nothing distinguishes it from a real promotion
+            // at the type level. Downstream consumers will see `ready: true`
+            // and may act on it — use with operator discretion, same as
+            // other privileged commands (RESTART, STOP, etc.).
+            "Connected" => Some(State::Connected),
             "ReconnectingSession" => Some(State::ReconnectingSession),
             "Restarting" => Some(State::Restarting),
             "WaitingForIB" => Some(State::WaitingForIB),
+            "WaitingForHitl2fa" => Some(State::WaitingForHitl2fa),
             "Shutdown" => Some(State::Shutdown),
             _ => None,
         }
@@ -108,10 +128,6 @@ impl std::fmt::Display for State {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             State::Error(msg) => write!(f, "Error({})", msg),
-            // Display ignores the proof payload to preserve external JSON
-            // contract: STATUS still reports `"state":"Connected"`. Proof
-            // provenance is exposed via a separate `proof` field (Phase 3).
-            State::Connected(_) => write!(f, "Connected"),
             other => write!(f, "{:?}", other),
         }
     }
@@ -136,12 +152,15 @@ pub struct Transition {
 }
 
 /// Bundled mpsc receivers for the state machine's inbound channels.
+/// Tests that don't need an event stream construct a dummy channel and
+/// drop the sender immediately; they don't need to express "no events"
+/// via Option at this layer.
 pub struct Channels {
     pub signals: mpsc::Receiver<Signal>,
     pub commands: mpsc::Receiver<Command>,
     pub queries: mpsc::Receiver<Query>,
     pub cold_restart: mpsc::Receiver<ColdRestartSignal>,
-    pub agent_events: Option<mpsc::Receiver<crate::agent_events::AgentEvent>>,
+    pub agent_events: mpsc::Receiver<crate::agent_events::AgentEvent>,
 }
 
 /// Internal enum for interrupt sources.
@@ -246,7 +265,7 @@ pub struct StateMachine {
     /// Centralized UI observation cache — updated by events and targeted queries.
     /// State handlers read this instead of polling the agent directly.
     pub(super) observation: crate::agent_events::AgentObservation,
-    pub stats: Stats,
+    pub(super) stats: Stats,
     /// Watch channel sender for publishing query snapshots.
     /// Command server reads the latest snapshot directly — no mpsc round-trip.
     /// Placed after JoinHandle fields for correct drop order (Sender before Handle).
@@ -259,6 +278,35 @@ pub struct StateMachine {
     /// Used by `do_connected` to decide when a contradiction has persisted
     /// long enough to revoke the proof and transition out.
     pub(super) revocation: RevocationTracker,
+
+    // --- HITL 2FA state ---
+    /// Consecutive 2FA timeouts. Incremented on each `do_wait_for_2fa` timeout,
+    /// reset on successful Connected entry (per `twofa.backoff.counter_reset`).
+    pub(super) consecutive_2fa_timeouts: u32,
+    /// When we entered `WaitingForHitl2fa` most recently. Used for the
+    /// periodic-retry timer and for `hitl.entered_at` in STATUS JSON.
+    pub(super) hitl_entered_at: Option<Instant>,
+    /// Next periodic auto-retry deadline. None = strategy does not include
+    /// timer, or we're not in HITL.
+    pub(super) hitl_next_retry_at: Option<Instant>,
+    /// Which entry in `intervals_minutes` we're currently at. Increments after
+    /// each scheduled retry fires; held at `intervals.len() - 1` on overflow.
+    pub(super) hitl_intervals_index: usize,
+    /// Ntfy push attempts for the current HITL entry. Counted against
+    /// `ntfy_send_retries` on subsequent wakeups.
+    pub(super) hitl_ntfy_attempts: u32,
+    /// Whether the initial ntfy push succeeded for the current HITL entry.
+    pub(super) hitl_ntfy_sent: bool,
+    /// When Connected was first entered continuously. Reset on any exit from
+    /// Connected. Used by `counter_reset = "stable"` to decide when the counter
+    /// may reset.
+    pub(super) connected_continuously_since: Option<Instant>,
+    /// Flag set by the TCP probe task when consecutive failures exceed the
+    /// threshold. Consumed in `do_connected` to fire ApiPortListenerLost.
+    /// AtomicBool so the probe task can set it without needing a lock.
+    pub(super) api_port_probe_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Handle for the TCP probe task, for cancellation on Connected exit.
+    pub(super) api_port_probe_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl StateMachine {
@@ -280,7 +328,10 @@ impl StateMachine {
             command_rx: channels.commands,
             query_rx: channels.queries,
             cold_restart_rx: channels.cold_restart,
-            event_rx: channels.agent_events,
+            // event_rx stays wrapped in Option because the main select! loop
+            // takes it out and puts it back across await boundaries. The
+            // Option on the struct field is lifecycle, not optionality.
+            event_rx: Some(channels.agent_events),
             observation: crate::agent_events::AgentObservation::new(),
             socat_process: None,
             config_retries: 0,
@@ -305,6 +356,17 @@ impl StateMachine {
             snapshot_tx,
             snapshot_version: 0,
             revocation: RevocationTracker::new(),
+            consecutive_2fa_timeouts: 0,
+            hitl_entered_at: None,
+            hitl_next_retry_at: None,
+            hitl_intervals_index: 0,
+            hitl_ntfy_attempts: 0,
+            hitl_ntfy_sent: false,
+            connected_continuously_since: None,
+            api_port_probe_failed: std::sync::Arc::new(
+                std::sync::atomic::AtomicBool::new(false),
+            ),
+            api_port_probe_task: None,
         }
     }
 
@@ -334,10 +396,11 @@ pub(crate) fn client_advisory(state: &State) -> (bool, bool, Option<&'static str
         State::WaitingFor2fa => (false, true, Some("2fa_pending")),
         State::HandlingSessionConflict => (false, true, Some("session_conflict")),
         State::DismissingPopups | State::WaitingForApiReady | State::ConfiguringApi => (false, true, Some("configuring")),
-        State::Connected(_) => (true, false, None),
+        State::Connected => (true, false, None),
         State::ReconnectingSession => (false, true, Some("reconnecting")),
         State::Restarting => (false, true, Some("restarting")),
         State::WaitingForIB => (false, true, Some("ib_maintenance")),
+        State::WaitingForHitl2fa => (false, true, Some("awaiting_operator")),
         State::Shutdown => (false, false, None),
         State::Error(_) => (false, false, None),
     };
@@ -361,7 +424,7 @@ mod tests {
     #[test]
     fn test_connected_should_connect() {
         let (should_connect, should_wait, reason, stale) =
-            client_advisory(&State::Connected(ConnectedProof::forced()));
+            client_advisory(&State::Connected);
         assert!(should_connect);
         assert!(!should_wait);
         assert!(reason.is_none());
@@ -430,13 +493,13 @@ mod tests {
             State::WaitingForLogin, State::Authenticating,
             State::WaitingFor2fa, State::HandlingSessionConflict,
             State::DismissingPopups, State::ConfiguringApi,
-            State::Connected(ConnectedProof::forced()),
+            State::Connected,
             State::Restarting, State::Shutdown,
             State::Error("test".into()),
         ];
         for state in &states {
             let (sc, sw, _, _) = client_advisory(state);
-            if matches!(state, State::Connected(_)) {
+            if matches!(state, State::Connected) {
                 assert!(sc, "Connected should allow connect");
                 assert!(!sw, "Connected should not wait");
             }
@@ -446,12 +509,19 @@ mod tests {
     #[test]
     fn test_state_display() {
         assert_eq!(State::Init.to_string(), "Init");
-        assert_eq!(
-            State::Connected(ConnectedProof::forced()).to_string(),
-            "Connected",
-            "Display must ignore the proof payload to preserve JSON contract"
-        );
+        assert_eq!(State::Connected.to_string(), "Connected");
         assert_eq!(State::WaitingFor2fa.to_string(), "WaitingFor2fa");
         assert_eq!(State::Error("boom".into()).to_string(), "Error(boom)");
+    }
+
+    #[test]
+    fn test_from_name_accepts_all_states_including_connected() {
+        // SETSTATE Connected is a localhost-only debug affordance used by
+        // the dashboard's state-machine dialog; accept it the same as any
+        // other state.
+        assert!(matches!(State::from_name("Connected"), Some(State::Connected)));
+        assert!(matches!(State::from_name("Init"), Some(State::Init)));
+        assert!(matches!(State::from_name("WaitingForLogin"), Some(State::WaitingForLogin)));
+        assert!(State::from_name("NotARealState").is_none());
     }
 }

@@ -200,6 +200,7 @@ pub struct Config {
     pub logging: LoggingConfig,
     pub timing: TimingConfig,
     pub site: SiteConfig,
+    pub ib_status: IbStatusConfig,
     /// Catch-all for unknown sections (e.g., \[dashboard\]) — silently ignored.
     #[serde(flatten)]
     _extra: std::collections::HashMap<String, toml::Value>,
@@ -294,6 +295,132 @@ pub struct TwoFaConfig {
     /// Whether a TOTP secret is available (resolved at load time)
     #[serde(skip)]
     pub has_secret: bool,
+    /// Human-in-the-loop backoff policy.
+    #[serde(default)]
+    pub backoff: TwoFaBackoffConfig,
+}
+
+#[derive(Deserialize)]
+#[serde(default)]
+pub struct TwoFaBackoffConfig {
+    /// After this many consecutive 2FA timeouts, stop the tight restart loop
+    /// and enter WaitingForHitl2fa. 0 = disabled (loop forever — legacy).
+    pub max_immediate_attempts: u32,
+    /// What to do when twofa.timeout_seconds fires.
+    pub on_timeout: TwoFaOnTimeout,
+    /// HITL resume strategy.
+    pub strategy: HitlStrategy,
+    /// Retry cadence minutes. Single = constant; list = traverse then hold at last.
+    pub intervals_minutes: Vec<u32>,
+    /// Hours the signed ntfy-action URL stays valid.
+    pub callback_valid_hours: u32,
+    /// When to reset the attempt counter after a successful Connected.
+    pub counter_reset: CounterResetScope,
+    /// Seconds Connected must persist before reset under counter_reset = Stable.
+    pub stable_secs: u64,
+    /// Does scheduled cold restart preempt WaitingForHitl2fa?
+    pub cold_restart_preempts_hitl: bool,
+    /// How many times to retry a failing initial ntfy push.
+    pub ntfy_send_retries: u32,
+    /// HMAC-SHA256 signing key for ntfy action URLs. Env only:
+    /// IBCTL_NTFY_ACTION_SIGNING_KEY. Never in TOML.
+    #[serde(skip)]
+    pub ntfy_action_signing_key: SecretString,
+}
+
+impl Clone for TwoFaBackoffConfig {
+    fn clone(&self) -> Self {
+        Self {
+            max_immediate_attempts: self.max_immediate_attempts,
+            on_timeout: self.on_timeout,
+            strategy: self.strategy,
+            intervals_minutes: self.intervals_minutes.clone(),
+            callback_valid_hours: self.callback_valid_hours,
+            counter_reset: self.counter_reset,
+            stable_secs: self.stable_secs,
+            cold_restart_preempts_hitl: self.cold_restart_preempts_hitl,
+            ntfy_send_retries: self.ntfy_send_retries,
+            ntfy_action_signing_key: SecretString::from(
+                self.ntfy_action_signing_key.expose_secret().to_string(),
+            ),
+        }
+    }
+}
+
+impl fmt::Debug for TwoFaBackoffConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TwoFaBackoffConfig")
+            .field("max_immediate_attempts", &self.max_immediate_attempts)
+            .field("on_timeout", &self.on_timeout)
+            .field("strategy", &self.strategy)
+            .field("intervals_minutes", &self.intervals_minutes)
+            .field("callback_valid_hours", &self.callback_valid_hours)
+            .field("counter_reset", &self.counter_reset)
+            .field("stable_secs", &self.stable_secs)
+            .field("cold_restart_preempts_hitl", &self.cold_restart_preempts_hitl)
+            .field("ntfy_send_retries", &self.ntfy_send_retries)
+            .field("ntfy_action_signing_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl Default for TwoFaBackoffConfig {
+    fn default() -> Self {
+        Self {
+            max_immediate_attempts: 3,
+            on_timeout: TwoFaOnTimeout::RestartThenHitl,
+            strategy: HitlStrategy::Periodic,
+            intervals_minutes: vec![60],
+            callback_valid_hours: 12,
+            counter_reset: CounterResetScope::AnyReach,
+            stable_secs: 300,
+            cold_restart_preempts_hitl: true,
+            ntfy_send_retries: 1,
+            ntfy_action_signing_key: SecretString::from(String::new()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TwoFaOnTimeout {
+    RestartThenHitl,
+    RestartForever,
+    HitlImmediately,
+}
+
+impl Default for TwoFaOnTimeout {
+    fn default() -> Self {
+        Self::RestartThenHitl
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HitlStrategy {
+    Disabled,
+    Periodic,
+    NtfyCallback,
+    Both,
+}
+
+impl Default for HitlStrategy {
+    fn default() -> Self {
+        Self::Periodic
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CounterResetScope {
+    AnyReach,
+    Stable,
+}
+
+impl Default for CounterResetScope {
+    fn default() -> Self {
+        Self::AnyReach
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -342,6 +469,33 @@ pub struct CommandServerConfig {
 #[serde(default)]
 pub struct AgentConfig {
     pub socket_path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct IbStatusConfig {
+    /// When a dashboard-pushed IBSTATUS arrives marking IB unavailable, should
+    /// ibctl interrupt an already-authenticated session? Default: false.
+    ///
+    /// The IBSTATUS push was designed as a retry-gate: if IBKR backends are
+    /// unreachable, there's no point hammering new login attempts. It was
+    /// not designed as a kill-switch for active sessions. The scraper can
+    /// be wrong (CDN blips, slow updates) and Gateway is the authoritative
+    /// source for "is my session healthy" — detected via label inspection
+    /// in the revocation bus, not via the public status page.
+    ///
+    /// Set to `true` to restore the historical behavior where any unavailable
+    /// IBSTATUS push transitions Connected → WaitingForIB. Only useful if you
+    /// trust the scraper more than the Gateway UI label.
+    pub kick_active_session: bool,
+}
+
+impl Default for IbStatusConfig {
+    fn default() -> Self {
+        Self {
+            kick_active_session: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -407,6 +561,20 @@ pub struct TimingConfig {
     /// Default: "reauth"
     #[serde(rename = "relogin_failure_action")]
     pub relogin_failure_action: ReloginFailureAction,
+
+    /// TCP probe interval to Gateway's API port during post-auth states.
+    /// 0 = disabled.
+    #[serde(default = "TimingConfig::default_api_port_probe_interval")]
+    pub api_port_probe_interval_secs: u64,
+
+    /// Consecutive probe failures before firing ApiPortListenerLost revocation.
+    #[serde(default = "TimingConfig::default_api_port_probe_fails")]
+    pub api_port_probe_fails_before_revoke: u32,
+}
+
+impl TimingConfig {
+    fn default_api_port_probe_interval() -> u64 { 5 }
+    fn default_api_port_probe_fails() -> u32 { 3 }
 }
 
 /// What to do after all re-login attempts fail.
@@ -435,6 +603,8 @@ impl Default for TimingConfig {
             restart_delay_secs: 90,
             relogin_max_attempts: 1,
             relogin_failure_action: ReloginFailureAction::Reauth,
+            api_port_probe_interval_secs: 5,
+            api_port_probe_fails_before_revoke: 3,
         }
     }
 }
@@ -454,13 +624,14 @@ impl Default for AuthConfig {
 impl Default for TwoFaConfig {
     fn default() -> Self {
         Self {
-            secret_env: "TWOFACTOR_CODE".to_string(),
+            secret_env: "TWOFACTOR_CODE".to_string(), // pragma: allowlist secret
             provider: TotpProvider::Oathtool,
             timeout_action: TwoFaTimeoutAction::Restart,
             timeout_seconds: 180,
             device: String::new(),
             relogin_after_timeout: false,
             has_secret: false,
+            backoff: TwoFaBackoffConfig::default(),
         }
     }
 }
@@ -632,6 +803,71 @@ impl Config {
             .map(|s| !s.is_empty())
             .unwrap_or(false);
 
+        // 2FA backoff (HITL)
+        if let Some(v) = std::env::var("IBCTL_TWOFA_MAX_IMMEDIATE_ATTEMPTS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
+            self.twofa.backoff.max_immediate_attempts = v;
+        }
+        if let Some(v) = env_nonempty("IBCTL_TWOFA_ON_TIMEOUT") {
+            match v.to_lowercase().as_str() {
+                "restart_then_hitl" => self.twofa.backoff.on_timeout = TwoFaOnTimeout::RestartThenHitl,
+                "restart_forever" => self.twofa.backoff.on_timeout = TwoFaOnTimeout::RestartForever,
+                "hitl_immediately" => self.twofa.backoff.on_timeout = TwoFaOnTimeout::HitlImmediately,
+                other => log::warn!("Unknown IBCTL_TWOFA_ON_TIMEOUT '{}', keeping default", other),
+            }
+        }
+        if let Some(v) = env_nonempty("IBCTL_TWOFA_STRATEGY") {
+            match v.to_lowercase().as_str() {
+                "disabled" => self.twofa.backoff.strategy = HitlStrategy::Disabled,
+                "periodic" => self.twofa.backoff.strategy = HitlStrategy::Periodic,
+                "ntfy_callback" => self.twofa.backoff.strategy = HitlStrategy::NtfyCallback,
+                "both" => self.twofa.backoff.strategy = HitlStrategy::Both,
+                other => log::warn!("Unknown IBCTL_TWOFA_STRATEGY '{}', keeping default", other),
+            }
+        }
+        if let Some(v) = env_nonempty("IBCTL_TWOFA_INTERVALS_MINUTES") {
+            let parsed: Vec<u32> = v.split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect();
+            if !parsed.is_empty() {
+                self.twofa.backoff.intervals_minutes = parsed;
+            }
+        }
+        if let Some(v) = std::env::var("IBCTL_TWOFA_CALLBACK_VALID_HOURS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
+            self.twofa.backoff.callback_valid_hours = v;
+        }
+        if let Some(v) = env_nonempty("IBCTL_TWOFA_COUNTER_RESET") {
+            match v.to_lowercase().as_str() {
+                "any_reach" => self.twofa.backoff.counter_reset = CounterResetScope::AnyReach,
+                "stable" => self.twofa.backoff.counter_reset = CounterResetScope::Stable,
+                other => log::warn!("Unknown IBCTL_TWOFA_COUNTER_RESET '{}', keeping default", other),
+            }
+        }
+        if let Some(v) = std::env::var("IBCTL_TWOFA_STABLE_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
+            self.twofa.backoff.stable_secs = v;
+        }
+        if let Some(v) = env_nonempty("IBCTL_TWOFA_COLD_RESTART_PREEMPTS_HITL") {
+            self.twofa.backoff.cold_restart_preempts_hitl =
+                matches!(v.to_lowercase().as_str(), "yes" | "true" | "1");
+        }
+        if let Some(v) = std::env::var("IBCTL_TWOFA_NTFY_SEND_RETRIES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
+            self.twofa.backoff.ntfy_send_retries = v;
+        }
+        if let Some(v) = env_or_file("IBCTL_NTFY_ACTION_SIGNING_KEY") {
+            self.twofa.backoff.ntfy_action_signing_key = SecretString::from(v);
+        }
+
         // Gateway
         if let Some(v) = env_nonempty("TWS_PATH") {
             self.gateway.tws_path = v;
@@ -714,6 +950,12 @@ impl Config {
                 "restart" => self.timing.relogin_failure_action = ReloginFailureAction::Restart,
                 _ => log::warn!("Invalid IBCTL_RELOGIN_FAILURE_ACTION '{}' — must be 'reauth' or 'restart'", v),
             }
+        }
+        if let Some(v) = std::env::var("IBCTL_API_PORT_PROBE_INTERVAL_SECS").ok().and_then(|s| s.parse().ok()) {
+            self.timing.api_port_probe_interval_secs = v;
+        }
+        if let Some(v) = std::env::var("IBCTL_API_PORT_PROBE_FAILS_BEFORE_REVOKE").ok().and_then(|s| s.parse().ok()) {
+            self.timing.api_port_probe_fails_before_revoke = v;
         }
 
         // Agent

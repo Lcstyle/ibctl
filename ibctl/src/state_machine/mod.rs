@@ -10,12 +10,10 @@
 mod queries;
 mod socat;
 mod types;
-mod verifier;
+mod revocation;
 
 // Re-export public API
 pub use types::{Channels, State, StateMachine, StateMachineError};
-#[allow(unused_imports)] // surfaced in later phases
-pub(super) use verifier::{ConnectedProof, EvidenceKinds, RevocationSource, RevocationTracker};
 
 use std::path::Path;
 use std::time::Instant;
@@ -219,21 +217,87 @@ impl StateMachine {
         self.state_entered_at = Instant::now();
         self.consecutive_agent_failures = 0;
 
-        let next_is_connected = matches!(next, State::Connected(_));
-        let curr_is_connected = matches!(self.state, State::Connected(_));
+        let next_is_connected = next == State::Connected;
+        let curr_is_connected = self.state == State::Connected;
         if next_is_connected && !curr_is_connected {
             self.connected_since = Some(Instant::now());
             self.relogin_attempts = 0;
-        } else if !next_is_connected {
+            self.connected_continuously_since = Some(Instant::now());
+            // Counter reset: "any_reach" resets immediately; "stable" defers
+            // to a check in do_connected once connected_continuously_since
+            // exceeds stable_secs. Here we seed the timer either way.
+            if matches!(
+                self.config.twofa.backoff.counter_reset,
+                crate::config::CounterResetScope::AnyReach
+            ) {
+                if self.consecutive_2fa_timeouts > 0 {
+                    log::info!(
+                        "Connected reached — resetting 2FA attempt counter (was {})",
+                        self.consecutive_2fa_timeouts
+                    );
+                }
+                self.consecutive_2fa_timeouts = 0;
+            }
+            // Start the TCP probe task on Connected entry.
+            self.start_api_port_probe();
+        } else if curr_is_connected && !next_is_connected {
+            // Leaving Connected → the single, authoritative cleanup site.
+            // Previously these calls were scattered across five revocation
+            // branches inside do_connected, with subtle asymmetries (e.g.
+            // ReloginDialog didn't reset the handler registry, SessionConflict
+            // didn't clear connected_window_class). Centralizing here makes
+            // the lifecycle explicit and covers every future exit path — any
+            // new command or handler that sets `self.state` to a non-Connected
+            // variant will now clean up correctly without having to remember
+            // to call these five methods.
             self.connected_since = None;
-            // Leaving Connected — reset per-source revocation debounce state
-            // so the next Connected session starts with a clean slate.
+            self.connected_continuously_since = None;
+            self.stop_api_port_probe();
             self.revocation.clear_all();
+            self.abort_client_id_task();
+            self.connected_window_class = None;
+            self.handler_registry.reset();
+            self.stop_socat();
+        } else if !next_is_connected {
+            // Not-Connected → not-Connected. `connected_since` is already None
+            // in this case but set defensively; everything else was already
+            // reset the last time we left Connected.
+            self.connected_since = None;
+            self.connected_continuously_since = None;
+        }
+
+        // Clear HITL bookkeeping when leaving WaitingForHitl2fa. Everything
+        // allocated at HITL entry (timer, ntfy state) becomes stale
+        // once we transition out.
+        if self.state == State::WaitingForHitl2fa && next != State::WaitingForHitl2fa {
+            log::info!(
+                "Leaving HITL 2FA after {:?}s",
+                self.hitl_entered_at
+                    .map(|t| t.elapsed().as_secs())
+                    .unwrap_or(0)
+            );
+            self.hitl_entered_at = None;
+            self.hitl_next_retry_at = None;
+            self.hitl_intervals_index = 0;
+            self.hitl_ntfy_attempts = 0;
+            self.hitl_ntfy_sent = false;
         }
 
         // Reset 2FA device state when starting a new login or 2FA cycle
         if matches!(next, State::WaitingForLogin | State::WaitingFor2fa | State::Launching | State::Restarting) {
             self.twofa_device_selected = false;
+        }
+
+        // Drop any pending warm-restart token when we enter a clean lifecycle
+        // boundary. Without this, an operator-triggered `STOP -> START` after
+        // a prior unplanned `Restarting` would try to warm-restart using a
+        // hash from a JVM exit that happened minutes ago — stale by the time
+        // we relaunch. Restarting itself sets the field legitimately in
+        // do_connected before transitioning, so this clear must NOT overwrite
+        // it during that path; we only clear on Shutdown and WaitingForLaunch,
+        // which are both operator-initiated idle states.
+        if matches!(next, State::Shutdown | State::WaitingForLaunch) {
+            self.warm_restart_pending = None;
         }
 
         // State-specific entry initialization
@@ -262,7 +326,7 @@ impl StateMachine {
         // so window events may carry stale has_login_button=true during
         // the authentication animation.
         if matches!(next, State::DismissingPopups | State::WaitingFor2fa
-            | State::WaitingForApiReady | State::ConfiguringApi | State::Connected(_))
+            | State::WaitingForApiReady | State::ConfiguringApi | State::Connected)
         {
             self.observation.clear_login_buttons();
         }
@@ -451,14 +515,45 @@ impl StateMachine {
     }
 
     /// If IB system unavailable and not already in WaitingForIB, transition there.
+    ///
+    /// IBSTATUS is a retry-gate, not a session killer. When we are in a
+    /// post-auth state (Connected / DismissingPopups / WaitingForApiReady /
+    /// ConfiguringApi) we stay put regardless of what the scraper says.
+    /// Gateway's own label inspection (driven by the revocation bus) is the
+    /// authoritative source for "is this session still healthy?" — not the
+    /// public status page, which can be wrong (CDN blips, slow updates).
+    ///
+    /// Opt in to the historical kick-on-unavailable behavior via
+    /// `[ib_status] kick_active_session = true`.
     fn check_ib_system_availability(&mut self) {
-        if !self.ib_status.available && self.state != State::WaitingForIB && self.state != State::Shutdown && self.state != State::WaitingForLaunch {
-            log::warn!("IB system unavailable: {} — transitioning to WaitingForIB", self.ib_status.reason);
-            self.ib_status.return_state = Some(Box::new(self.state.clone()));
-            let old = self.state.clone();
-            self.state = State::WaitingForIB;
-            self.record_transition(&old, &State::WaitingForIB);
+        if self.ib_status.available {
+            return;
         }
+        if matches!(
+            self.state,
+            State::WaitingForIB | State::Shutdown | State::WaitingForLaunch
+        ) {
+            return;
+        }
+        // Post-auth states are never interrupted unless explicit opt-in.
+        let is_post_auth = matches!(
+            self.state,
+            State::Connected
+                | State::DismissingPopups
+                | State::WaitingForApiReady
+                | State::ConfiguringApi
+        );
+        if is_post_auth && !self.config.ib_status.kick_active_session {
+            return;
+        }
+        log::warn!(
+            "IB system unavailable: {} — transitioning to WaitingForIB",
+            self.ib_status.reason
+        );
+        self.ib_status.return_state = Some(Box::new(self.state.clone()));
+        let old = self.state.clone();
+        self.state = State::WaitingForIB;
+        self.record_transition(&old, &State::WaitingForIB);
     }
 
     /// Abort the background client ID refresh task if running.
@@ -469,39 +564,76 @@ impl StateMachine {
         self.client_id_rx = None;
     }
 
-    /// Mint a `ConnectedProof` via the verifier and wrap it in `State::Connected`.
+    /// Start the TCP probe task — pings Gateway's API port every
+    /// `api_port_probe_interval_secs` seconds. Sets the shared
+    /// `api_port_probe_failed` AtomicBool to true after
+    /// `api_port_probe_fails_before_revoke` consecutive failures.
     ///
-    /// This is the single choke-point for entering `Connected`. No handler
-    /// should construct `State::Connected(...)` directly — the compiler
-    /// enforces this because `ConnectedProof::mint` is crate-private to
-    /// `state_machine::verifier` (only reachable via this helper).
-    ///
-    /// The revocation bus in `do_connected` provides ongoing verification;
-    /// this helper is for the promotion side and simply records what evidence
-    /// the caller had at mint time. The resulting proof carries
-    /// `snapshot_version` + `event_seq` for provenance, and `evidence`
-    /// bitflags for the family-level source inventory.
-    ///
-    /// Every successful mint logs a structured line so that postmortems can
-    /// reconstruct the full lifecycle of a Connected session by grepping
-    /// `"proof minted"` and `"proof revoked"`.
-    pub(super) fn try_enter_connected(
-        &mut self,
-        evidence: verifier::EvidenceKinds,
-    ) -> State {
-        let proof = verifier::ConnectedProof::mint(
-            self.snapshot_version,
-            self.observation.last_event_seq,
-            evidence,
-        );
-        log::info!(
-            "proof minted version={} seq={} evidence={:?} verifier_version={}",
-            proof.snapshot_version(),
-            proof.event_seq(),
-            proof.evidence().tags(),
-            proof.verifier_version(),
-        );
-        State::Connected(proof)
+    /// No-op when interval is 0 (disabled).
+    /// Safe to call when a task is already running — cancels the old one first.
+    fn start_api_port_probe(&mut self) {
+        self.stop_api_port_probe();
+        let interval = self.config.timing.api_port_probe_interval_secs;
+        if interval == 0 {
+            return;
+        }
+        let threshold = self.config.timing.api_port_probe_fails_before_revoke;
+        // Choose the API port based on trading mode.
+        let api_port = match self.config.auth.trading_mode {
+            crate::config::TradingMode::Paper => self.config.gateway.paper_api_port,
+            // Live and Both use the live port (each dual-mode process is
+            // spawned per-mode with its own state machine).
+            _ => self.config.gateway.live_api_port,
+        };
+        let failed_flag = self.api_port_probe_failed.clone();
+        failed_flag.store(false, std::sync::atomic::Ordering::Relaxed);
+        let handle = tokio::spawn(async move {
+            let addr = format!("127.0.0.1:{}", api_port);
+            let mut consecutive_failures: u32 = 0;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+                let connect_result = tokio::time::timeout(
+                    std::time::Duration::from_millis(200),
+                    tokio::net::TcpStream::connect(&addr),
+                )
+                .await;
+                let ok = matches!(connect_result, Ok(Ok(_)));
+                if ok {
+                    if consecutive_failures > 0 {
+                        log::debug!(
+                            "API port probe recovered after {} failures (addr={})",
+                            consecutive_failures, addr
+                        );
+                    }
+                    consecutive_failures = 0;
+                } else {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    log::debug!(
+                        "API port probe failed ({}/{}): addr={}",
+                        consecutive_failures, threshold, addr
+                    );
+                    if consecutive_failures >= threshold {
+                        log::warn!(
+                            "API port probe: {} consecutive failures on {} — signaling revocation",
+                            consecutive_failures, addr
+                        );
+                        failed_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                        // Once we've signaled, don't spam — keep ticking but the
+                        // state machine will transition away shortly and cancel us.
+                    }
+                }
+            }
+        });
+        self.api_port_probe_task = Some(handle);
+    }
+
+    /// Cancel the TCP probe task, if running.
+    fn stop_api_port_probe(&mut self) {
+        if let Some(handle) = self.api_port_probe_task.take() {
+            handle.abort();
+        }
+        self.api_port_probe_failed
+            .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Execute the transition for the current state, returning the next state.
@@ -518,10 +650,11 @@ impl StateMachine {
             State::DismissingPopups => self.do_dismiss_popups().await,
             State::WaitingForApiReady => self.do_wait_for_api_ready().await,
             State::ConfiguringApi => self.do_configure_api().await,
-            State::Connected(_) => self.do_connected().await,
+            State::Connected => self.do_connected().await,
             State::ReconnectingSession => self.do_reconnecting_session().await,
             State::Restarting => self.do_restart().await,
             State::WaitingForIB => self.do_waiting_for_ib().await,
+            State::WaitingForHitl2fa => self.do_waiting_for_hitl_2fa().await,
             State::Shutdown => Ok(State::Shutdown),
             State::Error(msg) => Ok(State::Error(msg.clone())),
         }
@@ -855,7 +988,9 @@ impl StateMachine {
                                 Ok(true) => {
                                     log::info!("Selected '{}' in device list", twofa_device);
                                     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                                    let _ = self.agent_client.click_button(win.id, "OK").await;
+                                    if let Err(e) = self.agent_client.click_button(win.id, "OK").await {
+                                        log::debug!("click OK on device selection failed: {}", e);
+                                    }
                                     log::info!("Clicked OK on device selection — waiting for 2FA challenge");
                                     self.twofa_device_selected = true;
                                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -973,15 +1108,53 @@ impl StateMachine {
         // Timeout check
         let timeout_secs = self.config.twofa.timeout_seconds;
         if self.state_entered_at.elapsed() > std::time::Duration::from_secs(timeout_secs) {
-            if self.config.twofa.relogin_after_timeout
-                || self.config.twofa.timeout_action == crate::config::TwoFaTimeoutAction::Restart
+            // If the configured action is exit (legacy), honor that.
+            if !self.config.twofa.relogin_after_timeout
+                && self.config.twofa.timeout_action == crate::config::TwoFaTimeoutAction::Exit
             {
-                log::warn!("2FA timed out after {}s — restarting", timeout_secs);
-                return Ok(State::Restarting);
-            } else {
                 log::error!("2FA timed out after {}s — shutting down", timeout_secs);
                 return Ok(State::Shutdown);
             }
+
+            // HITL backoff policy
+            self.consecutive_2fa_timeouts = self.consecutive_2fa_timeouts.saturating_add(1);
+            let backoff = &self.config.twofa.backoff;
+            let next = match backoff.on_timeout {
+                crate::config::TwoFaOnTimeout::RestartForever => {
+                    log::warn!(
+                        "2FA timed out after {}s — restarting (legacy mode, attempt {})",
+                        timeout_secs, self.consecutive_2fa_timeouts
+                    );
+                    State::Restarting
+                }
+                crate::config::TwoFaOnTimeout::HitlImmediately => {
+                    log::warn!(
+                        "2FA timed out after {}s — entering HITL immediately (hitl_immediately)",
+                        timeout_secs
+                    );
+                    State::WaitingForHitl2fa
+                }
+                crate::config::TwoFaOnTimeout::RestartThenHitl => {
+                    if self.consecutive_2fa_timeouts >= backoff.max_immediate_attempts {
+                        log::warn!(
+                            "2FA timed out after {}s — attempts exhausted ({}/{}), entering HITL",
+                            timeout_secs,
+                            self.consecutive_2fa_timeouts,
+                            backoff.max_immediate_attempts
+                        );
+                        State::WaitingForHitl2fa
+                    } else {
+                        log::warn!(
+                            "2FA timed out after {}s — restarting (attempt {}/{})",
+                            timeout_secs,
+                            self.consecutive_2fa_timeouts,
+                            backoff.max_immediate_attempts
+                        );
+                        State::Restarting
+                    }
+                }
+            };
+            return Ok(next);
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -1190,15 +1363,11 @@ impl StateMachine {
                 log::info!("API configuration complete");
                 self.config_retries = 0;
                 // Config success implies UI is responsive (we just drove the
-                // Configure → Settings dialog) and JVM is alive. Mint a proof
-                // with that evidence set. Ongoing verification is the job of
-                // the revocation bus in do_connected, not a gate here — we
-                // don't want a post-config label flicker to cause a restart
-                // loop (ConfiguringApi → Restarting → Launching → ...).
-                Ok(self.try_enter_connected(
-                    verifier::EvidenceKinds::SUPERVISOR_ALIVE
-                        | verifier::EvidenceKinds::WINDOW_INVENTORY,
-                ))
+                // Configure → Settings dialog) and JVM is alive. Ongoing
+                // verification is the job of the revocation bus in
+                // do_connected, not a gate here.
+                log::info!("Entered Connected via ConfiguringApi (post-config success)");
+                Ok(State::Connected)
             }
             Err(e) => {
                 // Close any menu left open by the failed attempt
@@ -1266,16 +1435,28 @@ impl StateMachine {
         if self.client_id_task.is_none() {
             let (ids_tx, ids_rx) = tokio::sync::watch::channel(Vec::<String>::new());
             let socket_path = self.config.agent.socket_path.clone();
+            // Defensive upper bound — a malformed agent or pathological tab
+            // enumeration should not be able to grow this Vec without bound.
+            // In practice the list is ≤20 entries; 256 leaves headroom while
+            // capping worst case.
+            const MAX_CLIENT_IDS: usize = 256;
             let handle = tokio::spawn(async move {
                 loop {
                     let mut ids = Vec::new();
                     let client = crate::agent_client::AgentClient::new(&socket_path);
                     if let Ok(windows) = client.list_windows().await {
-                        for w in &windows {
+                        'outer: for w in &windows {
                             if let Ok(tabs_data) = client.list_tabs(w.id).await {
                                 if let Some(tabs) = tabs_data.get("tabs").and_then(|t| t.as_array()) {
                                     for tab in tabs {
                                         if let Some(title) = tab.get("title").and_then(|t| t.as_str()) {
+                                            if ids.len() >= MAX_CLIENT_IDS {
+                                                log::warn!(
+                                                    "client-ID refresh: hit {} entries, capping",
+                                                    MAX_CLIENT_IDS
+                                                );
+                                                break 'outer;
+                                            }
                                             ids.push(title.to_string());
                                         }
                                     }
@@ -1311,17 +1492,36 @@ impl StateMachine {
                 log::info!("No autorestart token — crash or unexpected exit");
             }
 
-            self.stop_socat();
+            // stop_socat / abort_client_id_task / connected_window_class /
+            // handler_registry.reset are handled centrally in apply_transition
+            // when we leave Connected — see the curr_is_connected branch.
             self.warm_restart_pending = autorestart_hash;
-            self.abort_client_id_task();
             let _ = std::fs::remove_file(&self.config.agent.socket_path);
             // Record & fire — zero debounce ⇒ matures immediately.
-            let src = verifier::RevocationSource::JvmDied;
+            let src = revocation::RevocationSource::JvmDied;
             let next = src.next_state();
             if self.revocation.observe(src).is_some() {
                 log::warn!("proof revoked source=jvm_died next={}", next);
             }
             return Ok(next);
+        }
+
+        // --- API port listener ---
+        // Ground-truth TCP probe to Gateway's listener. The probe task tracks
+        // consecutive failures independently; we just consume the signal here.
+        if self.api_port_probe_failed.load(std::sync::atomic::Ordering::Relaxed) {
+            let src = revocation::RevocationSource::ApiPortListenerLost;
+            if let Some(fired) = self.revocation.observe(src) {
+                let next = fired.next_state();
+                log::warn!(
+                    "proof revoked source=api_port_listener_lost next={}",
+                    next
+                );
+                // Clear the flag so if we come back to Connected later we start fresh.
+                self.api_port_probe_failed
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                return Ok(next);
+            }
         }
 
         // --- Socat health (not a revocation — just self-heal) ---
@@ -1334,69 +1534,65 @@ impl StateMachine {
         }
 
         // --- Re-login dialog (immediate) ---
+        // Cleanup is centralized in apply_transition — every revocation
+        // branch below just logs and returns the next state.
         if self.observation.has_relogin_dialog() {
-            let src = verifier::RevocationSource::ReloginDialog;
+            let src = revocation::RevocationSource::ReloginDialog;
             if self.revocation.observe(src.clone()).is_some() {
                 let next = src.next_state();
                 log::warn!("proof revoked source=relogin_dialog next={}", next);
-                self.abort_client_id_task();
-                self.stop_socat();
                 return Ok(next);
             }
         } else {
-            self.revocation.clear("relogin_dialog");
+            self.revocation.clear(revocation::RevocationTag::ReloginDialog);
         }
 
         // --- Session conflict dialog (immediate) ---
         if self.observation.has_session_conflict() {
-            let src = verifier::RevocationSource::SessionConflict;
+            let src = revocation::RevocationSource::SessionConflict;
             if self.revocation.observe(src.clone()).is_some() {
                 let next = src.next_state();
                 log::warn!("proof revoked source=session_conflict next={}", next);
-                self.abort_client_id_task();
-                self.stop_socat();
                 return Ok(next);
             }
         } else {
-            self.revocation.clear("session_conflict");
+            self.revocation.clear(revocation::RevocationTag::SessionConflict);
         }
 
-        // --- Error dialog on Gateway window (500 ms debounce) ---
-        // Match non-config "IBKR Gateway"-titled dialogs that aren't the main
-        // window itself. We also opportunistically click OK on them (benign
-        // recovery action, orthogonal to revocation).
-        let error_dialog_title = self.observation.windows.iter().find_map(|w| {
-            let t = w.title.to_lowercase();
-            let is_error = (t.contains("ibkr gateway") || t.contains("ib gateway"))
-                && !t.contains("configuration")
-                && w.id != self.observation.main_gateway_window().map(|m| m.id).unwrap_or(0);
-            is_error.then(|| w.title.clone())
-        });
-        if let Some(title) = error_dialog_title {
-            // Click OK (idempotent recovery action — separate from revocation)
-            if let Ok(windows) = self.agent_client.list_windows().await {
-                for w in &windows {
-                    let t = w.title.to_lowercase();
-                    if (t.contains("ibkr gateway") || t.contains("ib gateway"))
-                        && !t.contains("configuration")
-                    {
-                        let _ = self.agent_client.click_button(w.id, "OK").await;
-                    }
-                }
-            }
-            let src = verifier::RevocationSource::ErrorDialog(title);
-            if let Some(fired) = self.revocation.observe(src) {
-                let next = fired.next_state();
-                log::warn!("proof revoked source=error_dialog next={}", next);
-                self.connected_window_class = None;
-                self.handler_registry.reset();
-                self.abort_client_id_task();
-                self.stop_socat();
-                return Ok(next);
-            }
-        } else {
-            self.revocation.clear("error_dialog");
-        }
+        // --- Fetch window list once per tick ---
+        // Previously this HTTP round-trip happened twice: once in the error-
+        // dialog OK-click loop, once in the active probe. That doubled tick
+        // latency AND created a race window where the two fetches could see
+        // different Gateway state. Fetch once, reuse everywhere.
+        let windows_snapshot = self.agent_client.list_windows().await.ok();
+        let main_id: Option<u64> = self.observation.main_gateway_window().map(|m| m.id);
+
+        // --- Error dialog revocation: deliberately not wired ---
+        // The old title-scan predicate matched any non-main "IBKR Gateway"
+        // titled dialog and treated it as a session-loss signal. That
+        // conflates "unexpected dialog exists" with "Gateway session has
+        // failed" — they are different things. Benign cases we've hit
+        // in practice: "Restart in progress" during Gateway's own warm
+        // restart, the BBO-warning post-config notification ("Note: You
+        // can enable precaution…"), and the generic "IBKR Gateway" modal
+        // from GatewayNotificationHandler's view. Every one of those
+        // produced a false revocation that forced an unneeded full
+        // re-auth cycle (and a second IB Key prompt for the operator).
+        //
+        // Canonical session-loss signals live in two other sources:
+        //   * DisconnectedLabelStable — "API Server: disconnected" label
+        //     on the Connection Status panel (Gateway's own truth).
+        //   * LoginFormVisible — main window reverted to the login form.
+        //
+        // Specific dialog handlers (GatewayNotificationHandler,
+        // PaperWarningHandler, AutoRestartConfirmationDialog, …) dismiss
+        // known benign dialogs via the handler_registry dispatch later
+        // in this tick. Unknown unexpected dialogs are informational via
+        // the AgentEvent::ErrorDialog stream; they do NOT revoke.
+        //
+        // Keep the clear() call so any in-flight debounce from earlier
+        // versions drops cleanly on upgrade.
+        self.revocation.clear(revocation::RevocationTag::ErrorDialog);
 
         // --- Login form via observation cache (1s debounce) ---
         // Event-driven detection: the agent's has_login_button flag is set
@@ -1409,7 +1605,12 @@ impl StateMachine {
         if let Some(main) = self.observation.main_gateway_window() {
             if let Some(ref expected_class) = self.connected_window_class {
                 if main.class != *expected_class && !main.has_login_button {
-                    log::info!(
+                    // Benign morphs (e.g. `ibgateway.ay` → `ibgateway.az`) happen
+                    // several times per day during normal Gateway operation.
+                    // Keep it at debug so production logs don't drown in them;
+                    // a morph paired with a login form is caught separately by
+                    // the LoginFormVisible revocation source.
+                    log::debug!(
                         "Window class changed {} → {} (no login form — benign UI update)",
                         expected_class, main.class
                     );
@@ -1419,25 +1620,50 @@ impl StateMachine {
         }
 
         // --- Active probe: dump_components on main window ---
-        // Runs every do_connected tick (not gated by modulo timer anymore) so
-        // debounce timers can mature on schedule. Per-source clear() resets
-        // the debounce when the contradiction stops.
+        // The dump_components loop is the expensive part of the tick — one
+        // HTTP round-trip per matching window, each returning the full UI
+        // tree. Gate it so it only runs when:
+        //   1. a revocation source is already pending (debounce must tick),
+        //   2. or the observation cache shows a login button / error dialog
+        //      (event-driven signal suggesting we should look),
+        //   3. or periodically (3s out of every 30s window) as a fallback
+        //      so that label-only disconnects — where Gateway updates the
+        //      "API Server: connected" label to "disconnected" without any
+        //      event firing — are eventually detected within 30s.
+        //
+        // In steady healthy state (no dialogs, no login-button, no pending
+        // debounce) this skips ~90% of probes except the periodic fallback.
+        let cache_suggests_probe = observed_login_button
+            || self.observation.windows.iter().any(|w| {
+                let t = w.title.to_lowercase();
+                (t.contains("ibkr gateway") || t.contains("ib gateway"))
+                    && !t.contains("configuration")
+                    && Some(w.id) != main_id
+            });
+        let periodic_fallback =
+            self.state_entered_at.elapsed().as_secs() % 30 < 3;
+        let probe_needed = self.revocation.any_pending()
+            || cache_suggests_probe
+            || periodic_fallback;
+
         let mut probe_login_form = false;
         let mut probe_disconnected_label = false;
         let mut probe_twofa = false;
-        if let Ok(windows) = self.agent_client.list_windows().await {
-            for w in &windows {
-                let t = w.title.to_lowercase();
-                if t.contains("second factor") {
-                    probe_twofa = true;
-                }
-                if t.contains("ib gateway") || t.contains("ibkr gateway") {
-                    if let Ok(components) = self.agent_client.dump_components(w.id).await {
-                        if components_have_login_form(&components) {
-                            probe_login_form = true;
-                        }
-                        if components_indicate_disconnected(&components) {
-                            probe_disconnected_label = true;
+        if let Some(ref windows) = windows_snapshot {
+            if probe_needed {
+                for w in windows {
+                    let t = w.title.to_lowercase();
+                    if t.contains("second factor") {
+                        probe_twofa = true;
+                    }
+                    if t.contains("ib gateway") || t.contains("ibkr gateway") {
+                        if let Ok(components) = self.agent_client.dump_components(w.id).await {
+                            if components_have_login_form(&components) {
+                                probe_login_form = true;
+                            }
+                            if components_indicate_disconnected(&components) {
+                                probe_disconnected_label = true;
+                            }
                         }
                     }
                 }
@@ -1445,8 +1671,10 @@ impl StateMachine {
 
             // Reconciliation: dispatch handlers for any unprocessed windows.
             // Preserves the existing behavior of letting dialog handlers
-            // auto-dismiss popups, etc.
-            for win in &windows {
+            // auto-dismiss popups, etc. Runs every tick regardless of
+            // probe_needed because handlers are cheap and this is our
+            // popup-auto-dismiss path during Connected.
+            for win in windows {
                 let _ = self.handler_registry.dispatch(&self.agent_client, win).await;
             }
         }
@@ -1462,34 +1690,26 @@ impl StateMachine {
         // --- Login form revocation (1s debounce) ---
         let login_form_observed = observed_login_button || probe_login_form;
         if login_form_observed {
-            let src = verifier::RevocationSource::LoginFormVisible;
+            let src = revocation::RevocationSource::LoginFormVisible;
             if let Some(fired) = self.revocation.observe(src) {
                 let next = fired.next_state();
                 log::warn!("proof revoked source=login_form_visible next={}", next);
-                self.connected_window_class = None;
-                self.handler_registry.reset();
-                self.abort_client_id_task();
-                self.stop_socat();
                 return Ok(next);
             }
         } else {
-            self.revocation.clear("login_form_visible");
+            self.revocation.clear(revocation::RevocationTag::LoginFormVisible);
         }
 
         // --- Disconnected label revocation (2s debounce) ---
         if probe_disconnected_label {
-            let src = verifier::RevocationSource::DisconnectedLabelStable;
+            let src = revocation::RevocationSource::DisconnectedLabelStable;
             if let Some(fired) = self.revocation.observe(src) {
                 let next = fired.next_state();
                 log::warn!("proof revoked source=disconnected_label next={}", next);
-                self.connected_window_class = None;
-                self.handler_registry.reset();
-                self.abort_client_id_task();
-                self.stop_socat();
                 return Ok(next);
             }
         } else {
-            self.revocation.clear("disconnected_label");
+            self.revocation.clear(revocation::RevocationTag::DisconnectedLabelStable);
         }
 
         // Sync client IDs from background task (lock-free watch channel)
@@ -1502,16 +1722,37 @@ impl StateMachine {
             }
         }
 
+        // Counter reset under stable policy: only reset after Connected has been
+        // sustained for stable_secs. Prevents flapping sessions from "laundering"
+        // the failure counter. any_reach resets immediately in apply_transition.
+        if matches!(
+            self.config.twofa.backoff.counter_reset,
+            crate::config::CounterResetScope::Stable
+        ) && self.consecutive_2fa_timeouts > 0
+        {
+            if let Some(connected_since) = self.connected_continuously_since {
+                let stable_threshold = std::time::Duration::from_secs(
+                    self.config.twofa.backoff.stable_secs,
+                );
+                if connected_since.elapsed() >= stable_threshold {
+                    log::info!(
+                        "Connected stable for {}s — resetting 2FA attempt counter (was {})",
+                        self.config.twofa.backoff.stable_secs,
+                        self.consecutive_2fa_timeouts,
+                    );
+                    self.consecutive_2fa_timeouts = 0;
+                }
+            }
+        }
+
         // Signal/command/cold-restart/event handling is done by the outer
         // tokio::select! in run(). Events provide instant dialog detection.
         // This sleep is now just a reconciliation tick — events handle the fast path.
 
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-        // Stay-Connected self-return. RETAIN the existing proof (don't re-mint)
-        // — continuous re-verification every tick would defeat the debounce
-        // semantics on the promotion side. The revocation bus decides when
-        // to demote; until it does, the original proof remains valid.
-        Ok(self.state.clone())
+        // Stay-Connected self-return. The revocation bus decides when to
+        // demote; until it does, keep returning the same state.
+        Ok(State::Connected)
     }
 
     /// Single-step graduated session recovery.
@@ -1532,7 +1773,9 @@ impl StateMachine {
                 for w in &windows {
                     let t = w.title.to_lowercase();
                     if t.contains("re-login") || t.contains("login is required") {
-                        let _ = self.agent_client.click_button(w.id, "Cancel").await;
+                        if let Err(e) = self.agent_client.click_button(w.id, "Cancel").await {
+                            log::debug!("click Cancel on re-login dialog failed: {}", e);
+                        }
                     }
                 }
             }
@@ -1646,14 +1889,9 @@ impl StateMachine {
                 }
 
                 if confirmed_authenticated {
-                    log::info!("RE-LOGIN: Gateway authenticated (positive confirmation)");
+                    log::info!("RE-LOGIN: Gateway authenticated (positive confirmation) → Connected");
                     self.relogin_attempts = 0;
-                    // Positive confirmation was via UI inspection — record
-                    // UI_SNAPSHOT as the evidence source backing this mint.
-                    return Ok(self.try_enter_connected(
-                        verifier::EvidenceKinds::SUPERVISOR_ALIVE
-                            | verifier::EvidenceKinds::UI_SNAPSHOT,
-                    ));
+                    return Ok(State::Connected);
                 }
 
                 // Inconclusive — stay in ReconnectingSession (retry next tick)
@@ -1662,7 +1900,9 @@ impl StateMachine {
 
             if let Some(d) = dialog {
                 log::info!("Clicking Re-login (attempt {}/{})", self.relogin_attempts, max);
-                let _ = self.agent_client.click_button(d.id, "Re-login").await;
+                if let Err(e) = self.agent_client.click_button(d.id, "Re-login").await {
+                    log::debug!("click Re-login failed: {}", e);
+                }
                 self.handler_registry.reset();
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 return Ok(State::WaitingForLogin);
@@ -1731,6 +1971,109 @@ impl StateMachine {
 
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         Ok(State::WaitingForIB)
+    }
+
+    /// Human-in-the-loop 2FA wait. Exits on:
+    ///   - HITL_RESUME command (consumed by command handler → sets a flag)
+    ///   - scheduled auto-retry (intervals_minutes)
+    ///   - cold restart preempting (if cold_restart_preempts_hitl = true)
+    ///
+    /// On entry (first tick): logs arrival, ntfy-send attempt (if ntfy strategy),
+    /// schedules the first auto-retry deadline.
+    async fn do_waiting_for_hitl_2fa(&mut self) -> Result<State, StateMachineError> {
+        let backoff = self.config.twofa.backoff.clone();
+
+        // First tick of this HITL entry — initialize bookkeeping.
+        if self.hitl_entered_at.is_none() {
+            self.hitl_entered_at = Some(Instant::now());
+            self.hitl_intervals_index = 0;
+            self.hitl_ntfy_attempts = 0;
+            self.hitl_ntfy_sent = false;
+            // Schedule the first auto-retry deadline if strategy involves a timer.
+            self.hitl_next_retry_at = Self::compute_next_hitl_deadline(
+                &backoff.strategy,
+                &backoff.intervals_minutes,
+                0,
+            );
+            log::warn!(
+                "HITL 2FA entered: strategy={:?} next_retry_at={:?} callback_valid_hours={} attempts_exhausted={}",
+                backoff.strategy,
+                self.hitl_next_retry_at.map(|t| t.saturating_duration_since(Instant::now()).as_secs()),
+                backoff.callback_valid_hours,
+                self.consecutive_2fa_timeouts,
+            );
+        }
+
+        // Cold restart preemption.
+        if backoff.cold_restart_preempts_hitl {
+            // Only drain the cold-restart channel when we're going to act on it.
+            // Under preempt=false, a cold restart signal sits in the channel and
+            // will be consumed by the main event loop once we exit HITL.
+            if let Ok(reason) = self.cold_restart_rx.try_recv() {
+                log::warn!(
+                    "HITL preempted by cold restart ({:?}) — exiting to Restarting",
+                    reason
+                );
+                return Ok(State::Restarting);
+            }
+        }
+
+        // Scheduled auto-retry deadline check.
+        if let Some(deadline) = self.hitl_next_retry_at {
+            if Instant::now() >= deadline {
+                self.hitl_intervals_index = self
+                    .hitl_intervals_index
+                    .saturating_add(1);
+                self.hitl_next_retry_at = Self::compute_next_hitl_deadline(
+                    &backoff.strategy,
+                    &backoff.intervals_minutes,
+                    self.hitl_intervals_index,
+                );
+                log::warn!(
+                    "HITL auto-retry firing (interval index {}), next retry scheduled in {:?}s",
+                    self.hitl_intervals_index,
+                    self.hitl_next_retry_at
+                        .map(|t| t.saturating_duration_since(Instant::now()).as_secs()),
+                );
+                return Ok(State::Restarting);
+            }
+        }
+
+        // Note: HITL_RESUME dispatch happens in the command handler (mod.rs:
+        // process_commands) which sets `self.state = State::Restarting`
+        // directly and the main loop picks it up next tick.
+
+        // Sleep briefly then come back — we want to remain responsive to
+        // commands, cold restart, and the periodic deadline.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        self.process_queries().await;
+        Ok(State::WaitingForHitl2fa)
+    }
+
+    /// Compute the next auto-retry absolute deadline given the strategy +
+    /// intervals list + current index. Returns `None` when the strategy does
+    /// not include a timer, or when intervals is empty.
+    fn compute_next_hitl_deadline(
+        strategy: &crate::config::HitlStrategy,
+        intervals: &[u32],
+        index: usize,
+    ) -> Option<Instant> {
+        if !matches!(
+            strategy,
+            crate::config::HitlStrategy::Periodic | crate::config::HitlStrategy::Both
+        ) {
+            return None;
+        }
+        if intervals.is_empty() {
+            return None;
+        }
+        // Traverse the list, then hold at the last element.
+        let minutes = if index < intervals.len() {
+            intervals[index]
+        } else {
+            intervals[intervals.len() - 1]
+        };
+        Some(Instant::now() + std::time::Duration::from_secs(u64::from(minutes) * 60))
     }
 
     async fn do_shutdown(&mut self) -> Result<(), StateMachineError> {
@@ -1893,6 +2236,20 @@ impl StateMachine {
                     log::error!("SETSTATE: unknown state '{}'", name);
                     Ok(())
                 }
+            }
+            Command::HitlResume => {
+                if matches!(self.state, State::WaitingForHitl2fa) {
+                    log::warn!("HITL_RESUME received — transitioning to Restarting");
+                    let old = self.state.clone();
+                    self.state = State::Restarting;
+                    self.record_transition(&old, &State::Restarting);
+                } else {
+                    log::warn!(
+                        "HITL_RESUME ignored — not in WaitingForHitl2fa (current={})",
+                        self.state
+                    );
+                }
+                Ok(())
             }
             Command::SetRestartTime(ref time_str) => {
                 log::info!("SETRESTART: setting auto-restart time to {} (UTC)", time_str);
@@ -2385,7 +2742,13 @@ login_dialog_timeout_secs = 0
             commands: cmd_rx,
             queries: q_rx,
             cold_restart: cr_rx,
-            agent_events: None,
+            agent_events: {
+                // Dummy receiver — drop the sender so the channel is closed
+                // from the start. The state machine's select! loop treats a
+                // closed receiver as "no events" via pattern match.
+                let (_tx, rx) = mpsc::channel(1);
+                rx
+            },
         };
 
         let (snapshot_tx, _snapshot_rx) = watch::channel(Arc::new(QuerySnapshot::initializing()));
@@ -2523,7 +2886,7 @@ login_dialog_timeout_secs = 0
         };
 
         let mut sm = make_test_state_machine(mock);
-        sm.state = State::Connected(verifier::ConnectedProof::forced());
+        sm.state = State::Connected;
         sm.state_entered_at = Instant::now() - Duration::from_secs(30);
         sm.connected_window_class = Some("ibgateway.ay".to_string());
         sm.observation.synced = true;
@@ -2532,7 +2895,7 @@ login_dialog_timeout_secs = 0
         // call matures immediately. Without this seed, the test would need
         // two calls to `do_connected()` with a real 2s wait between them.
         sm.revocation.seed_first_seen_for_tests(
-            verifier::RevocationSource::DisconnectedLabelStable,
+            revocation::RevocationSource::DisconnectedLabelStable,
             Duration::from_secs(3),
         );
 
@@ -2573,7 +2936,7 @@ login_dialog_timeout_secs = 0
 
         let result = sm.do_configure_api().await.expect("handler should not error");
         assert!(
-            matches!(result, State::Connected(_)),
+            result == State::Connected,
             "no API settings configured ⇒ skip dialog ⇒ Connected (valid no-op path), got {:?}",
             result
         );
@@ -2598,7 +2961,7 @@ login_dialog_timeout_secs = 0
         };
 
         let mut sm = make_test_state_machine(mock);
-        sm.state = State::Connected(verifier::ConnectedProof::forced());
+        sm.state = State::Connected;
         sm.state_entered_at = Instant::now() - Duration::from_secs(30);
         sm.connected_window_class = Some("ibgateway.ay".to_string());
         sm.observation.synced = true;
@@ -2607,12 +2970,12 @@ login_dialog_timeout_secs = 0
         let result = sm.do_connected().await.expect("handler should not error");
 
         assert!(
-            matches!(result, State::Connected(_)),
+            result == State::Connected,
             "single-tick 'disconnected' observation must NOT fire the 2s-debounced revocation; got {:?}",
             result
         );
         assert!(
-            sm.revocation.is_pending("disconnected_label"),
+            sm.revocation.is_pending(revocation::RevocationTag::DisconnectedLabelStable),
             "the disconnected_label source should be in its debounce window"
         );
     }
@@ -2632,15 +2995,15 @@ login_dialog_timeout_secs = 0
         };
 
         let mut sm = make_test_state_machine(mock);
-        sm.state = State::Connected(verifier::ConnectedProof::forced());
+        sm.state = State::Connected;
         sm.state_entered_at = Instant::now() - Duration::from_secs(30);
         sm.connected_window_class = Some("ibgateway.ay".to_string());
         sm.observation.synced = true;
 
         // Tick 1: disconnected observed — pending, stays Connected.
         let r1 = sm.do_connected().await.unwrap();
-        assert!(matches!(r1, State::Connected(_)), "tick 1 still Connected");
-        assert!(sm.revocation.is_pending("disconnected_label"));
+        assert!(r1 == State::Connected, "tick 1 still Connected");
+        assert!(sm.revocation.is_pending(revocation::RevocationTag::DisconnectedLabelStable));
 
         // Now the "disconnect" clears — Gateway's labels refresh to "connected".
         dump["labels"] = serde_json::json!(
@@ -2657,9 +3020,9 @@ login_dialog_timeout_secs = 0
 
         // Tick 2: healthy — debounce must clear, still Connected.
         let r2 = sm.do_connected().await.unwrap();
-        assert!(matches!(r2, State::Connected(_)), "tick 2 still Connected after heal");
+        assert!(r2 == State::Connected, "tick 2 still Connected after heal");
         assert!(
-            !sm.revocation.is_pending("disconnected_label"),
+            !sm.revocation.is_pending(revocation::RevocationTag::DisconnectedLabelStable),
             "debounce must clear when contradiction stops (transient disconnect resolved)"
         );
     }
@@ -2679,7 +3042,7 @@ login_dialog_timeout_secs = 0
         };
 
         let mut sm = make_test_state_machine(mock);
-        sm.state = State::Connected(verifier::ConnectedProof::forced());
+        sm.state = State::Connected;
         sm.state_entered_at = Instant::now() - Duration::from_secs(30);
         sm.connected_window_class = Some("ibgateway.ay".to_string());
         sm.observation.synced = true;
@@ -2690,7 +3053,7 @@ login_dialog_timeout_secs = 0
         // Assert: no transition — stays Connected (handler returns next state to loop back).
         // Uses matches! rather than assert_eq! because proof instances differ by issued_at.
         assert!(
-            matches!(result, State::Connected(_)),
+            result == State::Connected,
             "healthy Connected state must not self-transition just because a liveness tick fired, got {:?}",
             result
         );
@@ -2739,7 +3102,7 @@ login_dialog_timeout_secs = 0
 
         // The law: no path may reach Connected without positive evidence.
         assert!(
-            !matches!(result, State::Connected(_)),
+            result != State::Connected,
             "WaitingForApiReady timeout MUST NOT promote to Connected — got {:?}",
             result
         );
@@ -2755,7 +3118,7 @@ login_dialog_timeout_secs = 0
     /// state machine to that source's `next_state()`.
     #[tokio::test]
     async fn test_each_revocation_source_demotes_connected() {
-        use verifier::RevocationSource;
+        use revocation::RevocationSource;
 
         // Build a set of "this source is currently contradicting" conditions
         // by staging the observation cache / mock / revocation tracker so that
@@ -2769,7 +3132,7 @@ login_dialog_timeout_secs = 0
                 ..Default::default()
             };
             let mut sm = make_test_state_machine(mock);
-            sm.state = State::Connected(verifier::ConnectedProof::forced());
+            sm.state = State::Connected;
             sm.observation.synced = true;
             // Inject a re-login dialog into the observation cache.
             sm.observation.window_opened(
@@ -2795,7 +3158,7 @@ login_dialog_timeout_secs = 0
                 ..Default::default()
             };
             let mut sm = make_test_state_machine(mock);
-            sm.state = State::Connected(verifier::ConnectedProof::forced());
+            sm.state = State::Connected;
             sm.observation.synced = true;
             sm.observation.window_opened(
                 99,
@@ -2824,7 +3187,7 @@ login_dialog_timeout_secs = 0
                 ..Default::default()
             };
             let mut sm = make_test_state_machine(mock);
-            sm.state = State::Connected(verifier::ConnectedProof::forced());
+            sm.state = State::Connected;
             sm.connected_window_class = Some("ibgateway.ay".to_string());
             sm.observation.synced = true;
             sm.revocation.seed_first_seen_for_tests(
@@ -2854,7 +3217,7 @@ login_dialog_timeout_secs = 0
                 ..Default::default()
             };
             let mut sm = make_test_state_machine(mock);
-            sm.state = State::Connected(verifier::ConnectedProof::forced());
+            sm.state = State::Connected;
             sm.connected_window_class = Some("ibgateway.ay".to_string());
             sm.observation.synced = true;
             sm.revocation.seed_first_seen_for_tests(
@@ -2879,7 +3242,6 @@ login_dialog_timeout_secs = 0
     /// from Phase 1 — kept here as a parametrized law statement.
     #[tokio::test]
     async fn test_transient_contradiction_preserves_proof() {
-        use verifier::RevocationSource;
         let mut sm = make_test_state_machine(MockAgent {
             windows: vec![gateway_window()],
             dump_response: serde_json::json!({
@@ -2888,13 +3250,13 @@ login_dialog_timeout_secs = 0
             }),
             ..Default::default()
         });
-        sm.state = State::Connected(verifier::ConnectedProof::forced());
+        sm.state = State::Connected;
         sm.connected_window_class = Some("ibgateway.ay".to_string());
         sm.observation.synced = true;
 
         // Tick 1: observe contradiction, debounce starts.
-        assert!(matches!(sm.do_connected().await.unwrap(), State::Connected(_)));
-        assert!(sm.revocation.is_pending("disconnected_label"));
+        assert!(sm.do_connected().await.unwrap() == State::Connected);
+        assert!(sm.revocation.is_pending(revocation::RevocationTag::DisconnectedLabelStable));
 
         // Heal the contradiction — subsequent tick must clear the debounce.
         sm.agent_client = AgentClient::mock(MockAgent {
@@ -2905,17 +3267,17 @@ login_dialog_timeout_secs = 0
             }),
             ..Default::default()
         });
-        assert!(matches!(sm.do_connected().await.unwrap(), State::Connected(_)));
+        assert!(sm.do_connected().await.unwrap() == State::Connected);
         assert!(
-            !sm.revocation.is_pending("disconnected_label"),
+            !sm.revocation.is_pending(revocation::RevocationTag::DisconnectedLabelStable),
             "transient contradiction must clear the debounce"
         );
 
         // Sanity: explicit source variants respect the law.
         for source_tag in [
-            RevocationSource::LoginFormVisible.tag(),
-            RevocationSource::DisconnectedLabelStable.tag(),
-            RevocationSource::ErrorDialog(String::new()).tag(),
+            revocation::RevocationTag::LoginFormVisible,
+            revocation::RevocationTag::DisconnectedLabelStable,
+            revocation::RevocationTag::ErrorDialog,
         ] {
             assert!(
                 !sm.revocation.is_pending(source_tag),
@@ -2925,63 +3287,4 @@ login_dialog_timeout_secs = 0
         }
     }
 
-    /// Provenance rule: the proof minted by `try_enter_connected` must
-    /// faithfully record the evidence bitflags the caller supplied.
-    #[tokio::test]
-    async fn test_proof_provenance_is_captured() {
-        use verifier::EvidenceKinds;
-        let mock = MockAgent::default();
-        let mut sm = make_test_state_machine(mock);
-        sm.snapshot_version = 42;
-        sm.observation.last_event_seq = 1234;
-
-        let wanted = EvidenceKinds::SUPERVISOR_ALIVE | EvidenceKinds::UI_SNAPSHOT;
-        let state = sm.try_enter_connected(wanted);
-
-        match state {
-            State::Connected(proof) => {
-                assert_eq!(
-                    proof.snapshot_version(), 42,
-                    "snapshot_version must match the state machine's current counter"
-                );
-                assert_eq!(
-                    proof.event_seq(), 1234,
-                    "event_seq must match the observation cache's sequence number"
-                );
-                assert_eq!(
-                    proof.evidence(), wanted,
-                    "evidence bitflags must be exactly what the caller passed"
-                );
-                assert!(
-                    !proof.is_forced(),
-                    "real verifier output must not carry the FORCED marker"
-                );
-                assert!(
-                    proof.age() < Duration::from_secs(1),
-                    "a freshly-minted proof must have sub-second age"
-                );
-            }
-            other => panic!("try_enter_connected must return State::Connected(_), got {:?}", other),
-        }
-    }
-
-    /// SETSTATE Connected debug override produces a distinct "forced" proof
-    /// so operators can tell an override apart from a real verifier result.
-    #[test]
-    fn test_setstate_produces_forced_proof() {
-        let state = State::from_name("Connected").expect("Connected parses");
-        match state {
-            State::Connected(proof) => {
-                assert!(
-                    proof.is_forced(),
-                    "SETSTATE Connected must produce a forced proof"
-                );
-                assert!(
-                    proof.evidence().contains(verifier::EvidenceKinds::FORCED),
-                    "forced proof must carry EvidenceKinds::FORCED"
-                );
-            }
-            _ => panic!("expected State::Connected"),
-        }
-    }
 }

@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+use secrecy::ExposeSecret;
+
 use crate::types::{Query, QuerySnapshot};
 
 use super::types::{client_advisory, State, StateMachine};
@@ -90,7 +92,7 @@ impl StateMachine {
             .unwrap_or(false);
         let socat_pid = self.socat_process.as_ref().map(|c| c.id());
 
-        let is_connected = matches!(self.state, State::Connected(_));
+        let is_connected = self.state == State::Connected;
         let (should_connect, should_wait, wait_reason, client_id_likely_stale) =
             client_advisory(&self.state);
 
@@ -99,27 +101,10 @@ impl StateMachine {
         // Use cached client IDs (refreshed every 30s in do_connected)
         let client_ids = &self.cached_client_ids;
 
-        // Extract ConnectedProof provenance for external observers. Present
-        // only when state is Connected; null otherwise. Strictly additive —
-        // existing STATUS consumers that ignore unknown fields keep working.
-        let proof_json = if let State::Connected(ref proof) = self.state {
-            serde_json::json!({
-                "snapshot_version": proof.snapshot_version(),
-                "event_seq": proof.event_seq(),
-                "evidence": proof.evidence().tags(),
-                "verifier_version": proof.verifier_version(),
-                "age_secs": proof.age().as_secs(),
-                "forced": proof.is_forced(),
-            })
-        } else {
-            serde_json::Value::Null
-        };
-
         serde_json::json!({
             "version": env!("IBCTL_VERSION"),
             "ready": is_connected && socat_running,
             "state": self.state.to_string(),
-            "proof": proof_json,
             "trading_mode": self.config.auth.trading_mode.to_string(),
             "uptime_secs": uptime,
             "connected_uptime_secs": connected_uptime,
@@ -159,8 +144,30 @@ impl StateMachine {
                 "should_wait": should_wait,
                 "wait_reason": wait_reason,
                 "client_id_likely_stale": client_id_likely_stale,
-            }
+            },
+            "hitl": if self.state == State::WaitingForHitl2fa {
+                serde_json::json!({
+                    "active": true,
+                    "entered_at_secs_ago": self.hitl_entered_at
+                        .map(|t| t.elapsed().as_secs()),
+                    "attempts_exhausted": self.stats.relogins_today.max(self.consecutive_2fa_timeouts_snapshot()),
+                    "consecutive_2fa_timeouts": self.consecutive_2fa_timeouts_snapshot(),
+                    "next_retry_in_secs": self.hitl_next_retry_at
+                        .map(|t| t.saturating_duration_since(std::time::Instant::now()).as_secs()),
+                    "intervals_index": self.hitl_intervals_index,
+                    "ntfy_sent": self.hitl_ntfy_sent,
+                    "ntfy_attempts": self.hitl_ntfy_attempts,
+                })
+            } else {
+                serde_json::Value::Null
+            },
         }).to_string()
+    }
+
+    /// Accessor so build_status_json can read the counter without a borrow
+    /// conflict (the outer call holds `&mut self` for try_wait on processes).
+    fn consecutive_2fa_timeouts_snapshot(&self) -> u32 {
+        self.consecutive_2fa_timeouts
     }
 
     /// Build the STATE JSON response.
@@ -173,11 +180,33 @@ impl StateMachine {
 
     /// Build the CONFIG JSON response (passwords masked).
     fn build_config_json(&self) -> String {
+        let backoff = &self.config.twofa.backoff;
         serde_json::json!({
             "auth": {
                 "username": self.config.auth.username,
                 "trading_mode": self.config.auth.trading_mode.to_string(),
                 "password": "********",
+            },
+            "twofa": {
+                "provider": format!("{:?}", self.config.twofa.provider).to_lowercase(),
+                "timeout_action": format!("{:?}", self.config.twofa.timeout_action).to_lowercase(),
+                "timeout_seconds": self.config.twofa.timeout_seconds,
+                "device": self.config.twofa.device,
+                "relogin_after_timeout": self.config.twofa.relogin_after_timeout,
+                "has_secret": self.config.twofa.has_secret,
+                "backoff": {
+                    "max_immediate_attempts": backoff.max_immediate_attempts,
+                    "on_timeout": format!("{:?}", backoff.on_timeout),
+                    "strategy": format!("{:?}", backoff.strategy),
+                    "intervals_minutes": &backoff.intervals_minutes,
+                    "callback_valid_hours": backoff.callback_valid_hours,
+                    "counter_reset": format!("{:?}", backoff.counter_reset),
+                    "stable_secs": backoff.stable_secs,
+                    "cold_restart_preempts_hitl": backoff.cold_restart_preempts_hitl,
+                    "ntfy_send_retries": backoff.ntfy_send_retries,
+                    "ntfy_action_signing_key_set": !backoff.ntfy_action_signing_key
+                        .expose_secret().is_empty(),
+                },
             },
             "gateway": {
                 "tws_path": self.config.gateway.tws_path,
@@ -185,24 +214,52 @@ impl StateMachine {
                 "version": self.config.gateway.version,
                 "java_heap_mb": self.config.gateway.java_heap_mb,
                 "program": self.config.gateway.program.to_string(),
+                "live_api_port": self.config.gateway.live_api_port,
+                "paper_api_port": self.config.gateway.paper_api_port,
+                "live_socat_port": self.config.gateway.live_socat_port,
+                "paper_socat_port": self.config.gateway.paper_socat_port,
             },
             "session": {
                 "action": self.config.session.action.to_string(),
                 "accept_incoming": self.config.session.accept_incoming.to_string(),
+                "cold_restart_time": self.config.session.cold_restart_time,
+                "cold_restart_day": self.config.session.tws_cold_restart_day,
             },
             "command_server": {
                 "enabled": self.config.command_server.enabled,
                 "port": self.config.command_server.port,
                 "bind_address": self.config.command_server.bind_address,
+                "control_from": self.config.command_server.control_from,
             },
             "timing": {
                 "ui_tick_ms": self.config.timing.ui_tick_ms,
                 "agent_tick_ms": self.config.timing.agent_tick_ms,
                 "post_login_delay_ms": self.config.timing.post_login_delay_ms,
                 "popup_quiet_secs": self.config.timing.popup_quiet_secs,
+                "popup_max_wait_secs": self.config.timing.popup_max_wait_secs,
+                "login_radio_delay_ms": self.config.timing.login_radio_delay_ms,
+                "jvm_shutdown_timeout_secs": self.config.timing.jvm_shutdown_timeout_secs,
+                "login_dialog_timeout_secs": self.config.timing.login_dialog_timeout_secs,
+                "restart_delay_secs": self.config.timing.restart_delay_secs,
+                "relogin_max_attempts": self.config.timing.relogin_max_attempts,
+                "relogin_failure_action":
+                    format!("{:?}", self.config.timing.relogin_failure_action).to_lowercase(),
+                "api_port_probe_interval_secs":
+                    self.config.timing.api_port_probe_interval_secs,
+                "api_port_probe_fails_before_revoke":
+                    self.config.timing.api_port_probe_fails_before_revoke,
             },
             "agent": {
                 "socket_path": self.config.agent.socket_path,
+            },
+            "ib_status": {
+                "kick_active_session": self.config.ib_status.kick_active_session,
+            },
+            "logging": {
+                "level": format!("{:?}", self.config.logging.level).to_lowercase(),
+                "log_dir": self.config.logging.log_dir,
+                "futures_session_logging": self.config.logging.futures_session_logging,
+                "session_reopen_hour": self.config.logging.session_reopen_hour,
             },
             "site": {
                 "role": self.config.site.role.to_string(),

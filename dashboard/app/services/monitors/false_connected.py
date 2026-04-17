@@ -62,9 +62,15 @@ async def _probe_port(host: str, port: int, timeout: float) -> bool:
         writer.close()
         try:
             await writer.wait_closed()
-        except Exception:
-            pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.debug("writer.wait_closed() raised: %s", e)
         return True
+    except asyncio.CancelledError:
+        # Shutdown-time cancellation must propagate so the monitor loop
+        # can exit cleanly. Never swallow it.
+        raise
     except (asyncio.TimeoutError, OSError, ConnectionRefusedError):
         return False
     except Exception as e:
@@ -82,7 +88,12 @@ class FalseConnectedMonitor(Monitor):
     """
 
     event_type = "false_connected"
-    interval_seconds = 60
+    # Probe every 10s. Combined with FAIL_THRESHOLD=3, operators get an
+    # alert within 30s of a false-Connected state — down from the previous
+    # 3 minutes (60s × 3). Still keeps a 2s timeout per probe, so 3 probes ×
+    # 2 instances × 2s worst-case = 12s bounded work inside each 10s tick,
+    # well within the monitor-manager budget.
+    interval_seconds = 10
 
     def __init__(self):
         # mode -> consecutive failed probe count

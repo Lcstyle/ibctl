@@ -195,7 +195,7 @@ async fn async_main(config: ValidConfig) -> Result<(), Box<dyn std::error::Error
         commands: command_rx,
         queries: query_rx,
         cold_restart: cold_restart_rx,
-        agent_events: Some(event_rx),
+        agent_events: event_rx,
     };
     let mut state_machine = state_machine::StateMachine::new(
         config,

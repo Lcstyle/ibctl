@@ -32,12 +32,14 @@ pub enum CommandServerError {
 }
 
 /// Parsed input from a TCP command line — either an action or a query.
+#[derive(Debug)]
 pub(crate) enum ParsedCommand {
     Action(Command),
     Query(QueryType),
 }
 
 /// Query type without the response channel (used during parsing).
+#[derive(Debug)]
 pub(crate) enum QueryType {
     Status,
     State,
@@ -77,6 +79,7 @@ pub(crate) fn parse_command(input: &str) -> Option<ParsedCommand> {
             }
         }
         Some("RESUME") => Some(ParsedCommand::Action(Command::Resume)),
+        Some("HITL_RESUME") => Some(ParsedCommand::Action(Command::HitlResume)),
         Some("SETSTATE") => {
             // Use the original (non-uppercased) input to preserve state name casing
             let orig_parts: Vec<&str> = trimmed.split_whitespace().collect();
@@ -87,11 +90,34 @@ pub(crate) fn parse_command(input: &str) -> Option<ParsedCommand> {
                 Some(ParsedCommand::Action(Command::SetState(state_name)))
             }
         }
-        // IB system status (pushed by dashboard)
+        // IB system status (pushed by dashboard or future integrations).
+        //
+        // status: closed set — {available, unavailable, maintenance, degraded}.
+        //   An unrecognized value would silently park the state machine in
+        //   WaitingForIB (since `available = status == "available"`), which
+        //   is a DoS in disguise if a well-meaning integration typos the
+        //   value. Reject with ERROR instead.
+        //
+        // reason: stripped of control characters (newlines corrupt log-based
+        //   monitoring via log-injection) and capped at 256 bytes.
         Some("IBSTATUS") => {
             let orig_parts: Vec<&str> = trimmed.splitn(3, ' ').collect();
-            let status = orig_parts.get(1).copied().unwrap_or("available").to_string();
-            let reason = orig_parts.get(2).map(|s| s.trim_matches('"').to_string()).unwrap_or_default();
+            let status_raw = orig_parts.get(1).copied().unwrap_or("available");
+            let status = match status_raw {
+                "available" | "unavailable" | "maintenance" | "degraded" => {
+                    status_raw.to_string()
+                }
+                _ => return None,
+            };
+            let reason_raw = orig_parts
+                .get(2)
+                .map(|s| s.trim_matches('"'))
+                .unwrap_or("");
+            let reason: String = reason_raw
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(256)
+                .collect();
             Some(ParsedCommand::Action(Command::IbStatus(status, reason)))
         }
         // Set auto-restart time: SETRESTART 05:30 PM (UTC)
@@ -355,7 +381,14 @@ async fn handle_connection(
 /// Privileged commands (SETSTATE, PAUSE, EXIT) can manipulate the state machine
 /// in dangerous ways — they must not be accessible from the Docker network.
 fn is_privileged_command(cmd: &Command) -> bool {
-    matches!(cmd, Command::SetState(_) | Command::Pause | Command::PauseAt(_) | Command::Exit)
+    matches!(
+        cmd,
+        Command::SetState(_)
+            | Command::Pause
+            | Command::PauseAt(_)
+            | Command::Exit
+            | Command::HitlResume,
+    )
 }
 
 /// Returns true if the address is loopback (127.0.0.1 or ::1).
@@ -665,5 +698,65 @@ mod tests {
     fn test_docker_ip_not_localhost() {
         let addr: IpAddr = "172.17.0.3".parse().unwrap();
         assert!(!is_localhost(&addr));
+    }
+
+    // --- IBSTATUS input validation ---
+
+    #[test]
+    fn ibstatus_accepts_closed_set_values() {
+        for s in ["available", "unavailable", "maintenance", "degraded"] {
+            let cmd = parse_command(&format!("IBSTATUS {} ok", s));
+            match cmd {
+                Some(ParsedCommand::Action(Command::IbStatus(status, reason))) => {
+                    assert_eq!(status, s);
+                    assert_eq!(reason, "ok");
+                }
+                other => panic!("IBSTATUS {} should parse; got {:?}", s, other),
+            }
+        }
+    }
+
+    #[test]
+    fn ibstatus_rejects_unknown_status_values() {
+        for bad in ["MAINT", "AVAILABLE", "unknown", "partial-outage", "offline", ""] {
+            let cmd = parse_command(&format!("IBSTATUS {} reason", bad));
+            assert!(
+                cmd.is_none(),
+                "IBSTATUS {:?} should be rejected to avoid silent WaitingForIB",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn ibstatus_strips_control_chars_from_reason() {
+        let cmd = parse_command("IBSTATUS unavailable \"maint\n2026-04-16 fake\tlog\"");
+        match cmd {
+            Some(ParsedCommand::Action(Command::IbStatus(_, reason))) => {
+                assert!(
+                    !reason.contains('\n') && !reason.contains('\t'),
+                    "control chars must be stripped to prevent log injection; got {:?}",
+                    reason
+                );
+                assert!(reason.contains("maint"), "printable chars must survive");
+            }
+            other => panic!("expected IBSTATUS to parse; got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ibstatus_caps_reason_at_256_bytes() {
+        let long = "x".repeat(1024);
+        let cmd = parse_command(&format!("IBSTATUS unavailable {}", long));
+        match cmd {
+            Some(ParsedCommand::Action(Command::IbStatus(_, reason))) => {
+                assert_eq!(
+                    reason.len(),
+                    256,
+                    "reason must be capped at 256 chars to bound memory"
+                );
+            }
+            other => panic!("expected IBSTATUS to parse; got {:?}", other),
+        }
     }
 }
