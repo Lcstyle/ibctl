@@ -86,6 +86,7 @@ class NotificationConfig:
         "warm_restart": {"enabled": False},
         "ib_maintenance": {"enabled": False},
         "cold_restart_pending": {"enabled": True, "lead_seconds": 30},
+        "hitl_2fa_required": {"enabled": True},
     })
 
     def to_dict(self, mask_token: bool = True) -> dict:
@@ -217,7 +218,14 @@ class NotificationClient(ABC):
     """Transport interface for notification providers."""
 
     @abstractmethod
-    async def send(self, title: str, body: str, priority: str = "default", tags: str = "") -> bool:
+    async def send(
+        self,
+        title: str,
+        body: str,
+        priority: str = "default",
+        tags: str = "",
+        actions: list[dict] | None = None,
+    ) -> bool:
         raise NotImplementedError
 
 
@@ -227,9 +235,44 @@ class NullClient(NotificationClient):
     def __init__(self, reason: str):
         self._reason = reason
 
-    async def send(self, title: str, body: str, priority: str = "default", tags: str = "") -> bool:
+    async def send(
+        self,
+        title: str,
+        body: str,
+        priority: str = "default",
+        tags: str = "",
+        actions: list[dict] | None = None,
+    ) -> bool:
         logger.warning("Notification dropped: %s", self._reason)
         return False
+
+
+_NTFY_PRIORITY_MAP = {
+    "min": 1,
+    "low": 2,
+    "default": 3,
+    "high": 4,
+    "urgent": 5,
+    "max": 5,
+}
+
+
+def _priority_to_int(priority: str) -> int:
+    """Translate a named priority into ntfy's 1..5 integer scale.
+
+    The HTTP-header form (X-Priority) accepts the named strings natively;
+    the JSON POST form requires integers. Unknown names fall back to 3
+    (default) so we never send a malformed JSON payload.
+    """
+    if not priority:
+        return 3
+    try:
+        # Already numeric? Clamp to valid range.
+        n = int(priority)
+        return max(1, min(5, n))
+    except (TypeError, ValueError):
+        pass
+    return _NTFY_PRIORITY_MAP.get(priority.lower(), 3)
 
 
 class NtfyClient(NotificationClient):
@@ -240,23 +283,53 @@ class NtfyClient(NotificationClient):
         self._topic = topic
         self._token = token if isinstance(token, SecretStr) else SecretStr(token)
 
-    async def send(self, title: str, body: str, priority: str = "default", tags: str = "") -> bool:
+    async def send(
+        self,
+        title: str,
+        body: str,
+        priority: str = "default",
+        tags: str = "",
+        actions: list[dict] | None = None,
+    ) -> bool:
         """Send a notification. Returns True on success."""
         import httpx
 
         url = f"{self._url}/{self._topic}"
-        headers = {"X-Title": title}
+        # When `actions` is non-empty we send JSON so the ntfy server can
+        # attach action buttons. Without actions we keep the existing
+        # header-only POST for backward compatibility.
         token_value = self._token.get_secret_value()
-        if token_value:
-            headers["Authorization"] = f"Bearer {token_value}"
-        if priority and priority != "default":
-            headers["X-Priority"] = priority
-        if tags:
-            headers["X-Tags"] = tags
-
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(url, content=body, headers=headers)
+                if actions:
+                    payload: dict = {
+                        "topic": self._topic,
+                        "title": title,
+                        "message": body,
+                        "actions": actions,
+                    }
+                    if priority and priority != "default":
+                        # ntfy's JSON API requires priority as an integer
+                        # 1..5 (1=min, 5=max). The HTTP-header form accepts
+                        # named strings ("urgent", "high", …) but the JSON
+                        # form rejects them with 40024. Translate.
+                        payload["priority"] = _priority_to_int(priority)
+                    if tags:
+                        payload["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
+                    json_headers: dict[str, str] = {}
+                    if token_value:
+                        json_headers["Authorization"] = f"Bearer {token_value}"
+                    resp = await client.post(self._url, json=payload, headers=json_headers)
+                else:
+                    headers = {"X-Title": title}
+                    if token_value:
+                        headers["Authorization"] = f"Bearer {token_value}"
+                    if priority and priority != "default":
+                        headers["X-Priority"] = priority
+                    if tags:
+                        headers["X-Tags"] = tags
+                    resp = await client.post(url, content=body, headers=headers)
+
                 if resp.status_code == 200:
                     logger.info("Notification sent via ntfy: %s", title)
                     return True
@@ -273,7 +346,14 @@ class SlackWebhookClient(NotificationClient):
     def __init__(self, webhook_url: str):
         self._webhook_url = webhook_url
 
-    async def send(self, title: str, body: str, priority: str = "default", tags: str = "") -> bool:
+    async def send(
+        self,
+        title: str,
+        body: str,
+        priority: str = "default",
+        tags: str = "",
+        actions: list[dict] | None = None,
+    ) -> bool:
         import httpx
 
         lines = [f"*{title}*", body]
@@ -302,7 +382,14 @@ class TelegramClient(NotificationClient):
         self._bot_token = bot_token if isinstance(bot_token, SecretStr) else SecretStr(bot_token)
         self._chat_id = chat_id
 
-    async def send(self, title: str, body: str, priority: str = "default", tags: str = "") -> bool:
+    async def send(
+        self,
+        title: str,
+        body: str,
+        priority: str = "default",
+        tags: str = "",
+        actions: list[dict] | None = None,
+    ) -> bool:
         import httpx
 
         url = f"https://api.telegram.org/bot{self._bot_token.get_secret_value()}/sendMessage"
@@ -383,6 +470,7 @@ class NotificationService:
         priority: str = "default",
         tags: str = "",
         force: bool = False,
+        actions: list[dict] | None = None,
     ) -> bool:
         """Send a notification if the event type is enabled and not in cooldown."""
         if not force and not self.is_event_enabled(event_type):
@@ -396,7 +484,7 @@ class NotificationService:
                 logger.debug("Notification suppressed (cooldown): %s", event_type)
                 return False
 
-        success = await self._client.send(title, body, priority, tags)
+        success = await self._client.send(title, body, priority, tags, actions)
 
         self._history.append(NotificationEvent(
             timestamp=now,

@@ -14,7 +14,7 @@ from app.domain.errors import DashboardError
 logger = logging.getLogger("dashboard.api.command")
 router = APIRouter()
 
-ALLOWED_COMMANDS = {"STOP", "RESTART", "RECONNECTDATA", "RECONNECTACCOUNT", "ENABLEAPI", "PAUSE", "RESUME", "RESTARTSOCAT"}
+ALLOWED_COMMANDS = {"STOP", "RESTART", "RECONNECTDATA", "RECONNECTACCOUNT", "ENABLEAPI", "PAUSE", "RESUME", "RESTARTSOCAT", "HITL_RESUME"}
 # Commands with arguments — the keyword is uppercased but the argument preserves case
 PREFIXED_COMMANDS = ("SETSTATE ", "PAUSE ")
 

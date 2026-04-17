@@ -646,7 +646,7 @@ def _load_local_config() -> dict:
         "BYPASS_WARNING": "Bypass Warnings",
         "ALLOW_BLIND_TRADING": "Allow Blind Trading",
         "TWS_MASTER_CLIENT_ID": "Master Client ID",
-        "VNC_SERVER_PASSWORD": "VNC Password",
+        "VNC_SERVER_PASSWORD": "VNC Password",  # pragma: allowlist secret
         "JAVA_HEAP_SIZE": "Java Heap Size",
     }
     for env_key, label in env_only_map.items():
@@ -668,13 +668,13 @@ def _build_config_groups(config_data: dict) -> list[dict]:
         ("Identity & Auth", "identity", ["environment", "auth", "twofa"], True),
         ("Gateway & Network", "gateway", ["gateway", "session", "command_server", "agent"], False),
         ("Dashboard & Alerts", "dashboard", ["dashboard", "ib_system_status"], False),
-        ("Tuning & Operations", "tuning", ["timing", "logging", "site"], False),
+        ("Tuning & Operations", "tuning", ["timing", "logging", "ib_status", "site"], False),
     ]
 
     # Sub-section labels within each group
     SECTION_LABELS = {
         "auth": "Account",
-        "twofa": "2FA",
+        "twofa": "2FA + HITL Backoff",
         "gateway": "Gateway",
         "session": "Session",
         "command_server": "Command Server",
@@ -682,7 +682,8 @@ def _build_config_groups(config_data: dict) -> list[dict]:
         "dashboard": "Dashboard",
         "ib_system_status": "IB Status Scraper",
         "logging": "Logging",
-        "timing": "Timing",
+        "timing": "Timing + TCP Probe",
+        "ib_status": "IB Status Policy",
         "site": "Site / Failover",
         "environment": "Runtime",
     }

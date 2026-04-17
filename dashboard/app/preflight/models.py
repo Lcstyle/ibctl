@@ -41,6 +41,64 @@ class AuthConfig(BaseModel):
     paper: PaperAuthConfig = PaperAuthConfig()
 
 
+TwoFaOnTimeout = Literal["restart_then_hitl", "restart_forever", "hitl_immediately"]
+HitlStrategy = Literal["disabled", "periodic", "ntfy_callback", "both"]
+CounterResetScope = Literal["any_reach", "stable"]
+
+
+class TwoFaBackoffConfig(BaseModel):
+    """Human-in-the-loop 2FA backoff policy."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_immediate_attempts: int = Field(default=3, ge=0)
+    on_timeout: TwoFaOnTimeout = "restart_then_hitl"
+    strategy: HitlStrategy = "periodic"
+    intervals_minutes: list[int] = [60]
+    callback_valid_hours: int = Field(default=12, ge=1, le=168)
+    counter_reset: CounterResetScope = "any_reach"
+    stable_secs: int = Field(default=300, ge=0)
+    cold_restart_preempts_hitl: bool = True
+    ntfy_send_retries: int = Field(default=1, ge=0)
+
+    @model_validator(mode="after")
+    def validate_backoff(self) -> "TwoFaBackoffConfig":
+        # on_timeout = restart_then_hitl requires >= 1 attempt (otherwise
+        # nothing to count).
+        if self.on_timeout == "restart_then_hitl" and self.max_immediate_attempts < 1:
+            raise ValueError(
+                "on_timeout='restart_then_hitl' requires max_immediate_attempts >= 1; "
+                "use on_timeout='hitl_immediately' for zero-attempt behavior."
+            )
+
+        # hitl_immediately requires a non-disabled strategy (or we'd enter a
+        # dead-end state with no retry path).
+        if self.on_timeout == "hitl_immediately" and self.strategy == "disabled":
+            raise ValueError(
+                "on_timeout='hitl_immediately' with strategy='disabled' leaves no "
+                "recovery path. Choose strategy='periodic' or 'ntfy_callback' or 'both'."
+            )
+
+        # Periodic-involving strategies need at least one interval.
+        if self.strategy in {"periodic", "both"} and not self.intervals_minutes:
+            raise ValueError(
+                f"strategy='{self.strategy}' requires at least one entry in intervals_minutes."
+            )
+
+        # All intervals must be positive.
+        if any(m <= 0 for m in self.intervals_minutes):
+            raise ValueError("intervals_minutes entries must all be > 0.")
+
+        # Stable reset requires a non-zero window.
+        if self.counter_reset == "stable" and self.stable_secs <= 0:
+            raise ValueError("counter_reset='stable' requires stable_secs > 0.")
+
+        # ntfy_send_retries without an ntfy-involving strategy is harmless
+        # dead config — don't error. At runtime the retry logic never runs.
+
+        return self
+
+
 class TwoFaConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -50,6 +108,7 @@ class TwoFaConfig(BaseModel):
     exit_interval: int = Field(default=180, ge=0)
     device: str = ""
     relogin_after_timeout: bool = False
+    backoff: TwoFaBackoffConfig = TwoFaBackoffConfig()
 
 
 class GatewayConfig(BaseModel):
@@ -123,6 +182,8 @@ class TimingConfig(BaseModel):
     restart_delay_secs: int = Field(default=90, ge=0)
     relogin_max_attempts: int = Field(default=1, ge=0)
     relogin_failure_action: Literal["reauth", "restart"] = "reauth"
+    api_port_probe_interval_secs: int = Field(default=5, ge=0, le=3600)
+    api_port_probe_fails_before_revoke: int = Field(default=3, ge=1, le=10)
 
 
 class SiteConfig(BaseModel):
@@ -152,6 +213,10 @@ class DashboardConfig(BaseModel):
     notification_channel: Literal["ntfy", "slack", "telegram"] = "ntfy"
     zmq_enabled: bool = True
     zmq_port: int = Field(default=5556, ge=1, le=65535)
+    # External URL used to build ntfy action-button callback targets
+    # (e.g. https://ibctl.example.com). Leave empty if the dashboard is
+    # only reachable from inside the LAN and HITL ntfy_callback is unused.
+    external_url: str = ""
 
 
 class IbSystemStatusConfig(BaseModel):
@@ -169,6 +234,21 @@ class IbSystemStatusConfig(BaseModel):
     extra_exchange_keywords: list[str] = []
     extra_benign_phrases: list[str] = []
     extra_blocking_keywords: list[str] = []
+
+
+class IbStatusConfig(BaseModel):
+    """ibctl-side policy for IBSTATUS pushes — consumed by ibctl state machine.
+
+    Separate from IbSystemStatusConfig which is the dashboard-side scraper.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # When IBSTATUS=unavailable arrives, should ibctl kick a Connected session?
+    # Default false — IBSTATUS gates login retry, not active sessions.
+    # The scraper can be wrong (CDN blips); Gateway's own UI label is the
+    # authoritative signal via the revocation bus.
+    kick_active_session: bool = False
 
 
 # --- Top-level config ---
@@ -190,6 +270,7 @@ class IbctlConfig(BaseModel):
     agent: AgentConfig = AgentConfig()
     dashboard: DashboardConfig = DashboardConfig()
     ib_system_status: IbSystemStatusConfig = IbSystemStatusConfig()
+    ib_status: IbStatusConfig = IbStatusConfig()
     logging: LoggingConfig = LoggingConfig()
     timing: TimingConfig = TimingConfig()
     site: SiteConfig = SiteConfig()
@@ -278,6 +359,71 @@ class IbctlConfig(BaseModel):
                         "notification_channel=telegram but IBCTL_TELEGRAM_CHAT_ID is not set"
                     )
 
+        # HITL 2FA ntfy_callback strategy requires ntfy notifications enabled
+        # AND the signing key. Signing key check happens at validator.py level
+        # (env-only secret, not in TOML).
+        backoff = self.twofa.backoff
+        if backoff.strategy in {"ntfy_callback", "both"}:
+            if not self.dashboard.notifications_enabled:
+                raise ValueError(
+                    f"twofa.backoff.strategy='{backoff.strategy}' requires "
+                    "dashboard.notifications_enabled=true — the callback URL is "
+                    "delivered via the notification channel"
+                )
+            if self.dashboard.notification_channel != "ntfy":
+                raise ValueError(
+                    f"twofa.backoff.strategy='{backoff.strategy}' requires "
+                    "dashboard.notification_channel='ntfy' — only ntfy supports the "
+                    "action-button callback URL"
+                )
+            import os as _os
+            if not _os.environ.get("IBCTL_NTFY_ACTION_SIGNING_KEY"):
+                warnings.append(
+                    f"twofa.backoff.strategy='{backoff.strategy}' but "
+                    "IBCTL_NTFY_ACTION_SIGNING_KEY is not set — callback URLs "
+                    "cannot be signed and the strategy will fail at runtime"
+                )
+            if (
+                not self.dashboard.external_url
+                and not _os.environ.get("IBCTL_DASHBOARD_EXTERNAL_URL")
+            ):
+                warnings.append(
+                    f"twofa.backoff.strategy='{backoff.strategy}' but "
+                    "neither dashboard.external_url nor IBCTL_DASHBOARD_EXTERNAL_URL "
+                    "is set — ntfy action-button URLs will point at an internal "
+                    "address unreachable from a phone"
+                )
+
+        # TCP probe disabled: noteworthy but not an error. Some operators
+        # prefer label-probe-only for debugging. Warn so the reduced
+        # detection footprint is explicit.
+        if self.timing.api_port_probe_interval_secs == 0:
+            warnings.append(
+                "timing.api_port_probe_interval_secs=0 disables the TCP probe "
+                "of Gateway's API port. The active label probe is then the "
+                "only in-ibctl session-loss detector (dashboard's external "
+                "FalseConnectedMonitor still runs independently)."
+            )
+
+        # HITL dead-end: strategy=disabled with on_timeout=restart_then_hitl
+        # means ibctl will enter WaitingForHitl2fa after max_immediate_attempts
+        # and sit there forever. Valid (operator uses dashboard HITL_RESUME
+        # to recover) but easy to misconfigure accidentally.
+        if (
+            backoff.strategy == "disabled"
+            and backoff.on_timeout == "restart_then_hitl"
+            and backoff.max_immediate_attempts > 0
+        ):
+            warnings.append(
+                "twofa.backoff.strategy='disabled' combined with "
+                "on_timeout='restart_then_hitl' means HITL has no automatic "
+                "recovery path. After "
+                f"{backoff.max_immediate_attempts} failed 2FA attempts, ibctl "
+                "will sit in WaitingForHitl2fa indefinitely until an operator "
+                "sends HITL_RESUME manually via the dashboard. If that's not "
+                "intended, set strategy to 'periodic', 'ntfy_callback', or 'both'."
+            )
+
         # ZMQ PUB socket: on by default, runs automatically when dashboard runs.
         # No validation needed — silently inactive when dashboard is off.
 
@@ -315,6 +461,16 @@ ENV_MAP: dict[str, str] = {
     "twofa.exit_interval": "TWOFA_EXIT_INTERVAL",
     "twofa.device": "TWOFA_DEVICE",
     "twofa.relogin_after_timeout": "RELOGIN_AFTER_TWOFA_TIMEOUT",
+    # 2FA backoff (HITL)
+    "twofa.backoff.max_immediate_attempts": "IBCTL_TWOFA_MAX_IMMEDIATE_ATTEMPTS",
+    "twofa.backoff.on_timeout": "IBCTL_TWOFA_ON_TIMEOUT",
+    "twofa.backoff.strategy": "IBCTL_TWOFA_STRATEGY",
+    "twofa.backoff.intervals_minutes": "IBCTL_TWOFA_INTERVALS_MINUTES",
+    "twofa.backoff.callback_valid_hours": "IBCTL_TWOFA_CALLBACK_VALID_HOURS",
+    "twofa.backoff.counter_reset": "IBCTL_TWOFA_COUNTER_RESET",
+    "twofa.backoff.stable_secs": "IBCTL_TWOFA_STABLE_SECS",
+    "twofa.backoff.cold_restart_preempts_hitl": "IBCTL_TWOFA_COLD_RESTART_PREEMPTS_HITL",
+    "twofa.backoff.ntfy_send_retries": "IBCTL_TWOFA_NTFY_SEND_RETRIES",
     # Gateway
     "gateway.tws_path": "TWS_PATH",
     "gateway.tws_settings_path": "TWS_SETTINGS_PATH",
@@ -342,6 +498,8 @@ ENV_MAP: dict[str, str] = {
     "timing.restart_delay_secs": "IBCTL_RESTART_DELAY",
     "timing.relogin_max_attempts": "IBCTL_RELOGIN_ATTEMPTS",
     "timing.relogin_failure_action": "IBCTL_RELOGIN_FAILURE_ACTION",
+    "timing.api_port_probe_interval_secs": "IBCTL_API_PORT_PROBE_INTERVAL_SECS",
+    "timing.api_port_probe_fails_before_revoke": "IBCTL_API_PORT_PROBE_FAILS_BEFORE_REVOKE",
     # Dashboard
     "dashboard.enabled": "IBCTL_DASHBOARD_ENABLED",
     "dashboard.port": "IBCTL_DASHBOARD_PORT",
@@ -354,6 +512,7 @@ ENV_MAP: dict[str, str] = {
     "dashboard.notification_channel": "IBCTL_NOTIFICATION_CHANNEL",
     "dashboard.zmq_enabled": "IBCTL_ZMQ_ENABLED",
     "dashboard.zmq_port": "IBCTL_ZMQ_PORT",
+    "dashboard.external_url": "IBCTL_DASHBOARD_EXTERNAL_URL",
     # IB System Status
     "ib_system_status.enabled": "IBCTL_IB_STATUS_ENABLED",
     "ib_system_status.check_interval_seconds": "IB_STATUS_CHECK_INTERVAL",
@@ -375,6 +534,7 @@ SECRET_ENV_VARS: set[str] = {
     "IBCTL_GITHUB_OAUTH_CLIENT_SECRET",
     "IBCTL_OIDC_CLIENT_SECRET",
     "IBCTL_NTFY_TOKEN",
+    "IBCTL_NTFY_ACTION_SIGNING_KEY",
     "IBCTL_TELEGRAM_BOT_TOKEN",
     "IBCTL_SLACK_WEBHOOK_URL",
 }

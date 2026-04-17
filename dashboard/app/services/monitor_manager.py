@@ -26,6 +26,11 @@ class Alert:
     body: str
     priority: str = "default"
     tags: str = ""
+    # Optional ntfy action buttons. Each dict is forwarded verbatim into the
+    # `actions` JSON array sent with the ntfy POST. Non-ntfy channels ignore
+    # this field. Example:
+    #   [{"action": "view", "label": "Retry 2FA", "url": "https://..."}]
+    actions: list[dict] | None = None
 
 
 class Monitor(ABC):
@@ -140,6 +145,7 @@ class MonitorManager:
                             body=alert.body,
                             priority=alert.priority,
                             tags=alert.tags,
+                            actions=alert.actions,
                         )
                 except Exception as e:
                     logger.error("%s check failed: %s", monitor.__class__.__name__, e)

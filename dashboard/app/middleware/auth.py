@@ -97,6 +97,10 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
             or path == "/auth/github/callback"
             or path == "/auth/oidc"
             or path == "/auth/oidc/callback"
+            # HITL 2FA callback is authenticated by an HMAC-signed token
+            # embedded in the URL — phones clicking the ntfy action button
+            # don't carry the dashboard session cookie.
+            or path == "/api/twofa/callback"
         )
 
     @staticmethod

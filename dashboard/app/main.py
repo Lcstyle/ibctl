@@ -77,8 +77,8 @@ async def lifespan(app: FastAPI):
     # Start monitor manager (single background task for all monitors)
     from app.services.monitor_manager import MonitorManager
     from app.services.monitors import (
-        ColdRestartPendingMonitor, LoginFailedMonitor, NoClientsMonitor,
-        SessionLostMonitor, ReloginFailedMonitor,
+        ColdRestartPendingMonitor, Hitl2faEntryMonitor, LoginFailedMonitor,
+        NoClientsMonitor, SessionLostMonitor, ReloginFailedMonitor,
         WarmRestartMonitor, IBMaintenanceMonitor,
     )
     monitors = [
@@ -89,6 +89,7 @@ async def lifespan(app: FastAPI):
         ReloginFailedMonitor(),
         WarmRestartMonitor(),
         IBMaintenanceMonitor(ib_status_monitor=monitor),
+        Hitl2faEntryMonitor(),
     ]
     monitor_manager = MonitorManager(registry, notification_service, monitors)
     app.state.monitor_manager = monitor_manager
