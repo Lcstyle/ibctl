@@ -97,7 +97,7 @@ use crate::types::{ColdRestartSignal, ColdRestartSkipReason};
 #[derive(Debug, Clone)]
 pub struct SchedulerConfig {
     /// Target day-of-week, Sunday=0..Saturday=6 (matches
-    /// [`jiff::Weekday::to_sunday_zero_offset`]).
+    /// `jiff::civil::Weekday::to_sunday_zero_offset`).
     pub target_dow: u32,
     /// Target hour, 0..=23 (24h clock).
     pub target_hour: u32,
@@ -130,7 +130,7 @@ pub enum NextAction {
     Sleep,
     /// Skip predicate matured. Wrapper writes the fired marker (with
     /// pre-wait timestamp) and emits
-    /// [`ColdRestartSignal::Skipped`](crate::types::ColdRestartSignal::Skipped).
+    /// [`ColdRestartSignal::Skipped`].
     Skip { reason: ColdRestartSkipReason },
     /// Fire-eligible AND the skip predicate did not mature. Wrapper:
     ///

@@ -2191,7 +2191,7 @@ pub struct RecoveryCoordinator {
     blocked_awaiting_resume: bool,
 
     /// Optional channel for publishing a
-    /// [`Signal::RecoveryGaveUp`](crate::types::Signal::RecoveryGaveUp)
+    /// [`Signal::RecoveryGaveUp`]
     /// on the give-up transition. Additive to the existing in-line halt
     /// (JVM kill + WaitingForLaunch park) — external subscribers (SSE
     /// bus, dashboard) use this for push-side notification. `None` when
@@ -2326,7 +2326,7 @@ impl RecoveryCoordinator {
     /// Install a channel to be notified when this coordinator enters
     /// `GivenUp`. Called once by the wrapper (typically main loop
     /// setup) so an external subscriber can receive
-    /// [`Signal::RecoveryGaveUp`](crate::types::Signal::RecoveryGaveUp)
+    /// [`Signal::RecoveryGaveUp`]
     /// on the give-up transition. Replaces any previously installed
     /// sender — the caller owns installation lifecycle.
     ///
@@ -2735,7 +2735,7 @@ fn hash_token(token: &ResumeToken) -> String {
 /// when set to `1`, `true`, `yes`, or `on` (case-insensitive).
 ///
 /// Called at coordinator construction only. Serialised across tests
-/// (which may set the env var) via [`ENV_LOCK`] so parallel test
+/// (which may set the env var) via `ENV_LOCK` so parallel test
 /// execution stays deterministic. Production callers do not lock —
 /// the env is stable across `boot()` in production.
 fn read_force_reset_env() -> bool {
