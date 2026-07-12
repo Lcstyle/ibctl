@@ -225,6 +225,7 @@ class NotificationClient(ABC):
         priority: str = "default",
         tags: str = "",
         actions: list[dict] | None = None,
+        kind: str | None = None,
     ) -> bool:
         raise NotImplementedError
 
@@ -242,6 +243,7 @@ class NullClient(NotificationClient):
         priority: str = "default",
         tags: str = "",
         actions: list[dict] | None = None,
+        kind: str | None = None,
     ) -> bool:
         logger.warning("Notification dropped: %s", self._reason)
         return False
@@ -278,10 +280,29 @@ def _priority_to_int(priority: str) -> int:
 class NtfyClient(NotificationClient):
     """Async HTTP client for ntfy.sh push notifications."""
 
-    def __init__(self, url: str, topic: str, token: SecretStr | str = ""):
+    def __init__(
+        self,
+        url: str,
+        topic: str,
+        token: SecretStr | str = "",
+        coalesce_window_secs: int = 30,
+    ):
         self._url = url.rstrip("/")
         self._topic = topic
         self._token = token if isinstance(token, SecretStr) else SecretStr(token)
+        self._coalesce_window_secs = coalesce_window_secs
+        # Maps ``kind`` (e.g. "hitl_2fa_required") to monotonic timestamp of
+        # last SUCCESSFUL send. Only stamped on HTTP 200 — failed sends do
+        # NOT consume the window, so retries fire as expected.
+        #
+        # Concurrency invariant: this dedup assumes no two concurrent send()
+        # calls share the same ``kind``. The MonitorManager (the only
+        # in-process caller with kind != None) is single-tasked, so concurrent
+        # same-kind sends never happen today. Future refactors introducing a
+        # second background sender must either coordinate on ``kind`` or
+        # extend the lock to span the awaited POST.
+        self._last_successful_send_per_kind: dict[str, float] = {}
+        self._coalesce_lock = asyncio.Lock()
 
     async def send(
         self,
@@ -290,9 +311,31 @@ class NtfyClient(NotificationClient):
         priority: str = "default",
         tags: str = "",
         actions: list[dict] | None = None,
+        kind: str | None = None,
     ) -> bool:
-        """Send a notification. Returns True on success."""
+        """Send a notification. Returns True on success.
+
+        When ``kind`` is provided, repeat sends with the same kind within
+        ``coalesce_window_secs`` of the last *successful* POST are
+        suppressed and return True (treat as already-handled). A failed
+        POST does not consume the window, so a legitimate retry on the
+        next tick will fire.
+        """
         import httpx
+
+        # Coalesce: if a same-kind POST succeeded within the window,
+        # suppress this one and return True. Callers observing True will
+        # not retry, so suppressing a known-good equivalent is correct.
+        if kind is not None:
+            async with self._coalesce_lock:
+                now = time.monotonic()
+                last = self._last_successful_send_per_kind.get(kind, 0.0)
+                if last > 0.0 and now - last < self._coalesce_window_secs:
+                    logger.debug(
+                        "ntfy coalesced kind=%s (last successful send %.1fs ago, window=%ds)",
+                        kind, now - last, self._coalesce_window_secs,
+                    )
+                    return True
 
         url = f"{self._url}/{self._topic}"
         # When `actions` is non-empty we send JSON so the ntfy server can
@@ -331,6 +374,12 @@ class NtfyClient(NotificationClient):
                     resp = await client.post(url, content=body, headers=headers)
 
                 if resp.status_code == 200:
+                    # Success: stamp the kind so the next call within the
+                    # window is coalesced. Failures fall through without
+                    # stamping, so retries are NOT suppressed.
+                    if kind is not None:
+                        async with self._coalesce_lock:
+                            self._last_successful_send_per_kind[kind] = time.monotonic()
                     logger.info("Notification sent via ntfy: %s", title)
                     return True
                 logger.warning("ntfy notification failed (HTTP %d): %s", resp.status_code, resp.text[:200])
@@ -353,6 +402,7 @@ class SlackWebhookClient(NotificationClient):
         priority: str = "default",
         tags: str = "",
         actions: list[dict] | None = None,
+        kind: str | None = None,
     ) -> bool:
         import httpx
 
@@ -389,6 +439,7 @@ class TelegramClient(NotificationClient):
         priority: str = "default",
         tags: str = "",
         actions: list[dict] | None = None,
+        kind: str | None = None,
     ) -> bool:
         import httpx
 
@@ -484,7 +535,7 @@ class NotificationService:
                 logger.debug("Notification suppressed (cooldown): %s", event_type)
                 return False
 
-        success = await self._client.send(title, body, priority, tags, actions)
+        success = await self._client.send(title, body, priority, tags, actions, kind=event_type)
 
         self._history.append(NotificationEvent(
             timestamp=now,

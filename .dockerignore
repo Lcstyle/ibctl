@@ -1,9 +1,16 @@
 target/
 .git/
 .github/
+.gitea/
+.woodpecker/
 .full-review/
 .claude/
+.env
+.env.*
+!.env.example
 dashboard/tests/
 docs/
+examples/
+tools/
 *.md
 !docker/*.md

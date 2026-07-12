@@ -547,11 +547,173 @@ pub struct TimingConfig {
     /// Consecutive probe failures before firing ApiPortListenerLost revocation.
     #[serde(default = "TimingConfig::default_api_port_probe_fails")]
     pub api_port_probe_fails_before_revoke: u32,
+
+    /// Three-phase reconnection recovery coordinator settings.
+    /// See `crate::state_machine::recovery` for the state model.
+    #[serde(default)]
+    #[allow(dead_code)] // wired into StateMachine in a subsequent stage of PR-C
+    pub recovery: RecoveryTimingConfig,
 }
 
 impl TimingConfig {
     fn default_api_port_probe_interval() -> u64 { 5 }
     fn default_api_port_probe_fails() -> u32 { 3 }
+}
+
+/// TOML shape for [timing.recovery]. Runtime enforcement lives in
+/// `state_machine::recovery::RecoveryConfig`; this struct exists solely
+/// as the serde landing zone. Env overrides (`IBCTL_RECOVERY_*_SECS`) are
+/// layered on top by `RecoveryTimingConfig::to_runtime()` before the pure
+/// decision function ever sees the values.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)] // wired into StateMachine in a subsequent stage of PR-C
+pub struct RecoveryTimingConfig {
+    /// Master enable — set false in TOML to disable the coordinator
+    /// entirely without touching env. Env `IBCTL_RECOVERY_DISABLED=1`
+    /// wins if set. Default true.
+    #[serde(default = "RecoveryTimingConfig::default_enabled")]
+    pub enabled: bool,
+    /// Aggressive → Backoff threshold. Default 3600 (1h).
+    #[serde(default = "RecoveryTimingConfig::default_aggressive_max_secs")]
+    pub aggressive_phase_max_secs: u64,
+    /// Backoff → GivenUp threshold. Default 10800 (3h).
+    #[serde(default = "RecoveryTimingConfig::default_backoff_max_secs")]
+    pub backoff_phase_max_secs: u64,
+    /// Sleep between Backoff retries. Default 900 (15 min).
+    #[serde(default = "RecoveryTimingConfig::default_backoff_interval_secs")]
+    pub backoff_interval_secs: u64,
+    /// Minimum Connected dwell to count as a success and reset the
+    /// phase timer. Default 60. Guards against a 3-second flap-Connect
+    /// resetting the timer indefinitely — the exact pathology this
+    /// coordinator is meant to detect.
+    #[serde(default = "RecoveryTimingConfig::default_min_success_dwell_secs")]
+    pub min_success_dwell_secs: u64,
+    /// Same-error streak that skips time-based escalation and forces
+    /// HITL immediately. Default 8 (~40 min at 5-min cycles).
+    #[serde(default = "RecoveryTimingConfig::default_fingerprint_streak")]
+    pub fingerprint_streak_forcing_hitl: u32,
+    /// Coalescer key for the give-up ntfy alert. Distinct kind lets the
+    /// dashboard's ntfy coalescer dedupe re-fires within the resend
+    /// interval below.
+    #[serde(default = "RecoveryTimingConfig::default_giveup_kind")]
+    pub giveup_ntfy_kind: String,
+    /// How long the signed retry-link on the give-up alert is valid.
+    /// Default 12 (matches the HITL 2FA callback convention).
+    #[serde(default = "RecoveryTimingConfig::default_callback_valid_hours")]
+    pub giveup_callback_valid_hours: u32,
+    /// Minimum wall-clock interval before re-firing a give-up alert
+    /// when the state machine is still parked in GivenUp. Default 6h.
+    #[serde(default = "RecoveryTimingConfig::default_resend_interval_hours")]
+    pub giveup_alert_resend_interval_hours: u32,
+}
+
+#[allow(dead_code)] // wired into StateMachine in a subsequent stage of PR-C
+impl RecoveryTimingConfig {
+    fn default_enabled() -> bool { true }
+    fn default_aggressive_max_secs() -> u64 { 3600 }
+    fn default_backoff_max_secs() -> u64 { 10800 }
+    fn default_backoff_interval_secs() -> u64 { 900 }
+    fn default_min_success_dwell_secs() -> u64 { 60 }
+    fn default_fingerprint_streak() -> u32 { 8 }
+    fn default_giveup_kind() -> String { "reconnect_gave_up".to_string() }
+    fn default_callback_valid_hours() -> u32 { 12 }
+    fn default_resend_interval_hours() -> u32 { 6 }
+
+    /// Convert the TOML shape into the runtime shape used by the pure
+    /// decision function, applying env overrides in precedence order:
+    /// env > TOML > default.
+    ///
+    /// Env keys (all optional):
+    /// - `IBCTL_RECOVERY_DISABLED=1|true|yes` — kills the coordinator
+    /// - `IBCTL_RECOVERY_AGGRESSIVE_MAX_SECS`
+    /// - `IBCTL_RECOVERY_BACKOFF_MAX_SECS`
+    /// - `IBCTL_RECOVERY_BACKOFF_INTERVAL_SECS`
+    /// - `IBCTL_RECOVERY_MIN_SUCCESS_DWELL_SECS`
+    /// - `IBCTL_RECOVERY_FINGERPRINT_STREAK`
+    ///
+    /// Invalid env values (non-numeric) are IGNORED with a warn log so
+    /// a typo doesn't accidentally disable the whole subsystem.
+    pub fn to_runtime(&self) -> crate::state_machine::recovery::RecoveryConfig {
+        let env_bool = |key: &str| -> Option<bool> {
+            std::env::var(key).ok().map(|v| {
+                let low = v.to_ascii_lowercase();
+                matches!(low.as_str(), "1" | "true" | "yes" | "on")
+            })
+        };
+        let env_u64 = |key: &str, current: u64| -> u64 {
+            match std::env::var(key) {
+                Ok(v) => v.parse().unwrap_or_else(|_| {
+                    log::warn!("Ignoring non-numeric {key}={v:?}; using {current}");
+                    current
+                }),
+                Err(_) => current,
+            }
+        };
+        let env_u32 = |key: &str, current: u32| -> u32 {
+            match std::env::var(key) {
+                Ok(v) => v.parse().unwrap_or_else(|_| {
+                    log::warn!("Ignoring non-numeric {key}={v:?}; using {current}");
+                    current
+                }),
+                Err(_) => current,
+            }
+        };
+
+        let disabled = env_bool("IBCTL_RECOVERY_DISABLED").unwrap_or(!self.enabled);
+
+        crate::state_machine::recovery::RecoveryConfig {
+            aggressive_phase_max_secs: env_u64(
+                "IBCTL_RECOVERY_AGGRESSIVE_MAX_SECS",
+                self.aggressive_phase_max_secs,
+            ),
+            backoff_phase_max_secs: env_u64(
+                "IBCTL_RECOVERY_BACKOFF_MAX_SECS",
+                self.backoff_phase_max_secs,
+            ),
+            backoff_interval_secs: env_u64(
+                "IBCTL_RECOVERY_BACKOFF_INTERVAL_SECS",
+                self.backoff_interval_secs,
+            ),
+            min_success_dwell_secs: env_u64(
+                "IBCTL_RECOVERY_MIN_SUCCESS_DWELL_SECS",
+                self.min_success_dwell_secs,
+            ),
+            fingerprint_streak_forcing_hitl: env_u32(
+                "IBCTL_RECOVERY_FINGERPRINT_STREAK",
+                self.fingerprint_streak_forcing_hitl,
+            ),
+            // PR-C stage-5 fix (finding B-HIGH-1): thread the two ntfy-
+            // callback timing knobs through into the runtime config so
+            // the dashboard monitor's STATUS view reflects the operator's
+            // configured values rather than a fabricated default.
+            giveup_callback_valid_hours: env_u32(
+                "IBCTL_RECOVERY_GIVEUP_CALLBACK_VALID_HOURS",
+                self.giveup_callback_valid_hours,
+            ),
+            giveup_alert_resend_interval_hours: env_u32(
+                "IBCTL_RECOVERY_GIVEUP_ALERT_RESEND_INTERVAL_HOURS",
+                self.giveup_alert_resend_interval_hours,
+            ),
+            disabled,
+        }
+    }
+}
+
+impl Default for RecoveryTimingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            aggressive_phase_max_secs: Self::default_aggressive_max_secs(),
+            backoff_phase_max_secs: Self::default_backoff_max_secs(),
+            backoff_interval_secs: Self::default_backoff_interval_secs(),
+            min_success_dwell_secs: Self::default_min_success_dwell_secs(),
+            fingerprint_streak_forcing_hitl: Self::default_fingerprint_streak(),
+            giveup_ntfy_kind: Self::default_giveup_kind(),
+            giveup_callback_valid_hours: Self::default_callback_valid_hours(),
+            giveup_alert_resend_interval_hours: Self::default_resend_interval_hours(),
+        }
+    }
 }
 
 /// What to do after all re-login attempts fail.
@@ -582,6 +744,7 @@ impl Default for TimingConfig {
             relogin_failure_action: ReloginFailureAction::Reauth,
             api_port_probe_interval_secs: 5,
             api_port_probe_fails_before_revoke: 3,
+            recovery: RecoveryTimingConfig::default(),
         }
     }
 }

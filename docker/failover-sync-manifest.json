@@ -206,6 +206,26 @@
         "toml_path": "timing.api_port_probe_fails_before_revoke",
         "env_var": "IBCTL_API_PORT_PROBE_FAILS_BEFORE_REVOKE"
       },
+      "IBCTL_RECOVERY_AGGRESSIVE_MAX_SECS": {
+        "toml_path": "timing.recovery.aggressive_phase_max_secs",
+        "env_var": "IBCTL_RECOVERY_AGGRESSIVE_MAX_SECS"
+      },
+      "IBCTL_RECOVERY_BACKOFF_MAX_SECS": {
+        "toml_path": "timing.recovery.backoff_phase_max_secs",
+        "env_var": "IBCTL_RECOVERY_BACKOFF_MAX_SECS"
+      },
+      "IBCTL_RECOVERY_BACKOFF_INTERVAL_SECS": {
+        "toml_path": "timing.recovery.backoff_interval_secs",
+        "env_var": "IBCTL_RECOVERY_BACKOFF_INTERVAL_SECS"
+      },
+      "IBCTL_RECOVERY_MIN_SUCCESS_DWELL_SECS": {
+        "toml_path": "timing.recovery.min_success_dwell_secs",
+        "env_var": "IBCTL_RECOVERY_MIN_SUCCESS_DWELL_SECS"
+      },
+      "IBCTL_RECOVERY_FINGERPRINT_STREAK": {
+        "toml_path": "timing.recovery.fingerprint_streak_forcing_hitl",
+        "env_var": "IBCTL_RECOVERY_FINGERPRINT_STREAK"
+      },
       "IBCTL_DEBUG_MODE": {
         "toml_path": "dashboard.debug_mode",
         "env_var": "IBCTL_DEBUG_MODE"

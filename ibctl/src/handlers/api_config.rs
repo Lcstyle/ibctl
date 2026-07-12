@@ -62,6 +62,18 @@ impl ApiConfigSettings {
 }
 
 /// Checkbox labels for order precaution bypasses in the API/Precautions page.
+///
+/// These strings are prefixes of the Gateway JLabel text (Gateway adds
+/// trailing periods on some rows, plus extra qualifiers on the
+/// "No Overfill" row). The matcher does case-insensitive `startsWith`,
+/// which handles those. Case matches Gateway's own inconsistent
+/// rendering — most rows say "API Orders" but rows 5 and 9 use
+/// lowercase "API orders". Faithful mirroring keeps the exact-match
+/// fast path hitting.
+///
+/// Rows 5 and 9 (embedded `"…"`) go on the wire as JSON-escaped `\"`;
+/// see HttpApi.decodeJsonString for the wire-side decode fix that made
+/// this class of label match at all (Lcstyle/ibctl#4).
 const PRECAUTION_LABELS: &[&str] = &[
     "Bypass Order Precautions for API Orders",
     "Bypass Bond warning for API Orders",
@@ -73,6 +85,26 @@ const PRECAUTION_LABELS: &[&str] = &[
     "Bypass No Overfill Protection precaution",
     "Bypass Route Marketable to BBO warning for API orders",
 ];
+
+/// Summary returned by `apply_api_config` for the state machine to fold into
+/// its Stats counters. A non-zero `precaution_labels_not_found` signals label
+/// drift between our constants and the Gateway UI — the CORE-level fix is a
+/// tolerant matcher in the Java agent; this count is the TRIPWIRE that
+/// screams if the tolerant matcher itself starts missing.
+#[derive(Debug, Clone, Default)]
+pub struct ApiConfigReport {
+    pub precaution_labels_not_found: u32,
+    pub read_only_api_label_not_found: u32,
+}
+
+/// Gateway version string used only for diagnostic warn logs on label drift.
+/// Reads at call time (not init) so a container restart with a different
+/// TWS_MAJOR_VRSN picks up the new value without a re-plumbing.
+fn gateway_version_hint() -> String {
+    std::env::var("IB_GATEWAY_VERSION")
+        .or_else(|_| std::env::var("TWS_MAJOR_VRSN"))
+        .unwrap_or_else(|_| "unknown".to_string())
+}
 
 /// Short pause — just enough for the Swing EDT to process the previous action.
 /// Configurable via \[timing\] ui_tick_ms in ibctl.toml.
@@ -92,14 +124,47 @@ async fn dismiss_popups(client: &AgentClient, config_win_id: WindowId) {
     }
 }
 
+/// Toggle each PRECAUTION_LABELS entry on the currently-selected Precautions
+/// panel, returning the count of labels the Gateway UI didn't match.
+///
+/// A non-zero return means the Java-side tolerant matcher failed too —
+/// either Gateway renamed a checkbox or the label carries a Unicode oddity
+/// beyond what `SwingInspector.normalizeLabel` handles today. Each miss is
+/// warn-logged with the current `IB_GATEWAY_VERSION` so drift can be
+/// correlated to a specific Gateway release.
+///
+/// Extracted from apply_api_config so the tripwire is unit-testable without
+/// having to mock every menu-navigation call the outer function performs.
+async fn apply_precaution_labels(client: &AgentClient, cid: WindowId, bypass: bool) -> u32 {
+    let mut missing = 0u32;
+    for label in PRECAUTION_LABELS {
+        match client.set_checkbox(cid, label, Some(bypass)).await {
+            Ok(outcome) if !outcome.found => {
+                log::warn!(
+                    "PRECAUTION_LABELS drift: '{}' not found (IB Gateway {}); Gateway responded: {}",
+                    label,
+                    gateway_version_hint(),
+                    outcome.error.as_deref().unwrap_or("<no error>")
+                );
+                missing = missing.saturating_add(1);
+            }
+            Ok(_) => {}
+            Err(e) => log::warn!("set_checkbox failed for '{}': {}", label, e),
+        }
+    }
+    missing
+}
+
 pub async fn apply_api_config(
     client: &AgentClient,
     settings: &ApiConfigSettings,
     tick_ms: u64,
-) -> Result<(), ApiConfigError> {
+) -> Result<ApiConfigReport, ApiConfigError> {
+    let mut report = ApiConfigReport::default();
+
     if !settings.has_settings() {
         log::info!("No API configuration settings to apply");
-        return Ok(());
+        return Ok(report);
     }
 
     log::info!("Applying API configuration settings");
@@ -178,15 +243,28 @@ pub async fn apply_api_config(
         let _ = client.type_text(cid, 1, id).await;
     }
 
-    // Read-Only API: force toggle to ensure it registers
+    // Read-Only API: force toggle to ensure it registers.
+    // Wraps each call so a Gateway UI rename shows up as a
+    // read_only_api_label_not_found bump on /api/status. Dedup within the
+    // force-toggle sequence: the same missing label counts once, not twice.
     if let Some(read_only) = settings.read_only_api {
+        let mut ro_missing_seen = false;
+        let mut check = |outcome: crate::agent_client::CheckboxOutcome| {
+            if !outcome.found && !ro_missing_seen {
+                log::warn!(
+                    "PRECAUTION_LABELS drift: 'Read-Only API' not found (IB Gateway {}); Gateway responded: {}",
+                    gateway_version_hint(),
+                    outcome.error.as_deref().unwrap_or("<no error>")
+                );
+                report.read_only_api_label_not_found = 1;
+                ro_missing_seen = true;
+            }
+        };
         if !read_only {
             log::info!("Ensuring Read-only API is OFF");
-            let _ = client.set_checkbox(cid, "Read-Only API", Some(true)).await;
-            let _ = client.set_checkbox(cid, "Read-Only API", Some(false)).await;
-        } else {
-            let _ = client.set_checkbox(cid, "Read-Only API", Some(true)).await;
-        }
+            if let Ok(o) = client.set_checkbox(cid, "Read-Only API", Some(true)).await { check(o); }
+            if let Ok(o) = client.set_checkbox(cid, "Read-Only API", Some(false)).await { check(o); }
+        } else if let Ok(o) = client.set_checkbox(cid, "Read-Only API", Some(true)).await { check(o); }
     }
 
     // --- API -> Precautions ---
@@ -195,9 +273,8 @@ pub async fn apply_api_config(
         tick(tick_ms).await;
         log::info!("Setting order precaution bypasses to {}", bypass);
 
-        for label in PRECAUTION_LABELS {
-            let _ = client.set_checkbox(cid, label, Some(bypass)).await;
-        }
+        report.precaution_labels_not_found = apply_precaution_labels(client, cid, bypass).await;
+
         // Single sweep for confirmation dialogs
         tick(tick_ms).await;
         dismiss_popups(client, cid).await;
@@ -250,7 +327,7 @@ pub async fn apply_api_config(
     }
 
     log::info!("API configuration applied successfully");
-    Ok(())
+    Ok(report)
 }
 
 /// Parse a time string like "11:30 PM" or "09:00" into (time, am_pm).
@@ -343,5 +420,102 @@ mod tests {
     #[test]
     fn test_precaution_labels_count() {
         assert_eq!(PRECAUTION_LABELS.len(), 9);
+    }
+
+    /// Faithfulness test: PRECAUTION_LABELS should mirror the exact casing
+    /// IB Gateway 10.47.1b renders. Live probe on 2026-07-12 showed rows 5
+    /// and 9 use lowercase "API orders" while the other 5 API-Orders rows
+    /// use "API Orders". Case-insensitive matching hides mismatches, but
+    /// keeping the constant faithful lets the exact-match fast path hit
+    /// (which is a fraction faster) and preserves debuggability when
+    /// eyeballing logs.
+    #[test]
+    fn test_precaution_labels_mirror_gateway_casing() {
+        let lowercase_orders_indices = [4usize, 8];
+        for (i, label) in PRECAUTION_LABELS.iter().enumerate() {
+            if lowercase_orders_indices.contains(&i) {
+                assert!(
+                    label.contains("API orders"),
+                    "row {i} should use lowercase 'API orders' to mirror Gateway 10.47.1b; got: {label:?}"
+                );
+            } else if label.to_lowercase().contains("api orders") {
+                assert!(
+                    label.contains("API Orders"),
+                    "row {i} should use capital 'API Orders' to mirror Gateway 10.47.1b; got: {label:?}"
+                );
+            }
+        }
+    }
+
+    // --- Tripwire tests: apply_precaution_labels counts found:false ---
+
+    use crate::agent_client::{AgentClient, MockAgent};
+
+    #[tokio::test]
+    async fn apply_precaution_labels_returns_zero_when_all_labels_match() {
+        let client = AgentClient::mock(MockAgent::default());
+        let missing = apply_precaution_labels(&client, WindowId(1), true).await;
+        assert_eq!(missing, 0);
+    }
+
+    #[tokio::test]
+    async fn apply_precaution_labels_counts_the_embedded_quote_case() {
+        // Simulate the Lcstyle/ibctl#4 failure shape: exactly one label
+        // — the embedded-quote row — comes back found:false, the other
+        // eight match. Before the fix on the agent's JSON decoder, the
+        // wire-side `\"` escape survived into `setCheckBox`, so this row
+        // never matched Gateway's ASCII-quote JLabel text.
+        let mut not_found = std::collections::HashSet::new();
+        not_found.insert(
+            "Bypass \"same action pair trade\" warning for API orders".to_string(),
+        );
+        let client = AgentClient::mock(MockAgent {
+            not_found_labels: not_found,
+            ..Default::default()
+        });
+        let missing = apply_precaution_labels(&client, WindowId(1), true).await;
+        assert_eq!(missing, 1);
+    }
+
+    #[tokio::test]
+    async fn apply_precaution_labels_counts_every_missing_label_up_to_len() {
+        // Full drift — every label goes missing. Saturating_add guards
+        // against overflow; assert we hit the array length.
+        let mut not_found = std::collections::HashSet::new();
+        for label in PRECAUTION_LABELS {
+            not_found.insert((*label).to_string());
+        }
+        let client = AgentClient::mock(MockAgent {
+            not_found_labels: not_found,
+            ..Default::default()
+        });
+        let missing = apply_precaution_labels(&client, WindowId(1), true).await;
+        assert_eq!(missing as usize, PRECAUTION_LABELS.len());
+    }
+
+    #[tokio::test]
+    async fn set_checkbox_outcome_reads_found_false_from_mock() {
+        // Direct check on the wire type — MockAgent should surface
+        // found:false when a label is in not_found_labels, not conflate
+        // it with the outer envelope's ok field.
+        let mut not_found = std::collections::HashSet::new();
+        not_found.insert("Missing Label".to_string());
+        let client = AgentClient::mock(MockAgent {
+            not_found_labels: not_found,
+            ..Default::default()
+        });
+
+        let hit = client
+            .set_checkbox(WindowId(1), "Present Label", Some(true))
+            .await
+            .expect("mock cannot fail");
+        assert!(hit.found);
+
+        let miss = client
+            .set_checkbox(WindowId(1), "Missing Label", Some(true))
+            .await
+            .expect("mock cannot fail");
+        assert!(!miss.found);
+        assert!(miss.error.is_some());
     }
 }

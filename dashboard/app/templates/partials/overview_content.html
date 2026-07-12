@@ -1,39 +1,161 @@
-<!-- Site configuration banner -->
-{% if site_config %}
-<div class="site-banner">
-    <div class="site-role">
-        <span class="instance-badge-sm {% if site_config.role == 'primary' %}badge-live{% else %}badge-paper{% endif %}">
-            {{ site_config.role | upper }}
-        </span>
-        <span style="color: #888; font-size: 12px; margin-left: 8px;">
-            {% if site_config.auto_launch %}Auto-launch enabled{% else %}Waiting for START command{% endif %}
-        </span>
-    </div>
-</div>
-{% endif %}
+{# ==========================================================================
+   Overview page — unified flat-card capsule (v2 refactor).
+
+   The v1 accordion behavior is gone. Every section renders always-visible
+   inside a single ``.overview-capsule`` frame; sibling sections are
+   separated only by a hairline top-border. Inner sections are transparent
+   panels with no card frame of their own.
+
+   Structure:
+       .overview-capsule
+         section#overview-system              — provenance (4 rows)
+         section#overview-deployment-site     — site role + launch policy
+         section[data-accordion="ib-status"]  — IB status (always visible)
+         section[data-accordion="live"]       — LIVE gateway
+         section[data-accordion="paper"]      — PAPER gateway
+
+   Notes for scrapers:
+     * ``#ibctl-version`` (hidden) still lives in base.html.
+     * ``data-accordion="ib-status" | "live" | "paper"`` markers are kept
+       here even though no accordion behavior remains — external tooling
+       may key on them.
+
+   Notes for accessibility:
+     * All five peer sections (System / Deployment Site / IB Status /
+       LIVE / PAPER) use ``<h2 class="section-header">`` so the
+       document outline is flat (Review A HIGH-1). The LIVE/PAPER
+       heading wraps the badge and carries an sr-only " Gateway"
+       suffix so screen readers hear "LIVE Gateway" not just "LIVE"
+       (Review A HIGH-3).
+     * ``<span class="term" tabindex="0" title="...">…</span>`` wraps
+       semantic terms (Recovery / aggressive / Gateway state /
+       Deployment Site / Site role / Launch policy) so keyboard
+       operators can Tab-to-focus and hover-tooltip the word for a
+       plain-English definition (Review A HIGH-2 / MED-6). The dotted
+       underline + ``cursor: help`` is the sighted-mouse affordance;
+       ``:focus-visible`` provides the keyboard affordance.
+     * Sections with an unhealthy instance carry ``data-health="error"``
+       which paints a red left-stripe on the section, so operators
+       scanning the page during an incident don't have to spot the
+       small health-pill alone (Review A MED-4).
+   ========================================================================== #}
+
+{# ---- Helpers ---------------------------------------------------------- #}
+{# Elapsed-seconds formatter — mirrors base.html's formatElapsed() so the
+   header recovery-badge and per-instance row here render the same string
+   (Review C Q8). No leading space around the value; caller adds separators. #}
+{% macro elapsed_label(secs) -%}
+    {%- set e = secs | int(0) -%}
+    {%- if e < 60 -%}{{ e }}s
+    {%- elif e < 3600 -%}{{ (e // 60) }}m
+    {%- elif e < 86400 -%}{{ (e // 3600) }}h{{ ((e % 3600) // 60) }}m
+    {%- else -%}{{ (e // 86400) }}d{{ ((e % 86400) // 3600) }}h
+    {%- endif -%}
+{%- endmacro %}
+
+{# Phase-enum abbreviator — mirrors base.html's phaseAbbrev() so the badge
+   and the recovery row agree on the human string (Review C Q6/Q8). Unknown
+   phases return empty so the row hides instead of leaking raw enum. #}
+{% macro phase_abbrev(phase) -%}
+    {%- if phase == 'backoff_every_15min' -%}backoff
+    {%- elif phase == 'given_up' -%}given up
+    {%- elif phase == 'aggressive' -%}aggressive
+    {%- else -%}{%- endif -%}
+{%- endmacro %}
+
+{% macro recovery_visible(rec) -%}
+    {# Hide when we have no recovery block, no known phase, or aggressive
+       < 5min — mirrors the header recovery-badge severity rule. The
+       known-phase whitelist keeps unknown phases from leaking raw enum
+       text (forward-compat safety, matches base.html recoverySeverity). #}
+    {%- if not rec -%}0
+    {%- elif not rec.phase -%}0
+    {%- elif rec.phase not in ['backoff_every_15min', 'given_up', 'aggressive'] -%}0
+    {%- elif rec.phase == 'aggressive' and (rec.phase_elapsed_secs | int(0)) < 300 -%}0
+    {%- else -%}1
+    {%- endif -%}
+{%- endmacro %}
+
+{# Trading-mode humaniser — "both" is jargon; sections elsewhere on this
+   page already title-case LIVE and PAPER, so match that convention. Unknown
+   values pass through so a future daemon adding a mode doesn't render blank. #}
+{% macro trading_mode_label(ctx) -%}
+    {%- if ctx == 'both' -%}Live + Paper
+    {%- elif ctx == 'live' -%}Live
+    {%- elif ctx == 'paper' -%}Paper
+    {%- else -%}{{ ctx }}
+    {%- endif -%}
+{%- endmacro %}
 
 {% set ib_enabled = ib_status is defined and ib_status is not none %}
+{% set bb = build_badge if build_badge else {} %}
 
-<!-- IB Status accordion — expanded by default, only if IB status feature is enabled -->
-{% if ib_enabled %}
-{% set ib = ib_status %}
-{% set scraper = scraper_info %}
-<div class="accordion-card" data-accordion="ib-status" data-default-open="true">
-    <div class="accordion-header" onclick="toggleAccordion(this)">
-        <div class="accordion-title">
-            <span class="accordion-label">IB STATUS</span>
-            <span class="ib-dot {% if ib.status == 'available' %}ib-dot-ok{% elif ib.status == 'maintenance' or ib.status == 'scheduled' %}ib-dot-warn{% else %}ib-dot-err{% endif %}"></span>
-            <span class="accordion-status" style="color: {% if ib.status == 'available' %}#4ade80{% elif ib.status == 'maintenance' %}#fbbf24{% else %}#ef4444{% endif %};">
+<div class="overview-capsule">
+
+    {# ============ System — build provenance only ==========================
+       Runtime state (Gateway state, Recovery) moved OUT to the per-instance
+       sections. System holds ONLY four reference rows so it stays a
+       stable provenance strip that never grows or shrinks with runtime. #}
+    <section class="overview-section" id="overview-system">
+        <h2 class="section-header">System</h2>
+        <dl class="kv-grid">
+            <dt>Version</dt>
+            <dd id="sys-build">
+                {%- set primary_ver = (instances[0].status.version if instances and instances[0].status else '') -%}
+                {%- if primary_ver %}v{{ primary_ver }}{% else %}&mdash;{% endif -%}
+            </dd>
+
+            <dt>Build name</dt>
+            <dd>{% if bb.mnemonic %}{{ bb.mnemonic }}{% else %}&mdash;{% endif %}</dd>
+
+            <dt>Deploy time</dt>
+            <dd>{% if bb.human_time %}{{ bb.human_time }}{% else %}&mdash;{% endif %}</dd>
+
+            <dt>Trading mode</dt>
+            <dd>{% if bb.context %}{{ trading_mode_label(bb.context) }}{% else %}&mdash;{% endif %}</dd>
+        </dl>
+    </section>
+
+    {# ============ Deployment Site ======================================== #}
+    {% if site_config %}
+    <section class="overview-section" id="overview-deployment-site">
+        <h2 class="section-header">
+            <span class="term" tabindex="0" title="Deployment Site — role and launch policy of this host in the failover mesh.">Deployment Site</span>
+        </h2>
+        <dl class="kv-grid">
+            <dt><span class="term" tabindex="0" title="Site role — primary or secondary; primary launches the Gateway, secondary stays warm.">Site role</span></dt>
+            <dd>{{ site_config.role }}</dd>
+            <dt><span class="term" tabindex="0" title="Launch policy — whether the Gateway auto-launches at boot or waits for a START command.">Launch policy</span></dt>
+            <dd>
+                {% if site_config.auto_launch %}auto-launch on boot{% else %}wait for START command{% endif %}
+            </dd>
+        </dl>
+    </section>
+    {% endif %}
+
+    {# ============ IB Status (always visible) ============================= #}
+    {% if ib_enabled %}
+    {% set ib = ib_status %}
+    {% set scraper = scraper_info %}
+    {# Section-level health escalation (Review A MED-4): a data-health="error"
+       stripe is painted on unavailable IB status so the section reads as
+       distressed at a glance, not just via the small dot. #}
+    {% set ib_health = 'ok' if ib.status == 'available' else ('warning' if ib.status in ('maintenance', 'scheduled') else 'error') %}
+    <section class="overview-section" data-accordion="ib-status" data-health="{{ ib_health }}">
+        <div class="section-header-row">
+            <h2 class="section-header">IB Status</h2>
+            <span class="ib-dot {% if ib.status == 'available' %}ib-dot-ok{% elif ib.status == 'maintenance' or ib.status == 'scheduled' %}ib-dot-warn{% else %}ib-dot-err{% endif %}"
+                  role="img" aria-label="IB status indicator: {{ ib.status }}"></span>
+            {# Text color mirrors dot-color: scheduled/maintenance are amber,
+               available is green, everything else red (Review B CONFIRMED-2). #}
+            <span class="section-status" style="color: {% if ib.status == 'available' %}#4ade80{% elif ib.status == 'maintenance' or ib.status == 'scheduled' %}#fbbf24{% else %}#ef4444{% endif %};">
                 {{ ib.status | upper }}
             </span>
             {% if ib.reason %}
-            <span class="accordion-detail">{{ ib.reason[:60] }}</span>
+            <span class="section-detail">{{ ib.reason[:60] }}</span>
             {% endif %}
         </div>
-        <span class="accordion-chevron">&#9660;</span>
-    </div>
-    <div class="accordion-body">
-        <div style="display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-start;">
+        <div style="display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-start; margin-top: 6px;">
             <!-- Left: status + alerts -->
             <div style="flex: 1; min-width: 260px;">
                 {% for inst in instances %}
@@ -60,7 +182,7 @@
                     {% endfor %}
                 </div>
                 {% else %}
-                <div style="margin-top: 6px; color: #555; font-size: 11px;">No active alerts</div>
+                <div style="margin-top: 6px; color: #a1a1aa; font-size: 11px;">No active alerts</div>
                 {% endif %}
             </div>
             <!-- Right: scraper + connectivity -->
@@ -72,34 +194,49 @@
                     <div class="config-item"><span class="config-key">Last Push</span><span class="config-val">{{ scraper.last_pushed_status }}</span></div>
                 </div>
                 <div style="display: flex; gap: 10px; margin-top: 8px; align-items: center;">
-                    <span class="ib-dot {% if scraper.internet_ok %}ib-dot-ok{% else %}ib-dot-err{% endif %}"></span>
-                    <span style="font-size: 11px; color: #888;">Internet</span>
-                    <span class="ib-dot {% if scraper.ib_reachable %}ib-dot-ok{% else %}ib-dot-err{% endif %}"></span>
-                    <span style="font-size: 11px; color: #888;">IB Page</span>
+                    <span class="ib-dot {% if scraper.internet_ok %}ib-dot-ok{% else %}ib-dot-err{% endif %}"
+                          role="img" aria-label="Internet {% if scraper.internet_ok %}connected{% else %}disconnected{% endif %}"></span>
+                    <span style="font-size: 11px; color: #a1a1aa;" aria-hidden="true">Internet</span>
+                    <span class="ib-dot {% if scraper.ib_reachable %}ib-dot-ok{% else %}ib-dot-err{% endif %}"
+                          role="img" aria-label="IB status page {% if scraper.ib_reachable %}reachable{% else %}unreachable{% endif %}"></span>
+                    <span style="font-size: 11px; color: #a1a1aa;" aria-hidden="true">IB Page</span>
                 </div>
                 {% if scraper.last_fetch_error %}
                 <div style="margin-top: 6px; font-size: 11px; color: #ef4444;">{{ scraper.last_fetch_error }}</div>
                 {% endif %}
             </div>
         </div>
-    </div>
-</div>
-{% endif %}
+    </section>
+    {% endif %}
 
-<!-- Instance accordion cards -->
-{% for inst in instances %}
-{% set s = inst.get('status', {}) or {} %}
-{% set advisory = s.get('client_advisory', {}) or {} %}
-{% set stats = s.get('stats', {}) or {} %}
-{% set jvm = s.get('jvm', {}) or {} %}
-{% set socat = s.get('socat', {}) or {} %}
-{% set clients = s.get('clients', {}) or {} %}
-{% set mode = inst.get('mode', 'unknown') %}
+    {# ============ Per-instance gateway sections (LIVE / PAPER) ===========
+       Gateway state + Recovery rows now live inside these sections at the
+       top of the section body, above the inner-cards stat row. #}
+    {% for inst in instances %}
+    {% set s = inst.get('status', {}) or {} %}
+    {% set advisory = s.get('client_advisory', {}) or {} %}
+    {% set stats = s.get('stats', {}) or {} %}
+    {% set jvm = s.get('jvm', {}) or {} %}
+    {% set socat = s.get('socat', {}) or {} %}
+    {% set clients = s.get('clients', {}) or {} %}
+    {% set mode = inst.get('mode', 'unknown') %}
+    {% set rec = s.get('recovery') %}
 
-<div class="accordion-card" data-accordion="{{ mode }}">
-    <div class="accordion-header" onclick="toggleAccordion(this)">
-        <div class="accordion-title">
-            <span class="instance-badge-sm {% if mode == 'live' %}badge-live{% else %}badge-paper{% endif %}">{{ mode | upper }}</span>
+    {# Section-level health escalation (Review A MED-4): unhealthy instances
+       get a data-health="error" attribute so the CSS paints a red left-stripe
+       on the section itself. `should_wait` maps to warning; anything else that
+       isn't `ready` is treated as error. #}
+    {% set inst_health = 'error' if inst.get('error') else ('ok' if s.get('ready') else ('warning' if advisory.get('should_wait') else 'error')) %}
+    <section class="overview-section" data-accordion="{{ mode }}" data-health="{{ inst_health }}">
+        <div class="section-header-row">
+            {# Heading hierarchy (Review A HIGH-1/HIGH-3): promote the badge to an
+               <h2 class="section-header"> so all five peer sections share the
+               same heading level, and add sr-only " Gateway" so a screen reader
+               announces "LIVE Gateway" not just "LIVE". #}
+            <h2 class="section-header instance-heading">
+                <span class="instance-badge-sm {% if mode == 'live' %}badge-live{% else %}badge-paper{% endif %}">{{ mode | upper }}</span>
+                <span class="sr-only"> Gateway</span>
+            </h2>
             {% if inst.get('error') %}
             <span class="health-pill health-error">Unreachable</span>
             {% elif s.get('ready') %}
@@ -109,28 +246,57 @@
             {% else %}
             <span class="health-pill health-error">{{ s.get('state', 'Unknown') }}</span>
             {% endif %}
-            <span class="accordion-detail">
+            <span class="section-detail">
                 {% set u = s.get('connected_uptime_secs') or s.get('uptime_secs') %}
                 {% if u is not none and u %}
                 {% if u > 3600 %}{{ (u // 3600) }}h {{ ((u % 3600) // 60) }}m{% elif u > 60 %}{{ (u // 60) }}m{% else %}{{ u }}s{% endif %}
                 {% endif %}
-                {% if clients.get('count') %} · {{ clients.get('count') }} clients{% endif %}
+                {% if clients.get('count') %} &middot; {{ clients.get('count') }} clients{% endif %}
             </span>
         </div>
-        <span class="accordion-chevron">&#9660;</span>
-    </div>
-    <div class="accordion-body">
+
         {% if inst.get('error') %}
-        <div style="color: #ef4444; font-size: 13px;">{{ inst.get('error') }}</div>
+        <div style="color: #ef4444; font-size: 13px; margin-top: 6px;">{{ inst.get('error') }}</div>
         {% else %}
+
+        {# Runtime kv-grid — Gateway state (always) + Recovery (conditional).
+           This kv-grid is the ONLY place the raw Gateway state string is
+           surfaced now — the inner-cards "State" tile was removed because it
+           was the third copy of the same value (Review B CONFIRMED-1: the
+           health-pill up in .section-header-row is a health *interpretation*,
+           the kv-grid Gateway state row is the canonical raw value, and the
+           old inner-card duplicated the kv-grid row verbatim). #}
+        <dl class="kv-grid" style="margin-top: 6px; margin-bottom: 8px;">
+            <dt><span class="term" tabindex="0" title="Gateway state — connection state reported by the Java Gateway process (Connected, Disconnected, etc.).">Gateway state</span></dt>
+            <dd>
+                {{- s.get('state', 'unknown') -}}
+            </dd>
+
+            {% if recovery_visible(rec) | int == 1 %}
+            <dt><span class="term" tabindex="0" title="Recovery loop — background task that reconnects the Gateway after outages.">Recovery</span></dt>
+            <dd>
+                {#- phase_abbrev() so we render "backoff" not
+                    "backoff_every_15min", and suppress the elapsed suffix
+                    for `given_up` to match the header badge. The phase
+                    word itself is wrapped in a term span so operators can
+                    hover for a definition of the phase. -#}
+                {%- set _phase = phase_abbrev(rec.phase) | trim -%}
+                {%- if rec.phase == 'aggressive' -%}
+                    <span class="term" tabindex="0" title="Aggressive phase — retry every 30s to reconnect fast after a fresh outage.">{{ _phase }}</span>
+                {%- elif rec.phase == 'backoff_every_15min' -%}
+                    <span class="term" tabindex="0" title="Backoff phase — retry every 15min after aggressive reconnects fail.">{{ _phase }}</span>
+                {%- elif rec.phase == 'given_up' -%}
+                    <span class="term" tabindex="0" title="Given up — recovery loop stopped after exhausting retries; operator intervention required.">{{ _phase }}</span>
+                {%- else -%}
+                    {{ _phase }}
+                {%- endif -%}
+                {%- if rec.phase != 'given_up' %} &middot; {{ elapsed_label(rec.phase_elapsed_secs) }}{% endif %}
+            </dd>
+            {% endif %}
+        </dl>
+
         <!-- Stat cards row -->
         <div class="inner-cards">
-            <div class="inner-card">
-                <div class="inner-label">State</div>
-                <div class="inner-val {% if s.get('state') == 'Connected' %}status-connected{% elif 'Error' in (s.get('state', '') | string) %}status-error{% else %}status-warning{% endif %}">
-                    {{ s.get('state', 'Unknown') }}
-                </div>
-            </div>
             <div class="inner-card">
                 <div class="inner-label">Uptime</div>
                 <div class="inner-val">
@@ -139,7 +305,7 @@
                     {% if u > 3600 %}{{ (u // 3600) }}h {{ ((u % 3600) // 60) }}m
                     {% elif u > 60 %}{{ (u // 60) }}m {{ (u % 60) }}s
                     {% else %}{{ u }}s{% endif %}
-                    {% else %}—{% endif %}
+                    {% else %}&mdash;{% endif %}
                 </div>
             </div>
             <div class="inner-card" {% if clients.get('ids') %}title="{{ clients.get('ids', []) | join(' · ') }}"{% endif %}>
@@ -150,14 +316,14 @@
                 <div class="inner-label">JVM</div>
                 <div class="inner-val" style="font-size: 13px;">
                     <span class="{% if jvm.get('alive') %}status-connected{% else %}status-error{% endif %}">{{ 'Running' if jvm.get('alive') else 'Stopped' }}</span>
-                    {% if jvm.get('pid') %}<span style="color: #888;"> · PID {{ jvm.get('pid') }}</span>{% endif %}
+                    {% if jvm.get('pid') %}<span style="color: #a1a1aa;"> &middot; PID {{ jvm.get('pid') }}</span>{% endif %}
                 </div>
             </div>
             <div class="inner-card">
                 <div class="inner-label">Socat</div>
                 <div class="inner-val" style="font-size: 13px;">
                     <span class="{% if socat.get('running') %}status-connected{% else %}status-error{% endif %}">{{ 'Active' if socat.get('running') else 'Inactive' }}</span>
-                    {% if socat.get('pid') %}<span style="color: #888;"> · PID {{ socat.get('pid') }}</span>{% endif %}
+                    {% if socat.get('pid') %}<span style="color: #a1a1aa;"> &middot; PID {{ socat.get('pid') }}</span>{% endif %}
                 </div>
             </div>
             <div class="inner-card">
@@ -171,8 +337,8 @@
         </div>
 
         {% if stats.get('dialogs_dismissed', 0) > 0 or stats.get('restarts_today', 0) > 0 %}
-        <div style="font-size: 11px; color: #555; margin-top: 2px; margin-bottom: 6px;">
-            {{ stats.get('dialogs_dismissed', 0) }} dialogs dismissed · {{ stats.get('restarts_today', 0) }} restarts today
+        <div style="font-size: 11px; color: #a1a1aa; margin-top: 2px; margin-bottom: 6px;">
+            {{ stats.get('dialogs_dismissed', 0) }} dialogs dismissed &middot; {{ stats.get('restarts_today', 0) }} restarts today
         </div>
         {% endif %}
 
@@ -189,33 +355,126 @@
             <span id="cmd-result-{{ mode }}" class="ctrl-result"></span>
         </div>
         {% endif %}
-    </div>
+    </section>
+    {% endfor %}
+
 </div>
-{% endfor %}
 
 <style>
-/* Accordion cards */
-.accordion-card {
-    background: #0d1b3e; border: 1px solid #16213e; border-radius: 8px;
-    margin-bottom: 6px; overflow: hidden;
+/* Unified overview capsule — the ONLY card frame on this page.
+   Inner sections are transparent panels separated by a hairline
+   top-border (see the adjacent-sibling rule below). */
+.overview-capsule {
+    background: #0a1428;
+    border: 1px solid #16213e;
+    border-radius: 10px;
+    padding: 4px 14px;
+    display: flex;
+    flex-direction: column;
 }
-.accordion-card.open { border-color: #1e3a6e; }
-.accordion-header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 10px 14px; cursor: pointer; user-select: none;
+
+.overview-section {
+    /* Inner sections — transparent, borderless, vertical padding only.
+       The flat-card design keeps ONE card frame (the capsule) and lets
+       sections flow inside without their own borders. */
+    background: transparent;
+    border-radius: 0;
+    padding: 12px 0;
 }
-.accordion-header:hover { background: #112040; }
-.accordion-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.accordion-label {
-    font-size: 11px; color: #555; font-weight: 700;
-    letter-spacing: 1px; text-transform: uppercase;
+
+.overview-section + .overview-section {
+    /* Hairline separator between sibling sections — the flat-card
+       design's only visual divider. rgba(255,255,255,0.06) is a
+       ~6%-opacity white that reads as a hairline on the navy capsule. */
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
-.accordion-status { font-weight: 600; font-size: 13px; }
-.accordion-detail { color: #555; font-size: 12px; }
-.accordion-chevron { color: #555; font-size: 10px; transition: transform 0.2s; }
-.accordion-card.open .accordion-chevron { transform: rotate(180deg); }
-.accordion-body { display: none; padding: 12px 14px; border-top: 1px solid #16213e; }
-.accordion-card.open .accordion-body { display: block; }
+
+/* Section-level health escalation (Review A MED-4).
+   Without this, a LIVE outage and a healthy PAPER share identical section
+   chrome — only the small health-pill changes color. A 3px inset stripe
+   on the left edge draws the eye to the whole section during an incident.
+   The transparent background keeps the flat-card look intact; the stripe
+   sits inside the padding so section content isn't shifted horizontally. */
+.overview-section[data-health="error"]   { box-shadow: inset 3px 0 0 #ef4444; padding-left: 8px; margin-left: -8px; }
+.overview-section[data-health="warning"] { box-shadow: inset 3px 0 0 #fbbf24; padding-left: 8px; margin-left: -8px; }
+
+.section-header {
+    font-size: 11px;
+    color: #a1a1aa;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+}
+
+/* Per-section header row — badge + status pill + trailing detail,
+   used by IB Status / LIVE / PAPER. */
+.section-header-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 4px;
+}
+.section-header-row .section-header {
+    margin-bottom: 0;
+}
+.section-status { font-weight: 600; font-size: 13px; }
+.section-detail { color: #a1a1aa; font-size: 12px; }
+
+/* Semantic term wrapper — dotted underline + help cursor signal
+   the word is hoverable for a plain-English definition. `tabindex="0"`
+   on the span (see markup) makes it Tab-focusable so keyboard users
+   can trigger the native title tooltip. The focus ring is defined
+   here rather than inherited from base.html's global rule because
+   plain <span> elements aren't in that selector list (Review A
+   HIGH-2 + MED-6). */
+.term {
+    text-decoration: underline dotted #a1a1aa;
+    text-underline-offset: 3px;
+    cursor: help;
+}
+.term:focus-visible {
+    outline: 2px solid #60a5fa;
+    outline-offset: 2px;
+    border-radius: 2px;
+}
+
+/* Instance heading (LIVE/PAPER) — the h2 wraps the badge but must not
+   force a new line inside the flex header row. The badge and sr-only
+   " Gateway" suffix are the only children; inline-flex keeps them
+   sitting on the row with the health-pill and section-detail. */
+.instance-heading {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    /* Undo the .section-header letter-spacing so the badge (which sets
+       its own 0.8px) isn't visually shoved. Badge sets its own
+       font-size; heading class only contributes the semantic level. */
+    letter-spacing: 0;
+}
+
+/* Key-value definition list — labelled rows in a compact two-column grid.
+   #c4c4c8 clears the WCAG AA contrast floor on dark navy. */
+.kv-grid {
+    display: grid;
+    grid-template-columns: minmax(160px, max-content) 1fr;
+    gap: 4px 16px;
+    font-size: 12px;
+    align-items: baseline;
+    margin: 0;
+}
+.kv-grid dt {
+    color: #c4c4c8;
+    font-weight: 500;
+    letter-spacing: 0.2px;
+}
+.kv-grid dd {
+    color: #d4d4d8;
+    font-family: 'SF Mono', ui-monospace, monospace;
+    word-break: break-word;
+    margin: 0;
+}
 
 /* Instance badge (small) */
 .instance-badge-sm {
@@ -233,7 +492,7 @@
     cursor: default;
 }
 .inner-card[title] { cursor: help; }
-.inner-label { font-size: 10px; color: #888; text-transform: uppercase; letter-spacing: 0.4px; }
+.inner-label { font-size: 10px; color: #c4c4c8; text-transform: uppercase; letter-spacing: 0.4px; }
 .inner-val { font-size: 15px; font-weight: 700; margin-top: 2px; }
 
 /* Controls bar — full-width strip below stat cards */
@@ -252,7 +511,14 @@
     white-space: nowrap;
 }
 .ctrl-btn:hover { border-color: #71717a; color: #e0e0e0; }
+.ctrl-btn:focus-visible {
+    outline: 2px solid #60a5fa;
+    outline-offset: 2px;
+    color: #e0e0e0;
+    border-color: #71717a;
+}
 .ctrl-btn-danger:hover { border-color: #ef4444; color: #ef4444; }
+.ctrl-btn-danger:focus-visible { outline-color: #f87171; }
 .ctrl-result { font-size: 10px; margin-left: auto; }
 
 /* IB Status specific */
@@ -272,9 +538,9 @@
 .alert-sev-critical { background: #7f1d1d; color: #ef4444; }
 .alert-sev-warning { background: #713f12; color: #fbbf24; }
 .alert-sev-scheduled { background: #1e3a5f; color: #60a5fa; }
-.alert-sev-info { color: #71717a; }
+.alert-sev-info { color: #a1a1aa; }
 .alert-blocking { color: #ef4444; font-size: 9px; margin-left: 4px; font-weight: 700; }
-.mono-dim { font-family: 'SF Mono', monospace; font-size: 11px; color: #555; }
+.mono-dim { font-family: 'SF Mono', monospace; font-size: 11px; color: #a1a1aa; }
 
 /* Health pills */
 .health-pill { font-size: 11px; padding: 2px 8px; border-radius: 12px; font-weight: 600; }
@@ -283,71 +549,16 @@
     .inner-cards { grid-template-columns: repeat(3, 1fr); }
     .controls-bar { gap: 4px; }
     .ctrl-btn { padding: 4px 8px; font-size: 10px; }
+    .kv-grid { grid-template-columns: 1fr; gap: 2px 0; }
+    .kv-grid dt { margin-top: 6px; }
 }
-
-/* Site configuration banner */
-.site-banner {
-    background: #0d1b3e;
-    border: 1px solid #16213e;
-    border-radius: 8px;
-    padding: 10px 14px;
-    margin-bottom: 6px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-}
-.site-role { display: flex; align-items: center; }
 </style>
 
 <script>
-// Accordion: opening one closes the others
-function toggleAccordion(header) {
-    var card = header.parentElement;
-    var wasOpen = card.classList.contains('open');
-    document.querySelectorAll('.accordion-card').forEach(function(c) {
-        c.classList.remove('open');
-    });
-    if (!wasOpen) card.classList.add('open');
-}
-
-// Preserve accordion state across HTMX swaps
-(function() {
-    var container = document.getElementById('overview-content');
-    if (!container) return;
-
-    // Before swap: save which accordions are open
-    container.addEventListener('htmx:beforeSwap', function() {
-        var openIds = [];
-        document.querySelectorAll('.accordion-card.open').forEach(function(c) {
-            var id = c.getAttribute('data-accordion');
-            if (id) openIds.push(id);
-        });
-        container._openAccordions = openIds;
-    });
-
-    // After swap: restore open state
-    container.addEventListener('htmx:afterSwap', function() {
-        var openIds = container._openAccordions || [];
-        if (openIds.length > 0) {
-            openIds.forEach(function(id) {
-                var card = document.querySelector('.accordion-card[data-accordion="' + id + '"]');
-                if (card) card.classList.add('open');
-            });
-        } else {
-            // First load: open defaults
-            document.querySelectorAll('.accordion-card[data-default-open="true"]').forEach(function(c) {
-                c.classList.add('open');
-            });
-        }
-    });
-
-    // Initial load: open defaults
-    document.querySelectorAll('.accordion-card[data-default-open="true"]').forEach(function(c) {
-        c.classList.add('open');
-    });
-})();
-
-// Controls
+// Fire a JVM control command against a specific instance. Used by the
+// per-instance controls-bar buttons at the bottom of each LIVE / PAPER
+// section. No accordion state to manage — the flat-card design leaves
+// every section always visible.
 function sendCmd(command, mode) {
     var result = document.getElementById('cmd-result-' + mode);
     fetch(ROOT_PATH + '/api/v1/command', {
@@ -359,13 +570,13 @@ function sendCmd(command, mode) {
     .then(function(d) {
         if (result) {
             result.innerHTML = '<span style="color:' + (d.ok ? '#4ade80' : '#ef4444') + '">' +
-                (d.ok ? '✓ ' + d.command : '✗ ' + (d.error || 'failed')) + '</span>';
+                (d.ok ? '&check; ' + d.command : '&times; ' + (d.error || 'failed')) + '</span>';
             setTimeout(function() { result.innerHTML = ''; }, 3000);
         }
     })
     .catch(function() {
         if (result) {
-            result.innerHTML = '<span style="color:#ef4444">✗ request failed</span>';
+            result.innerHTML = '<span style="color:#ef4444">&times; request failed</span>';
             setTimeout(function() { result.innerHTML = ''; }, 3000);
         }
     });

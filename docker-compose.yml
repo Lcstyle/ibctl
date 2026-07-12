@@ -1,5 +1,6 @@
 services:
   ib-gateway:
+    image: ibctl:latest
     # Use pre-built image (recommended):
     # image: ghcr.io/lcstyle/ibctl:latest
     # Or build from source:
@@ -128,6 +129,18 @@ services:
       IBCTL_API_PORT_PROBE_INTERVAL_SECS: ${IBCTL_API_PORT_PROBE_INTERVAL_SECS:-}
       IBCTL_API_PORT_PROBE_FAILS_BEFORE_REVOKE: ${IBCTL_API_PORT_PROBE_FAILS_BEFORE_REVOKE:-}
 
+      # --- Reconnect recovery coordinator (three-phase Aggressive/Backoff/GivenUp) ---
+      # All empty = TOML default (see [timing.recovery] in docker/ibctl.toml).
+      # DISABLED and FORCE_RESET are Rust-only knobs; the five *_SECS/*_STREAK
+      # vars are also validated by the dashboard preflight.
+      IBCTL_RECOVERY_DISABLED: ${IBCTL_RECOVERY_DISABLED:-}
+      IBCTL_RECOVERY_AGGRESSIVE_MAX_SECS: ${IBCTL_RECOVERY_AGGRESSIVE_MAX_SECS:-}
+      IBCTL_RECOVERY_BACKOFF_MAX_SECS: ${IBCTL_RECOVERY_BACKOFF_MAX_SECS:-}
+      IBCTL_RECOVERY_BACKOFF_INTERVAL_SECS: ${IBCTL_RECOVERY_BACKOFF_INTERVAL_SECS:-}
+      IBCTL_RECOVERY_MIN_SUCCESS_DWELL_SECS: ${IBCTL_RECOVERY_MIN_SUCCESS_DWELL_SECS:-}
+      IBCTL_RECOVERY_FINGERPRINT_STREAK: ${IBCTL_RECOVERY_FINGERPRINT_STREAK:-}
+      IBCTL_RECOVERY_FORCE_RESET: ${IBCTL_RECOVERY_FORCE_RESET:-}
+
       # --- IB System Status Scraper ---
       IBCTL_IB_STATUS_ENABLED: ${IBCTL_IB_STATUS_ENABLED:-}
       IB_STATUS_CHECK_INTERVAL: ${IB_STATUS_CHECK_INTERVAL:-300}
@@ -145,7 +158,12 @@ services:
       IBCTL_VERSION: ${IBCTL_VERSION:-latest}
 
     volumes:
-      - ibctl-persist:/opt/ibctl/persist  # Persistent state: config/, logs/
+      # Persistent state: config/, logs/, AND recovery markers.
+      # The recovery coordinator writes marker files under the two IB
+      # settings-dir prefixes (Jts_live, Jts_paper) — both must live on
+      # this persistent volume, otherwise the GivenUp latch regresses on
+      # every container restart.
+      - ibctl-persist:/opt/ibctl/persist
       # Optional: mount pre-downloaded binaries + dashboard templates for fast updates
       # - ./bin:/opt/ibctl/bin:ro
       # - ./dashboard/app:/opt/ibctl/dashboard/app:ro

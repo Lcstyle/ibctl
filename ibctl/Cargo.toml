@@ -1,7 +1,13 @@
 [package]
 name = "ibctl"
-version = "0.1.0"
+version = "1.2.0"
 edition = "2021"
+# MSRV floor. Kept at 1.83 (the pre-PR-D pin) so devs on distro-shipped
+# rustc (e.g. Fedora's 1.96) can still build locally. CI runs on 1.97 —
+# the bump is safe on CI but not yet enforceable as a floor without
+# breaking distro-only dev environments. Bump this to 1.97 once
+# rust-toolchain.toml can also pin (requires rustup on all dev boxes).
+rust-version = "1.96"
 license = "MIT"
 description = "IBC replacement for automated IB Gateway/TWS login and session management"
 
@@ -17,7 +23,7 @@ thiserror = "2"
 toml = "0.8"
 futures-core = "0.3"
 secrecy = "0.10"
-jiff = "0.2"
+jiff = { version = "0.2", features = ["serde"] }
 nix = { version = "0.30", features = ["signal", "process"] }
 
 [lints]
@@ -25,3 +31,4 @@ workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"
+tokio = { version = "1", features = ["full", "test-util"] }

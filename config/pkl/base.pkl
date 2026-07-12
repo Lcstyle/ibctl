@@ -90,6 +90,7 @@ runtime = new RuntimeConfig {
     loginDialogTimeoutSecs = 120
     restartDelaySecs = 90
     reloginMaxAttempts = 1
+    recovery = new RecoveryTimingConfig {}
   }
 }
 

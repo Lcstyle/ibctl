@@ -12,93 +12,187 @@
 # Copy this file to ibctl.toml and edit as needed.
 
 [auth]
-# IB login username (env: TWS_USERID)
+# IB login username. Set via env var, not in TOML. Must be empty (env-only)
+# or an alphanumeric IB username.
 tws_userid = ""
-# Trading mode: live | paper | both (env: TRADING_MODE)
+# @env: TWS_USERID
+# Trading mode: live | paper | both. Overrides deployment.tradingMode when
+# set directly on runtime.auth.
 trading_mode = "paper"
+# @env: TRADING_MODE
 
 [auth.paper]
-# Paper account username, only needed for dual mode (env: TWS_USERID_PAPER)
+# Paper account username. Set via env var, not in TOML. Must be empty
+# (env-only) or an alphanumeric IB username.
 tws_userid = ""
+# @env: TWS_USERID_PAPER
 
 
 [twofa]
-# TOTP provider: oathtool | builtin (env: TOTP_PROVIDER)
+# TOTP provider: "oathtool" (shells out) or "builtin" (not yet implemented).
 provider = "oathtool"
-# Action on 2FA timeout: restart | exit (env: TWOFA_TIMEOUT_ACTION)
+# @env: TOTP_PROVIDER
+# Action on 2FA timeout: "restart" (re-login) or "exit" (shutdown ibctl).
 timeout_action = "restart"
-# Seconds to wait for 2FA completion (env: TWOFA_EXIT_INTERVAL)
+# @env: TWOFA_TIMEOUT_ACTION
+# Max seconds to wait for 2FA approval before firing timeoutAction.
+# Rust code default is 180; base.pkl overrides to 120 for Docker deployment.
 exit_interval = 180
+# @env: TWOFA_EXIT_INTERVAL
 
 [twofa.backoff]
-# After this many consecutive 2FA timeouts, stop the tight restart loop
-# and enter WaitingForHitl2fa. 0 = disabled (loop forever).
+# After this many consecutive 2FA timeouts, stop the tight restart loop and
+# enter WaitingForHitl2fa. 0 = disabled (legacy behavior: loop forever).
 max_immediate_attempts = 3
-# "restart_then_hitl" | "restart_forever" | "hitl_immediately"
+# @env: IBCTL_TWOFA_MAX_IMMEDIATE_ATTEMPTS
+# What to do when twofa.exitInterval fires.
+#   "restart_then_hitl" — kill JVM, relaunch, count attempt; hit HITL on exhaustion (default)
+#   "restart_forever"   — legacy pre-HITL behavior (never stop)
+#   "hitl_immediately"  — first timeout goes straight to HITL (no restarts at all)
 on_timeout = "restart_then_hitl"
-# HITL strategy: "disabled" | "periodic" | "ntfy_callback" | "both"
+# @env: IBCTL_TWOFA_ON_TIMEOUT
+# HITL resume strategy: "disabled" | "periodic" | "ntfy_callback" | "both".
+# "disabled" = stay in HITL forever (dashboard still reflects state; operator
+# must send HITL_RESUME manually via dashboard).
 strategy = "periodic"
-# Retry cadence in minutes; list traversed then held at last value
+# @env: IBCTL_TWOFA_STRATEGY
+# Retry cadence in minutes for periodic / both. Single value = constant.
+# List = traverse then hold at last element. Must be non-empty for non-
+# disabled strategies that include a timer.
 intervals_minutes = [60]
-# ntfy action URL validity window (1..=168 hours)
+# Hours the signed ntfy-action URL stays valid — one-shot, redeemed on
+# first successful click. Range 1..=168 (one week ceiling).
 callback_valid_hours = 12
-# "any_reach" | "stable" — when to reset the attempt counter
+# @env: IBCTL_TWOFA_CALLBACK_VALID_HOURS
+# Counter-reset policy after a successful reach of Connected.
+#   "any_reach" — reset as soon as Connected (default)
+#   "stable"    — require Connected sustained for stableSecs before reset
 counter_reset = "any_reach"
-# seconds Connected must persist under counter_reset=stable
+# @env: IBCTL_TWOFA_COUNTER_RESET
+# Seconds Connected must persist before resetting the attempt counter
+# when counterReset = "stable". Ignored for "any_reach".
 stable_secs = 300
-# true: cold restart always interrupts HITL; false: defers
+# @env: IBCTL_TWOFA_STABLE_SECS
+# Does a scheduled cold restart preempt WaitingForHitl2fa?
+# true  — cold restart wins; exit HITL, run restart, re-enter login (default)
+# false — cold restart deferred until HITL exits via its normal path
 cold_restart_preempts_hitl = true
-# retries for initial ntfy send failure (only with ntfy_callback/both)
+# @env: IBCTL_TWOFA_COLD_RESTART_PREEMPTS_HITL
+# If the initial ntfy push fails (network blip, ntfy server down), how many
+# times to retry the send on subsequent scheduled-retry wakeups. 0 = give up
+# silently. Only meaningful when strategy includes ntfy_callback.
 ntfy_send_retries = 1
+# @env: IBCTL_TWOFA_NTFY_SEND_RETRIES
 
 # HMAC-SHA256 key for signing ntfy action URLs. Env only — never in TOML.
-# # Env: IBCTL_NTFY_ACTION_SIGNING_KEY
+# Env: IBCTL_NTFY_ACTION_SIGNING_KEY
 
 [gateway]
-# Path to TWS/Gateway installation (env: TWS_PATH)
+# Path to the TWS/Gateway installation directory.
 tws_path = "/home/ibgateway/Jts"
-# Settings storage path, defaults to tws_path (env: TWS_SETTINGS_PATH)
+# @env: TWS_PATH
+# Settings storage path; empty = use twsPath. The recovery-marker persistence
+# layer writes here — ensure Jts_live and Jts_paper live on a persistent volume.
 tws_settings_path = ""
-# Gateway version, auto-detected if empty (env: TWS_MAJOR_VRSN)
+# @env: TWS_SETTINGS_PATH
+# Gateway/TWS major version. Auto-detected from the installation if empty.
 tws_major_vrsn = ""
-# JVM heap size in MB (env: JAVA_HEAP_SIZE)
+# @env: TWS_MAJOR_VRSN
+# JVM heap size in MB.
 java_heap_size = 768
-# Program type: gateway | tws (env: GATEWAY_OR_TWS)
+# @env: JAVA_HEAP_SIZE
+# Program type: "gateway" or "tws".
 gateway_or_tws = "gateway"
+# @env: GATEWAY_OR_TWS
 
 [session]
-# Session conflict action: primary | secondary | primaryoverride (env: IBCTL_SESSION_ACTION)
+# Session conflict action: "primary" | "secondary" | "primaryoverride".
 action = "primary"
-# Incoming API connections: accept | reject | manual (env: IBCTL_ACCEPT_INCOMING)
+# @env: IBCTL_SESSION_ACTION
+# Incoming API connection policy: "accept" | "reject" | "manual".
 accept_incoming = "accept"
+# @env: IBCTL_ACCEPT_INCOMING
 
 [command_server]
-# Enable IBC-compatible TCP command server
+# Enable the IBC-compatible TCP command server (required for dashboard control).
 enabled = false
-# TCP port (env: IBCTL_COMMAND_PORT)
+# Live instance command server TCP port.
 port = 7462
-# Bind address
+# @env: IBCTL_COMMAND_PORT
+# TCP bind address for the command server.
 bind_address = "0.0.0.0"
-# IP allow-list for command access (env: IBCTL_CONTROL_FROM, comma-separated)
+# IP allow-list for command access — CIDR-aware. Env var accepts comma-separated form.
 control_from = ["127.0.0.1"]
+# @env: IBCTL_CONTROL_FROM
 
 [agent]
-# Unix domain socket path for Rust<->Java agent IPC (env: IBCTL_AGENT_SOCKET)
+# Unix domain socket path for Rust↔Java agent IPC.
 socket_path = "/tmp/ibctl.sock"
+# @env: IBCTL_AGENT_SOCKET
 
 [ib_status]
-# When IBSTATUS=unavailable arrives, should ibctl kick a Connected session?
-# Default false — IBSTATUS gates login retry, not active sessions.
+# When the dashboard pushes IBSTATUS=unavailable, should ibctl interrupt
+# an already-authenticated session? Default: false.
+# 
+# IBSTATUS was designed as a retry-gate — if IBKR backends are unreachable,
+# don't hammer them with login attempts. It was never meant to kill active
+# sessions. The scraper can be wrong (CDN blips, slow page updates) and
+# Gateway's own UI label is the authoritative "my session is healthy"
+# signal — detected via label inspection in the revocation bus, not via
+# the public status page.
+# 
+# Set to true only to restore the historical behavior where any unavailable
+# push transitions Connected → WaitingForIB. Only useful if you trust the
+# scraper more than the Gateway UI label.
 kick_active_session = false
 
 [logging]
-# Log level: debug | info | warn | error (env: IBCTL_LOG_LEVEL)
+# Log level: "debug" | "info" | "warn" | "error".
 level = "info"
+# @env: IBCTL_LOG_LEVEL
 
 [timing]
 # TCP probe interval to Gateway's API port during post-auth states.
-# 0 = disabled (rely on label probe only). (env: IBCTL_API_PORT_PROBE_INTERVAL_SECS)
+# Ground-truth check for "is Gateway actually listening?" — independent of
+# Swing UI labels. 0 = disabled (rely on label probe only).
+# Range: 0 | 1..=3600 seconds.
 api_port_probe_interval_secs = 5
+# @env: IBCTL_API_PORT_PROBE_INTERVAL_SECS
 # Consecutive TCP probe failures before firing ApiPortListenerLost revocation.
-# (env: IBCTL_API_PORT_PROBE_FAILS_BEFORE_REVOKE)
+# Absorbs transient OS-level blips. Range: 1..=10.
 api_port_probe_fails_before_revoke = 3
+# @env: IBCTL_API_PORT_PROBE_FAILS_BEFORE_REVOKE
+
+[timing.recovery]
+# master enable — set false in TOML to disable the coordinator entirely
+# without touching env. Env IBCTL_RECOVERY_DISABLED=1|true|yes wins if set.
+# Default true.
+enabled = true
+# Aggressive → Backoff threshold (seconds). Default 3600 (1h).
+aggressive_phase_max_secs = 3600
+# @env: IBCTL_RECOVERY_AGGRESSIVE_MAX_SECS
+# Backoff → GivenUp threshold (seconds). Default 10800 (3h).
+backoff_phase_max_secs = 10800
+# @env: IBCTL_RECOVERY_BACKOFF_MAX_SECS
+# Sleep between Backoff retries (seconds). Default 900 (15 min).
+backoff_interval_secs = 900
+# @env: IBCTL_RECOVERY_BACKOFF_INTERVAL_SECS
+# Minimum Connected dwell to count as a success and reset the phase timer.
+# Default 60. Guards against a 3-second flap-Connect resetting the timer
+# indefinitely — the exact pathology this coordinator is meant to detect.
+min_success_dwell_secs = 60
+# @env: IBCTL_RECOVERY_MIN_SUCCESS_DWELL_SECS
+# same-error streak forcing HITL — skips time-based escalation and enters
+# HITL immediately when the same error fingerprint recurs. Default 8
+# (~40 min at 5-min cycles).
+fingerprint_streak_forcing_hitl = 8
+# @env: IBCTL_RECOVERY_FINGERPRINT_STREAK
+# Coalescer key for the give-up ntfy alert. Distinct kind lets the
+# dashboard's ntfy coalescer dedupe re-fires within the resend interval.
+giveup_ntfy_kind = "reconnect_gave_up"
+# Signed retry-link validity window on the give-up alert (hours, 1..=168).
+# Default 12 (matches the HITL 2FA callback convention).
+giveup_callback_valid_hours = 12
+# Minimum wall-clock interval before re-firing a give-up alert while the
+# state machine is still parked in GivenUp (hours). Default 6.
+giveup_alert_resend_interval_hours = 6

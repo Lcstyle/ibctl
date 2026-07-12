@@ -7,12 +7,66 @@
     <link rel="stylesheet" href="{{ root_path }}/static/style.css?v=25">
     <script src="{{ root_path }}/static/htmx.min.js"></script>
     <script>var ROOT_PATH = '{{ root_path }}';</script>
+    <style>
+    /* sr-only utility — visually hidden but announced by screen readers. */
+    .sr-only {
+        position: absolute !important;
+        width: 1px !important; height: 1px !important;
+        padding: 0 !important; margin: -1px !important;
+        overflow: hidden !important; clip: rect(0,0,0,0) !important;
+        white-space: nowrap !important; border: 0 !important;
+    }
+    /* Global :focus-visible ring (Review A MED-3). Dark-theme-friendly
+       blue outline so keyboard operators see which control they're on. */
+    a:focus-visible,
+    button:focus-visible,
+    select:focus-visible,
+    [role="button"]:focus-visible,
+    .build-badge:focus-visible,
+    .tab:focus-visible {
+        outline: 2px solid #60a5fa;
+        outline-offset: 2px;
+    }
+    .tab:focus-visible { outline-offset: -2px; }
+    </style>
 </head>
 <body>
     <header>
         <div class="header-bar">
             <span class="header-title">ibctl</span>
-            <span class="header-version" id="ibctl-version"></span>
+            {# Version pill kept in DOM for scrapers; not visible in top row. #}
+            <span class="header-version" id="ibctl-version" style="display:none;"></span>
+            <span class="recovery-badge" id="recovery-badge"
+                  role="status" aria-live="polite" aria-atomic="true"
+                  aria-label=""
+                  style="display:none;
+                  margin-left: 8px; font-size: 11px; color: #a1a1aa;
+                  font-family: ui-monospace, monospace;">
+                <span aria-hidden="true" id="recovery-badge-text"></span>
+            </span>
+            {% if build_badge and build_badge.mnemonic %}
+            {# Mnemonic build badge — the ONLY build info shown in the top row.
+               Tooltip format is `v<version> : <human_time>`. The version half
+               is empty until the first SSE `status` event lands (see JS below),
+               so on server render we emit ` : <human_time>` and let JS fill
+               the `v...` prefix once status arrives.
+
+               Accessibility (Review A HIGH-3): the badge is keyboard-focusable
+               (tabindex=0) and carries an aria-label that spells out the same
+               info the sighted mouse-hover tooltip would show, so operators
+               using keyboard nav or screen readers get the build identity
+               without a mouse. JS updates the aria-label alongside the tooltip
+               once SSE lands so the version half is announced. #}
+            <span class="build-badge" id="build-badge"
+                  title=" : {{ build_badge.human_time }}"
+                  tabindex="0"
+                  aria-label="Build {{ build_badge.mnemonic }}, deployed {{ build_badge.human_time }}"
+                  data-deploy-time="{{ build_badge.human_time }}"
+                  data-mbb-version="{{ build_badge.spec_version }}"
+                  data-mbb-source-hash="{{ build_badge.sha }}"
+                  data-mbb-built-at-utc="{{ build_badge.built_at_utc }}"
+                  style="margin-left: 12px; font-size: 11px; color: #d4d4d8; font-family: ui-monospace, monospace; border-radius: 2px; padding: 1px 2px;">{{ build_badge.mnemonic }}</span>
+            {% endif %}
         </div>
         <nav class="tabs">
             <a href="{{ root_path }}/" class="tab {% if active_tab == 'overview' %}active{% endif %}">Overview</a>
@@ -23,9 +77,14 @@
             <a href="{{ root_path }}/notifications" class="tab {% if active_tab == 'notifications' %}active{% endif %}">Alerts</a>
             <a href="{{ root_path }}/vnc" class="tab {% if active_tab == 'vnc' %}active{% endif %}">VNC</a>
             <span style="flex: 1;"></span>
-            <span style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: #52525b;">
-                <span>⟳</span>
-                <select id="refresh-rate" style="background: transparent; border: 1px solid #27272a; border-radius: 3px; color: #71717a; font-size: 11px; padding: 2px 4px; cursor: pointer;">
+            <span style="display: flex; align-items: center; gap: 6px; font-size: 11px; color: #a1a1aa;">
+                {# Review A MED-2: the ⟳ glyph is decorative — the <select>'s
+                   own label carries the meaning. A visually-hidden <label>
+                   gives voice-control users something to click by name and
+                   screen-reader users a clear announcement. #}
+                <label for="refresh-rate" class="sr-only">Auto-refresh interval</label>
+                <span aria-hidden="true">⟳</span>
+                <select id="refresh-rate" style="background: transparent; border: 1px solid #27272a; border-radius: 3px; color: #a1a1aa; font-size: 11px; padding: 2px 4px; cursor: pointer;">
                     <option value="3">3s</option>
                     <option value="5">5s</option>
                     <option value="15">15s</option>
@@ -66,16 +125,212 @@
 
             // Status heartbeat — dispatch custom event for page-specific JS
             evtSource.addEventListener('status', function(e) {
+                var d;
                 try {
-                    var d = JSON.parse(e.data);
-                    window.dispatchEvent(new CustomEvent('ibctl-status', {detail: d}));
-                    // Extract version from first instance's status
+                    d = JSON.parse(e.data);
+                } catch(err) {
+                    console.warn('ibctl status: JSON parse failed', err);
+                    return;
+                }
+                window.dispatchEvent(new CustomEvent('ibctl-status', {detail: d}));
+
+                // Version pill — kept in its own try/catch so a
+                // recovery-badge bug can't blank the version display
+                // (Review B H3: a shared catch swallowed everything).
+                try {
                     if (d && d.length > 0 && d[0].status && d[0].status.version) {
                         var el = document.getElementById('ibctl-version');
                         if (el) el.textContent = 'v' + d[0].status.version;
                     }
-                } catch(err) {}
+                } catch(err) {
+                    console.warn('ibctl version pill handler failed', err);
+                }
+
+                // Build-badge tooltip — the visible mnemonic word's title
+                // attribute holds `v<version> : <human_time>`. The version
+                // half is populated only after the first SSE tick delivers
+                // status.version; deploy time is server-rendered into the
+                // data-deploy-time attribute at page load.
+                //
+                // Review A HIGH-3: keep the aria-label in sync so keyboard
+                // and screen-reader users hear the version once SSE delivers
+                // it — otherwise the mouse-hover tooltip is the only place
+                // the version appears.
+                try {
+                    var bb = document.getElementById('build-badge');
+                    if (bb && d && d.length > 0 && d[0].status && d[0].status.version) {
+                        var deployTime = bb.dataset.deployTime || '';
+                        var ver = d[0].status.version;
+                        bb.title = 'v' + ver + ' : ' + deployTime;
+                        var mnemonic = (bb.textContent || '').trim();
+                        bb.setAttribute('aria-label',
+                            'Build ' + mnemonic + ', version v' + ver +
+                            (deployTime ? ', deployed ' + deployTime : ''));
+                    }
+                } catch(err) {
+                    console.warn('ibctl build badge tooltip update failed', err);
+                }
+
+                // PR-C stage 4 recovery badge — Review B post-review
+                // rewrite. The badge is the operator's at-a-glance
+                // "gateway is stuck" indicator; correctness of what it
+                // surfaces (multi-mode aggregation, a11y label, safe
+                // rendering) matters more than the raw phase string.
+                //
+                // - MULTI-MODE (Review B H2): iterate every instance and
+                //   pick the worst-severity recovery block so a paper
+                //   Aggressive-quiet doesn't mask a live blocked state.
+                //   The badge label carries the mode prefix so the
+                //   operator sees WHICH mode is stuck.
+                //
+                // - ACCESSIBILITY (Review B H1/L4): the badge span
+                //   carries role=status + aria-live=polite. The visible
+                //   text keeps the 🚨 emoji for sighted operators; the
+                //   aria-label supplies a screen-reader-safe sentence.
+                //
+                // - SAFE RENDERING (Review A LOW6 / Review B L1):
+                //   unknown / null / empty phase strings hide the badge
+                //   instead of rendering an orphan " · Xs" fragment.
+                //
+                // - ERROR SURFACING (Review B H3): a wrapping try/catch
+                //   logs to the console instead of swallowing silently.
+                try {
+                    var badge = document.getElementById('recovery-badge');
+                    var badgeText = document.getElementById('recovery-badge-text');
+                    if (badge && badgeText) {
+                        renderRecoveryBadge(d, badge, badgeText);
+                    }
+                } catch(err) {
+                    console.warn('ibctl recovery badge handler failed', err);
+                }
             });
+
+            // Recovery-phase severity ranking. Higher = more urgent.
+            // Under -1, badge is hidden entirely (early Aggressive is
+            // pure noise; no coordinator info at all is nothing to say).
+            //
+            // Known-phase whitelist: an unrecognized `phase` string
+            // (e.g. a future daemon adding `resuming`) returns -1 so
+            // the badge hides instead of rendering a raw enum name
+            // (Review B L3 — forward-compat safety).
+            function recoverySeverity(rec) {
+                if (!rec) return -1;
+                if (rec.blocked_awaiting_resume === true) return 3;
+                if (rec.phase === 'given_up') return 3;
+                if (rec.phase === 'backoff_every_15min') return 2;
+                if (rec.phase === 'aggressive') {
+                    var e = rec.phase_elapsed_secs;
+                    // Handle null / undefined distinctly from 0 —
+                    // `elapsed || 0` would coerce null to 0 and could
+                    // render `aggressive · 0s`, which is worse than
+                    // hiding the badge (Review B L2).
+                    if (typeof e !== 'number' || e < 300) return -1;
+                    return 1;
+                }
+                return -1;
+            }
+
+            // Format elapsed seconds as a compact human string.
+            //   <60s   → "42s"
+            //   <60m   → "12m"
+            //   <24h   → "3h27m"
+            //   >=24h  → "2d3h" (Review B M2 — no more `72h0m`)
+            function formatElapsed(secs) {
+                if (secs < 60) return secs + 's';
+                if (secs < 3600) return Math.floor(secs / 60) + 'm';
+                if (secs < 86400) {
+                    var h = Math.floor(secs / 3600);
+                    var m = Math.floor((secs % 3600) / 60);
+                    return h + 'h' + m + 'm';
+                }
+                var days = Math.floor(secs / 86400);
+                var hoursLeft = Math.floor((secs % 86400) / 3600);
+                return days + 'd' + hoursLeft + 'h';
+            }
+
+            // Map a phase enum string to its abbreviated label.
+            function phaseAbbrev(phase) {
+                if (phase === 'backoff_every_15min') return 'backoff';
+                if (phase === 'given_up') return 'given up';
+                if (phase === 'aggressive') return 'aggressive';
+                return '';
+            }
+
+            function renderRecoveryBadge(d, badge, badgeText) {
+                // Iterate every instance and pick the worst-severity
+                // recovery block. `d` is a list of {mode, status, error}.
+                var worstSev = -1;
+                var worstRec = null;
+                var worstMode = null;
+                if (d && d.length) {
+                    for (var i = 0; i < d.length; i++) {
+                        var inst = d[i];
+                        if (!inst || !inst.status) continue;
+                        var rec = inst.status.recovery;
+                        if (!rec) continue;
+                        var sev = recoverySeverity(rec);
+                        if (sev > worstSev) {
+                            worstSev = sev;
+                            worstRec = rec;
+                            worstMode = inst.mode;
+                        }
+                    }
+                }
+
+                // Nothing worth surfacing — reset color state before
+                // hiding so a stale red badge from a prior blocked
+                // event doesn't flash on the next re-show (Review B Q3).
+                if (worstSev < 0 || !worstRec) {
+                    badge.style.display = 'none';
+                    badge.style.color = '#a1a1aa';
+                    badge.setAttribute('aria-label', '');
+                    return;
+                }
+
+                var phase = worstRec.phase || '';
+                var phaseLabel = phaseAbbrev(phase);
+                // Unknown phase (severity ranked it) — hide as
+                // forward-compat safeguard.
+                if (!phaseLabel) {
+                    badge.style.display = 'none';
+                    badge.style.color = '#a1a1aa';
+                    badge.setAttribute('aria-label', '');
+                    return;
+                }
+
+                var elapsedRaw = worstRec.phase_elapsed_secs;
+                var elapsedLabel = '';
+                if (typeof elapsedRaw === 'number' && elapsedRaw >= 0) {
+                    elapsedLabel = formatElapsed(elapsedRaw);
+                }
+
+                // Mode prefix so operators see WHICH gateway is stuck
+                // in a dual-mode deploy (Review B H2).
+                var modePrefix = worstMode ? (worstMode + ' · ') : '';
+
+                var visLabel = modePrefix + phaseLabel;
+                if (phase !== 'given_up' && elapsedLabel) {
+                    visLabel += ' · ' + elapsedLabel;
+                }
+
+                var srLabel;
+                if (worstRec.blocked_awaiting_resume) {
+                    badgeText.textContent = '🚨 ' + visLabel;
+                    badge.style.color = '#f87171';
+                    srLabel = 'Gateway recovery: blocked, awaiting resume';
+                } else {
+                    badgeText.textContent = visLabel;
+                    badge.style.color = '#a1a1aa';
+                    srLabel = 'Gateway recovery';
+                }
+                if (worstMode) srLabel += ' (' + worstMode + ')';
+                srLabel += ': ' + phaseLabel + ' phase';
+                if (phase !== 'given_up' && elapsedLabel) {
+                    srLabel += ', elapsed ' + elapsedLabel;
+                }
+                badge.setAttribute('aria-label', srLabel);
+                badge.style.display = 'inline';
+            }
 
             evtSource.onerror = function() {
                 // Reconnect after 5s on error

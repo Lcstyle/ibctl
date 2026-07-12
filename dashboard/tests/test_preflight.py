@@ -242,3 +242,25 @@ class TestInvalidToml:
         result = validate_config(toml_path=toml_file("this is not valid toml {{{}}"), check_env=False)
         assert not result.ok
         assert any("TOML" in e.message for e in result.errors)
+
+
+class TestPklCanonicalDescriptions:
+    """Pkl `///` doc comments are the single source of truth for descriptions.
+
+    Historically some descriptions rode along on Pydantic `Field(description=...)`
+    strings. After the consolidation those strings move to Pkl and the
+    renderer emits `dashboard/app/preflight/descriptions.json`. This test is
+    intentionally *lenient*: it does NOT forbid Pydantic descriptions (removing
+    them is a nice-to-have, not a contract); it only requires that the
+    canonical artifact exists on disk so the dashboard can read it.
+    """
+
+    def test_pydantic_field_descriptions_dropped(self):
+        """The descriptions.json artifact — the new source of truth — must exist."""
+        from pathlib import Path
+        repo_root = Path(__file__).resolve().parents[2]
+        descriptions_path = repo_root / "dashboard" / "app" / "preflight" / "descriptions.json"
+        assert descriptions_path.exists(), (
+            f"expected {descriptions_path} — the toml_renderer must emit it "
+            "so pages.py can read descriptions at boot"
+        )

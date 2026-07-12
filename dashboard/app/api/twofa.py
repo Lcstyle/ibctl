@@ -8,131 +8,67 @@ and forwards a HITL_RESUME command to the target ibctl instance.
 Security model:
   - No session / cookie auth — the HMAC signature IS the credential.
   - Signing key IBCTL_NTFY_ACTION_SIGNING_KEY is env-only, never in TOML.
-  - Tokens are expiry-stamped and localized to one mode (live/paper).
+  - Tokens are expiry-stamped, intent-stamped (``hitl``), and localized to
+    one mode (live/paper).
   - One-shot enforcement lives inside ibctl: it clears its callback-token
     state on leaving WaitingForHitl2fa and rejects HITL_RESUME when not
     in that state. Replays after the window simply no-op on the ibctl side.
+
+Rate-limiting, dashboard-URL resolution, and confirmation HTML come from
+``app.services.callback_common``; see that module for the shared machinery
+between this endpoint and ``/api/reconnect/callback``.
 """
 
 from __future__ import annotations
 
-import html
 import logging
-import os
-import time
-from collections import deque
 
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from app.domain.errors import DashboardError
-from app.services import hitl_tokens
+from app.services import callback_common, hitl_tokens
 
 logger = logging.getLogger("dashboard.api.twofa")
 router = APIRouter()
 
 VALID_MODES = {"live", "paper"}
-SIGNING_KEY_ENV = "IBCTL_NTFY_ACTION_SIGNING_KEY"
 
 # ---------------------------------------------------------------------------
-# In-memory sliding-window rate limiter for the callback endpoint.
-#
-# Simple per-IP counter using a dict[str, deque[float]] where each deque
-# holds the timestamps (epoch seconds) of requests within the last 60s.
-# Not shared across multiple uvicorn workers — acceptable for this endpoint.
+# Backward-compat aliases so existing tests / callers keep working after the
+# extraction into callback_common. New code should import from callback_common
+# directly.
 # ---------------------------------------------------------------------------
+
+SIGNING_KEY_ENV = callback_common.SIGNING_KEY_ENV
 
 _RATE_LIMIT_WINDOW_SECS = 60.0
 _RATE_LIMIT_MAX_REQUESTS = 10
-# Bounds the IP table to prevent unbounded memory growth from port scans /
-# many unique clients. When exceeded, the IP with the oldest most-recent hit
-# is evicted — it won't have hit us in a while anyway.
-_IP_TABLE_MAX_SIZE = 1024
 
-# IP → deque of request timestamps in the last WINDOW seconds.
-# Single-worker uvicorn is the deployment target, so no lock is needed.
-# Behind a reverse proxy this keys on the proxy's IP — TODO when ingress lands.
-_ip_timestamps: dict[str, deque[float]] = {}
+# The HITL endpoint gets its own limiter instance. The reconnect endpoint
+# will construct its own — that's the whole point of RateLimiter being a
+# class rather than module-level state.
+_rate_limiter = callback_common.RateLimiter(
+    window_secs=_RATE_LIMIT_WINDOW_SECS,
+    max_requests=_RATE_LIMIT_MAX_REQUESTS,
+)
 
-
-def _evict_if_needed() -> None:
-    """Drop the IP with the oldest last-hit when the table exceeds the cap."""
-    if len(_ip_timestamps) <= _IP_TABLE_MAX_SIZE:
-        return
-    # Cheapest "oldest" heuristic: rightmost timestamp per bucket.
-    oldest_ip = min(
-        _ip_timestamps,
-        key=lambda k: _ip_timestamps[k][-1] if _ip_timestamps[k] else 0.0,
-    )
-    _ip_timestamps.pop(oldest_ip, None)
+# Existing tests reach into ``twofa_mod._ip_timestamps`` to clear state or
+# seed stale timestamps. Alias the limiter's internal dict so those tests
+# keep working without knowing about the refactor.
+_ip_timestamps = _rate_limiter._ip_timestamps
 
 
 def _check_rate_limit(ip: str) -> bool:
-    """Return True if the request is allowed, False if rate-limited.
+    return _rate_limiter.check(ip)
 
-    Cleans up stale timestamps for the given IP opportunistically on each call.
-    """
-    now = time.time()
-    cutoff = now - _RATE_LIMIT_WINDOW_SECS
 
-    if ip not in _ip_timestamps:
-        _ip_timestamps[ip] = deque()
-        _evict_if_needed()
-
-    bucket = _ip_timestamps[ip]
-
-    # Drop timestamps older than the window.
-    while bucket and bucket[0] < cutoff:
-        bucket.popleft()
-
-    # If the bucket is now empty AND we're above the cap, drop it entirely to
-    # aid eviction. Cheap, happens at most once per burst.
-    if not bucket and len(_ip_timestamps) > _IP_TABLE_MAX_SIZE:
-        _ip_timestamps.pop(ip, None)
-        _ip_timestamps[ip] = bucket
-
-    if len(bucket) >= _RATE_LIMIT_MAX_REQUESTS:
-        return False  # rate-limited
-
-    bucket.append(now)
-    return True
+def _confirmation_html(mode: str) -> str:
+    return callback_common.confirmation_html(mode, action_label="Retry triggered")
 
 
 def _json_error(status_code: int, payload: dict) -> JSONResponse:
     return JSONResponse(status_code=status_code, content=payload)
-
-
-def _confirmation_html(mode: str) -> str:
-    safe_mode = html.escape(mode.upper())
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>ibctl 2FA retry triggered</title>
-  <style>
-    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI",
-            Roboto, Helvetica, Arial, sans-serif;
-            margin: 0; padding: 2rem;
-            background: #0f172a; color: #e2e8f0; }}
-    .card {{ max-width: 28rem; margin: 3rem auto; background: #1e293b;
-             border-radius: 0.75rem; padding: 2rem;
-             box-shadow: 0 10px 20px rgba(0,0,0,0.3); }}
-    h1 {{ margin: 0 0 0.5rem 0; font-size: 1.5rem; }}
-    p  {{ line-height: 1.5; color: #cbd5e1; }}
-    .ok {{ color: #4ade80; font-weight: 600; }}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h1 class="ok">Retry triggered</h1>
-    <p>HITL_RESUME was sent to the <strong>{safe_mode}</strong> ibctl
-       instance. 2FA should prompt again shortly.</p>
-    <p>You may close this tab.</p>
-  </div>
-</body>
-</html>
-"""
 
 
 @router.get("/api/twofa/callback")
@@ -149,7 +85,8 @@ async def twofa_callback(request: Request, t: str = "", mode: str = ""):
             key is missing. Callbacks cannot be validated.
         400 {"error": "invalid_mode"}              — missing / unknown mode
         400 {"error": "invalid_token", "reason"}   — bad format / expired /
-                                                      wrong signature
+                                                      wrong signature / wrong
+                                                      intent
         502 {"error": "ibctl_unreachable", ...}    — ibctl not responding
         200 (HTML)                                 — confirmation page
     """
@@ -158,7 +95,7 @@ async def twofa_callback(request: Request, t: str = "", mode: str = ""):
         logger.warning("HITL callback rate-limited for IP=%s", client_ip)
         return _json_error(429, {"error": "rate_limited"})
 
-    signing_key = os.environ.get(SIGNING_KEY_ENV, "").strip()
+    signing_key = callback_common.get_signing_key()
     if not signing_key:
         logger.warning("HITL callback rejected: %s not configured", SIGNING_KEY_ENV)
         return _json_error(503, {"error": "signing_key_not_configured"})
@@ -168,7 +105,7 @@ async def twofa_callback(request: Request, t: str = "", mode: str = ""):
         logger.warning("HITL callback rejected: invalid mode=%r", mode)
         return _json_error(400, {"error": "invalid_mode"})
 
-    valid, reason = hitl_tokens.validate_token(signing_key, t)
+    valid, reason = hitl_tokens.validate_token(signing_key, t, expected_intent="hitl")
     if not valid:
         # Do NOT echo the token itself.
         logger.warning(

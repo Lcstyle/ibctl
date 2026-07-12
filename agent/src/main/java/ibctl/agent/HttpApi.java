@@ -239,6 +239,13 @@ public class HttpApi {
                 return wrapOk(result);
             }
 
+            // GET /windows/{id}/clients — rich client-state metadata
+            // (API Client row status + JTabbedPane tab list)
+            if ("GET".equals(method) && "/clients".equals(subPath)) {
+                String result = SwingInspector.listClients(windowId);
+                return wrapOk(result);
+            }
+
             // POST /windows/{id}/selectlist — select an item in a JList by text
             if ("POST".equals(method) && "/selectlist".equals(subPath)) {
                 String item = extractJsonField(body, "item");
@@ -326,6 +333,60 @@ public class HttpApi {
      * Only handles simple flat JSON objects with string values.
      * This avoids pulling in any JSON library.
      */
+    /**
+     * Decode a JSON string body (the bytes between the surrounding quotes)
+     * according to the standard JSON escape sequences: backslash-quote,
+     * backslash-backslash, backslash-slash, backslash-b, backslash-f,
+     * backslash-n, backslash-r, backslash-t, and backslash-u four-hex.
+     * Unrecognized escapes are passed through as their second character
+     * (mirrors the "be liberal in what you accept" side of Postel).
+     *
+     * Note: this javadoc deliberately avoids the literal backslash-u
+     * sequence — javac processes those escapes even inside comments.
+     */
+    static String decodeJsonString(String json, int start, int end) {
+        StringBuilder sb = new StringBuilder(end - start);
+        int i = start;
+        while (i < end) {
+            char c = json.charAt(i);
+            if (c != '\\' || i + 1 >= end) {
+                sb.append(c);
+                i++;
+                continue;
+            }
+            char esc = json.charAt(i + 1);
+            switch (esc) {
+                case '"':  sb.append('"'); i += 2; break;
+                case '\\': sb.append('\\'); i += 2; break;
+                case '/':  sb.append('/'); i += 2; break;
+                case 'b':  sb.append('\b'); i += 2; break;
+                case 'f':  sb.append('\f'); i += 2; break;
+                case 'n':  sb.append('\n'); i += 2; break;
+                case 'r':  sb.append('\r'); i += 2; break;
+                case 't':  sb.append('\t'); i += 2; break;
+                case 'u':
+                    if (i + 6 <= end) {
+                        try {
+                            int cp = Integer.parseInt(json.substring(i + 2, i + 6), 16);
+                            sb.append((char) cp);
+                            i += 6;
+                            break;
+                        } catch (NumberFormatException ignored) {
+                            // Fall through to permissive path
+                        }
+                    }
+                    sb.append(esc);
+                    i += 2;
+                    break;
+                default:
+                    sb.append(esc);
+                    i += 2;
+                    break;
+            }
+        }
+        return sb.toString();
+    }
+
     static String extractJsonField(String json, String field) {
         if (json == null || json.isEmpty()) return null;
 
@@ -346,7 +407,18 @@ public class HttpApi {
 
         char firstChar = json.charAt(valueStart);
 
-        // Handle string values
+        // Handle string values.
+        //
+        // Two passes: first walk the raw JSON to find where the string
+        // ends (respecting backslash escapes so a `\"` inside the value
+        // doesn't terminate the scan). Then decode the JSON escape
+        // sequences on the way out — returning the raw substring would
+        // leave backslashes in the value, which is exactly the bug that
+        // made Lcstyle/ibctl#4 look like a Unicode drift issue: Rust
+        // sends `{"label":"Bypass \"same action pair trade\" …"}`, the
+        // scanner correctly finds the boundaries, but the returned
+        // string still contains backslashes, so setCheckBox compared
+        // `Bypass \"same…` to Gateway's `Bypass "same…` and always missed.
         if (firstChar == '"') {
             int strStart = valueStart + 1;
             int strEnd = strStart;
@@ -360,7 +432,7 @@ public class HttpApi {
                     strEnd++;
                 }
             }
-            return json.substring(strStart, strEnd);
+            return decodeJsonString(json, strStart, strEnd);
         }
 
         // Handle numeric values

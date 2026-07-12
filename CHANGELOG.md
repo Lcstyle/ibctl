@@ -1,5 +1,46 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+- Pin Pkl runtime to 0.32.0 via `mise.toml` — closes GHSA-87qh-25w9-mh34
+  (packages readable/writable outside the configured cache directory) and
+  GHSA-fgvf-hh2w-cxff (remote packages reading files past a local package
+  dependency root). `make generate-configs` fails loud if the local Pkl
+  version drifts from the pin.
+
+### Changed
+- Bumped Rust toolchain to 1.97 in CI (Dockerfile `rust-builder` stage +
+  Woodpecker clippy + rust-tests images). Added `rust-version = "1.83"`
+  MSRV pin to `ibctl/Cargo.toml` (matches the prior CI floor; distro rustc
+  on Fedora/Debian still builds locally). Bumping the MSRV in lockstep
+  with the CI image is a follow-up once a rustup-managed dev environment
+  is standardized.
+- Bumped Alpine CI images from 3.20 (EOL 2026-05-01) to 3.22 in
+  `.woodpecker/pipeline.yml` and `.woodpecker/gateway-bump.yml`.
+- Dashboard Python install path now `uv sync --frozen --no-dev` against a
+  committed `dashboard/uv.lock`. Removes the free-form `pip install` in the
+  Dockerfile that resolved unpinned versions at every build.
+- Migrated dashboard dev deps from `[project.optional-dependencies].dev` to
+  `[dependency-groups].dev` (PEP 735) — canonical uv form; no longer relies
+  on uv's PEP-621-to-groups compatibility shim.
+- Split `make check-configs` into `regenerate-configs` (mutating; requires
+  the Pkl runtime) and `check-configs` (pure `git status` inspection; runs
+  in any container). `generate-configs` kept as a legacy alias.
+
+### Added
+- `mise.toml` at repo root pinning `pkl = "0.32.0"`. Run `mise install`
+  to sync a local dev environment.
+- `renovate.json` — weekly patch bumps, monthly Docker + mise bumps, PRs
+  land against `develop`.
+- `.woodpecker/pipeline.yml` `uv-lock-check` step — verifies
+  `dashboard/uv.lock` matches `pyproject.toml` before the Docker build.
+- `.woodpecker/pipeline.yml` `configs-drift` step — runs `make check-configs`
+  so hand-edited generated config artifacts fail CI before deploy.
+- Woodpecker pipeline now runs on `pull_request` against develop (test gate
+  only — `build-image` and `deploy` are gated to develop push). Wired so
+  Renovate PRs get CI feedback without auto-deploying.
+
 ## [0.2.2] - 2026-03-30
 
 ### Security

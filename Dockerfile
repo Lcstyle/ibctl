@@ -1,6 +1,11 @@
+# syntax=docker/dockerfile:1.7
 # ibctl — IBC replacement for IB Gateway/TWS automation
 # Self-contained build following gnzsnz/ib-gateway-docker's proven process,
 # but without IBC. ibctl replaces it entirely.
+#
+# BuildKit cache mounts (RUN --mount=type=cache) are used throughout to
+# speed up apt-get, cargo, and pip across CI runs. Requires BuildKit
+# (Woodpecker's plugin-docker-buildx uses it by default).
 #
 # Two build modes:
 #   Fast (pre-built release):
@@ -8,7 +13,7 @@
 #   From source (no release available):
 #     docker build -t ibctl .
 
-ARG IB_GATEWAY_VERSION=10.45.1b
+ARG IB_GATEWAY_VERSION=10.47.1b
 ARG IB_GATEWAY_CHANNEL=latest
 ARG IBCTL_VERSION=""
 
@@ -33,20 +38,29 @@ ARG ZULU_URL=https://cdn.azul.com/zulu/bin/${ZULU_FILE}
 WORKDIR /tmp/setup
 
 # Two-phase mirror setup:
-#  1) Install ca-certificates from a reliable HTTP mirror (csclub.uwaterloo.ca)
-#     — we can't use HTTPS yet because the base image has no CA trust store,
-#     and archive.ubuntu.com HTTP has intermittent regional outages (zion,
-#     2026-04-16).
-#  2) Switch all sources to HTTPS (archive.ubuntu.com HTTPS is CDN-backed and
-#     reliable). From now on package fetches are authenticated + integrity-
-#     checked via TLS.
-RUN sed -i 's|http://archive.ubuntu.com|http://mirror.csclub.uwaterloo.ca|g; s|http://security.ubuntu.com|http://mirror.csclub.uwaterloo.ca|g' /etc/apt/sources.list.d/ubuntu.sources \
+#  1) apt-get update over HTTP against the base image's default sources
+#     (archive.ubuntu.com / security.ubuntu.com), then install
+#     ca-certificates so we can switch to HTTPS. We can't use HTTPS yet
+#     because the base image ships without a CA trust store.
+#  2) Rewrite http:// → https:// and re-update. From now on package
+#     fetches are authenticated + integrity-checked via TLS.
+#
+# Rationale for using archive.ubuntu.com throughout instead of a regional
+# mirror: an intermediate mirror is a single point of failure. On
+# 2026-07-11, mirror.csclub.uwaterloo.ca became unreachable from our build host —
+# every reboot rebuilt from source (see /usr/local/bin/ibctl-boot-restart
+# for the boot-time deterministic-restart fix that removes the rebuild
+# dependency entirely) and every rebuild failed at phase 1. Sticking to
+# archive.ubuntu.com means a rebuild has exactly one external dependency
+# (Ubuntu's canonical origin), not two.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
     && apt-get update -y \
     && apt-get install --no-install-recommends --yes ca-certificates \
-    && sed -i 's|http://mirror.csclub.uwaterloo.ca|https://archive.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources \
+    && sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g; s|http://security.ubuntu.com|https://security.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources \
     && apt-get update -y \
     && apt-get install --no-install-recommends --yes curl \
-    && apt-get clean && rm -rf /var/lib/apt/lists/* \
     # Validate supported architectures
     && if [ "${TARGETARCH}" != "amd64" ] && [ "${TARGETARCH}" != "arm64" ]; then \
         echo "Unsupported Docker target architecture: ${TARGETARCH}" >&2; \
@@ -78,14 +92,16 @@ COPY docker/jts.ini.tmpl /root/Jts/jts.ini.tmpl
 ##############################################################################
 FROM ubuntu:24.04 AS prebuilt-downloader
 ARG IBCTL_VERSION
+ARG DEBIAN_FRONTEND=noninteractive
 # Two-phase mirror setup (see Stage 1 for rationale)
-RUN sed -i 's|http://archive.ubuntu.com|http://mirror.csclub.uwaterloo.ca|g; s|http://security.ubuntu.com|http://mirror.csclub.uwaterloo.ca|g' /etc/apt/sources.list.d/ubuntu.sources \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
     && apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends ca-certificates \
-    && sed -i 's|http://mirror.csclub.uwaterloo.ca|https://archive.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources \
+    && sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g; s|http://security.ubuntu.com|https://security.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources \
     && apt-get update -qq \
-    && apt-get install -y -qq --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/*
+    && apt-get install -y -qq --no-install-recommends curl
 RUN mkdir -p /prebuilt \
     && if [ -n "${IBCTL_VERSION}" ]; then \
         echo "Downloading pre-built ibctl ${IBCTL_VERSION}" \
@@ -100,17 +116,35 @@ RUN mkdir -p /prebuilt \
 ##############################################################################
 # Stage 2b: Build Rust binary from source (fallback)
 ##############################################################################
-FROM rust:1.83-bookworm AS rust-builder
+FROM rust:1.97-bookworm AS rust-builder
 ARG IBCTL_BUILD_VERSION=""
 COPY Cargo.toml Cargo.lock /build/
 COPY .cargo/ /build/.cargo/
 COPY ibctl/ /build/ibctl/
+# .build-version is written by CI's compute-version step with the output of
+# `git describe --tags --always` — e.g. `v1.1.0-65-g7009dde`. The file is
+# also committed with placeholder content "dev" so local `docker build .`
+# without CI still works.
+COPY .build-version /build/.build-version
 WORKDIR /build
 # Use thin LTO for Docker source builds (fast). Release workflow uses fat LTO.
-# IBCTL_BUILD_VERSION is read by build.rs to embed the git tag version.
-RUN sed -i 's/lto = "fat"/lto = "thin"/' /build/.cargo/config.toml \
+# IBCTL_BUILD_VERSION is read by build.rs to embed the version string.
+# Priority: explicit --build-arg > .build-version file > "unknown".
+# Cargo registry + git + build cache mounts survive across CI runs so cargo
+# doesn't re-download all crates or re-compile untouched dependencies.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    sed -i 's/lto = "fat"/lto = "thin"/' /build/.cargo/config.toml \
     && sed -i 's/codegen-units = 1/codegen-units = 16/' /build/.cargo/config.toml \
-    && IBCTL_BUILD_VERSION="${IBCTL_BUILD_VERSION}" cargo build --release && strip target/release/ibctl
+    && VERSION="${IBCTL_BUILD_VERSION:-$(cat .build-version 2>/dev/null || echo unknown)}" \
+    && echo "Building with IBCTL_BUILD_VERSION=$VERSION" \
+    && IBCTL_BUILD_VERSION="$VERSION" cargo build --release \
+    && strip target/release/ibctl \
+    # Cache mount at /build/target is ephemeral after this RUN exits — copy
+    # the built binary to a regular path (/build/) so COPY --from can pick it
+    # up in the final stage.
+    && cp target/release/ibctl /build/ibctl-release
 
 ##############################################################################
 # Stage 2c: Build Java agent from source (fallback)
@@ -147,18 +181,22 @@ COPY --from=setup /usr/local/ /usr/local/
 COPY --from=setup /root/Jts /home/ibgateway/Jts
 
 # Install runtime packages + Python for dashboard.
-# Two-phase mirror: csclub HTTP → install ca-certificates → switch to
-# archive.ubuntu.com HTTPS → install the rest. See Stage 1 for rationale.
-RUN sed -i 's|http://archive.ubuntu.com|http://mirror.csclub.uwaterloo.ca|g; s|http://security.ubuntu.com|http://mirror.csclub.uwaterloo.ca|g' /etc/apt/sources.list.d/ubuntu.sources \
+# Two-phase mirror: archive.ubuntu.com HTTP (base image default) → install
+# ca-certificates → rewrite HTTP → HTTPS → install the rest. See Stage 1
+# for rationale on avoiding regional-mirror single points of failure.
+# Apt cache mounts persist downloaded .deb files across CI runs so subsequent
+# builds skip the re-download of the ~150 MB worth of runtime packages.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
     && apt-get update -y \
     && apt-get install --no-install-recommends --yes ca-certificates \
-    && sed -i 's|http://mirror.csclub.uwaterloo.ca|https://archive.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources \
+    && sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g; s|http://security.ubuntu.com|https://security.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources \
     && apt-get update -y \
     && apt-get upgrade -y \
     && apt-get install --no-install-recommends --yes \
         gettext-base socat xvfb x11vnc sshpass openssh-client telnet iputils-ping \
-        python3 python3-pip python3-venv websockify \
-    && apt-get clean && rm -rf /var/lib/apt/lists/* \
+        python3 python3-venv websockify curl \
     # Remove default ubuntu user if present
     && if id ubuntu 2>/dev/null; then userdel -rf ubuntu; fi \
     # Create ibgateway user (matching gnzsnz)
@@ -170,9 +208,34 @@ RUN sed -i 's|http://archive.ubuntu.com|http://mirror.csclub.uwaterloo.ca|g; s|h
     && mkdir -p /opt/ibctl/persist/logs \
     && mkdir -p /run/ibctl && chmod 700 /run/ibctl
 
+# Install dashboard Python dependencies via uv (10-50× faster than pip).
+# COPY --from the official uv image — skips the HOME-sensitive install
+# script. Pinning to the 0.11 minor track: patches come in, breaking
+# changes don't.
+#
+# `uv sync --frozen --no-dev` installs the exact versions in uv.lock — no
+# resolver work, no version float. `--frozen` fails loud if the lockfile
+# drifts from pyproject.toml, so a stale lock caught in CI instead of
+# shipping. The venv is auto-created at .venv inside the working dir.
+# `--no-dev` skips the [dependency-groups] dev group (PEP 735) — pytest,
+# coverage, pytest-asyncio — production only.
+#
+# Layer ordering: uv install runs BEFORE the binary copy so it stays cached
+# across commits that only change Rust/Java code (every commit changes
+# build.rs's embedded version, invalidating the binaries; Python deps
+# almost never change).
+COPY --from=ghcr.io/astral-sh/uv:0.11 /uv /usr/local/bin/uv
+COPY dashboard/pyproject.toml dashboard/uv.lock /opt/ibctl/dashboard/
+WORKDIR /opt/ibctl/dashboard
+RUN --mount=type=cache,target=/root/.cache/uv,sharing=locked \
+    uv sync --frozen --no-dev \
+    # uv is build-only — drop it from the final image to keep size down
+    && rm -f /usr/local/bin/uv
+WORKDIR /
+
 # Copy ibctl binaries — prefer pre-built, fall back to source
 COPY --from=prebuilt-downloader /prebuilt/ /tmp/prebuilt/
-COPY --from=rust-builder /build/target/release/ibctl /tmp/source/ibctl
+COPY --from=rust-builder /build/ibctl-release /tmp/source/ibctl
 COPY --from=java-builder /build/agent/target/ibctl-agent.jar /tmp/source/ibctl-agent.jar
 RUN if [ -f /tmp/prebuilt/ibctl ]; then \
         echo "Using pre-built ibctl release" \
@@ -183,12 +246,6 @@ RUN if [ -f /tmp/prebuilt/ibctl ]; then \
         && cp /tmp/source/ibctl /opt/ibctl/ibctl \
         && cp /tmp/source/ibctl-agent.jar /opt/ibctl/ibctl-agent.jar; \
     fi && rm -rf /tmp/prebuilt /tmp/source
-
-# Install dashboard Python dependencies in a venv
-COPY dashboard/pyproject.toml /opt/ibctl/dashboard/pyproject.toml
-RUN python3 -m venv /opt/ibctl/dashboard/.venv \
-    && /opt/ibctl/dashboard/.venv/bin/pip install --no-cache-dir \
-        fastapi uvicorn jinja2 sse-starlette requests beautifulsoup4 httpx pyzmq
 
 # Copy dashboard source
 COPY dashboard/app /opt/ibctl/dashboard/app
@@ -208,6 +265,15 @@ WORKDIR /home/ibgateway
 # authenticated sessions and forcing re-authentication.
 
 ENTRYPOINT ["/opt/ibctl/entrypoint.sh"]
+
+# Mnemonic build badge: the SOURCE_HEX (short commit SHA) is passed as a
+# build-arg by CI and baked into the image so the badge mnemonic reflects
+# code identity. The BUILD_TIME_* values are computed by entrypoint.sh at
+# container start — that gives the operator "when did this container start"
+# (deploy time) instead of "when was the layer built", which is the more
+# useful signal for at-a-glance change detection.
+ARG SOURCE_HEX=""
+ENV IBCTL_BUILD_SHA=$SOURCE_HEX
 
 LABEL org.opencontainers.image.source=https://github.com/Lcstyle/ibctl
 LABEL org.opencontainers.image.description="IBC replacement for automated IB Gateway/TWS login and session management"

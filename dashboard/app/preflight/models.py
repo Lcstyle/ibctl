@@ -168,6 +168,40 @@ class LoggingConfig(BaseModel):
     session_reopen_hour: int = Field(default=18, ge=0, le=23)
 
 
+class RecoveryConfig(BaseModel):
+    """[timing.recovery] — reconnect coordinator (Aggressive/Backoff/GivenUp).
+
+    Mirrors ibctl/src/config.rs::RecoveryTimingConfig. Env overrides
+    (IBCTL_RECOVERY_*) layer on top — see env_overlay.py.
+
+    Bounds asymmetry note: `giveup_callback_valid_hours` enforces
+    ge=1, le=168 only here — Rust `u32` and Pkl `UInt` accept the full
+    range. Matches the pre-existing `twofa.backoff.callback_valid_hours`
+    pattern: preflight is the stricter gate, so a hand-edited TOML with
+    `giveup_callback_valid_hours=0` is blocked at boot instead of
+    silently disabling the retry link.
+
+    TODO(PR-C stage 3.5, audit MED): add soft-warns for dead-config
+    states — `backoff_interval_secs=0` (no cadence), `fingerprint_streak_
+    forcing_hitl * backoff_interval_secs > backoff_phase_max_secs`
+    (streak never fires), `min_success_dwell_secs > aggressive_phase_
+    max_secs` (dwell exceeds phase budget). Deferred out of the initial
+    audit-fix to keep the surface small.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    aggressive_phase_max_secs: int = Field(default=3600, ge=0)
+    backoff_phase_max_secs: int = Field(default=10800, ge=0)
+    backoff_interval_secs: int = Field(default=900, ge=0)
+    min_success_dwell_secs: int = Field(default=60, ge=0)
+    fingerprint_streak_forcing_hitl: int = Field(default=8, ge=0)
+    giveup_ntfy_kind: str = "reconnect_gave_up"
+    giveup_callback_valid_hours: int = Field(default=12, ge=1, le=168)
+    giveup_alert_resend_interval_hours: int = Field(default=6, ge=0)
+
+
 class TimingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -184,6 +218,7 @@ class TimingConfig(BaseModel):
     relogin_failure_action: Literal["reauth", "restart"] = "reauth"
     api_port_probe_interval_secs: int = Field(default=5, ge=0, le=3600)
     api_port_probe_fails_before_revoke: int = Field(default=3, ge=1, le=10)
+    recovery: RecoveryConfig = RecoveryConfig()
 
 
 class SiteConfig(BaseModel):
@@ -213,9 +248,10 @@ class DashboardConfig(BaseModel):
     notification_channel: Literal["ntfy", "slack", "telegram"] = "ntfy"
     zmq_enabled: bool = True
     zmq_port: int = Field(default=5556, ge=1, le=65535)
-    # External URL used to build ntfy action-button callback targets
-    # (e.g. https://ibctl.example.com). Leave empty if the dashboard is
-    # only reachable from inside the LAN and HITL ntfy_callback is unused.
+    # Description lives in config/pkl/types.pkl::DashboardConfig.externalUrl
+    # (Pkl `///` is the single source of truth — descriptions.json ships to
+    # the dashboard config-page tooltip and `docker/ibctl.toml` gets the
+    # rendered comment above the field).
     external_url: str = ""
 
 
@@ -277,7 +313,24 @@ class IbctlConfig(BaseModel):
 
     @model_validator(mode="after")
     def validate_cross_field_rules(self) -> "IbctlConfig":
+        from pathlib import Path as _Path
+
         warnings: list[str] = []
+
+        # Settings dir must exist for the recovery-marker persistence layer.
+        # If gateway.tws_settings_path is set but not a directory, marker I/O
+        # fails silently and the GivenUp latch regresses on every restart.
+        # Empty string is valid — means "use IBC default derived from tws_path".
+        # Soft-warn only (operator may deploy the volume later); never a hard error.
+        _tsp = self.gateway.tws_settings_path
+        if _tsp and not _Path(_tsp).is_dir():
+            warnings.append(
+                f"gateway.tws_settings_path={_tsp!r} is not an existing directory. "
+                "The recovery marker persistence layer writes here; if the path "
+                "resolves to an ephemeral or missing volume the GivenUp latch will "
+                "regress on every container restart. Ensure the two settings-dir "
+                "prefixes (Jts_live, Jts_paper) are on a persistent volume."
+            )
 
         # Port conflict detection
         ports = {
@@ -500,6 +553,16 @@ ENV_MAP: dict[str, str] = {
     "timing.relogin_failure_action": "IBCTL_RELOGIN_FAILURE_ACTION",
     "timing.api_port_probe_interval_secs": "IBCTL_API_PORT_PROBE_INTERVAL_SECS",
     "timing.api_port_probe_fails_before_revoke": "IBCTL_API_PORT_PROBE_FAILS_BEFORE_REVOKE",
+    # Timing — recovery coordinator ([timing.recovery])
+    # DISABLED and FORCE_RESET are Rust-only env vars (not mapped to TOML);
+    # see env_overlay._BOOL_ENV_VARS for their acceptance surface. The five
+    # int vars below round-trip through TOML so the effective config Rust
+    # loads matches what preflight validates.
+    "timing.recovery.aggressive_phase_max_secs": "IBCTL_RECOVERY_AGGRESSIVE_MAX_SECS",
+    "timing.recovery.backoff_phase_max_secs": "IBCTL_RECOVERY_BACKOFF_MAX_SECS",
+    "timing.recovery.backoff_interval_secs": "IBCTL_RECOVERY_BACKOFF_INTERVAL_SECS",
+    "timing.recovery.min_success_dwell_secs": "IBCTL_RECOVERY_MIN_SUCCESS_DWELL_SECS",
+    "timing.recovery.fingerprint_streak_forcing_hitl": "IBCTL_RECOVERY_FINGERPRINT_STREAK",
     # Dashboard
     "dashboard.enabled": "IBCTL_DASHBOARD_ENABLED",
     "dashboard.port": "IBCTL_DASHBOARD_PORT",

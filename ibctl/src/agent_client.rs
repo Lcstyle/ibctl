@@ -54,6 +54,28 @@ pub struct Bounds {
     pub height: i32,
 }
 
+/// Outcome of a `set_checkbox` call, decoded from the agent's inner JSON.
+///
+/// The agent's HTTP envelope (`AgentResponse.ok`) is set independently of the
+/// Swing-side match — `wrapOk(...)` is called even when the label doesn't
+/// match any button in the target window. The real "did we find the checkbox"
+/// signal is `data.found`, which we surface here so callers can distinguish
+/// "match succeeded, click applied" from "no button in the panel had a
+/// matching label" (Lcstyle/ibctl#4).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CheckboxOutcome {
+    #[serde(default)]
+    pub found: bool,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub selected: Option<bool>,
+    #[serde(default)]
+    pub changed: Option<bool>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 /// Information about a visible window in the IB Gateway.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowInfo {
@@ -78,12 +100,12 @@ pub trait AgentApi: Send + Sync {
     fn click_button(&self, window_id: WindowId, label: &str) -> impl std::future::Future<Output = Result<bool, AgentError>> + Send;
     fn type_text(&self, window_id: WindowId, field_index: usize, text: &str) -> impl std::future::Future<Output = Result<bool, AgentError>> + Send;
     fn click_menu(&self, window_id: WindowId, menu_path: &str) -> impl std::future::Future<Output = Result<bool, AgentError>> + Send;
-    fn set_checkbox(&self, window_id: WindowId, label: &str, state: Option<bool>) -> impl std::future::Future<Output = Result<bool, AgentError>> + Send;
+    fn set_checkbox(&self, window_id: WindowId, label: &str, state: Option<bool>) -> impl std::future::Future<Output = Result<CheckboxOutcome, AgentError>> + Send;
     fn select_list_item(&self, window_id: WindowId, item_text: &str) -> impl std::future::Future<Output = Result<bool, AgentError>> + Send;
     fn click_at(&self, window_id: WindowId, x: i32, y: i32) -> impl std::future::Future<Output = Result<bool, AgentError>> + Send;
     fn select_tree_node(&self, window_id: WindowId, node_name: &str) -> impl std::future::Future<Output = Result<bool, AgentError>> + Send;
     fn dump_components(&self, window_id: WindowId) -> impl std::future::Future<Output = Result<serde_json::Value, AgentError>> + Send;
-    fn list_tabs(&self, window_id: WindowId) -> impl std::future::Future<Output = Result<serde_json::Value, AgentError>> + Send;
+    fn list_clients(&self, window_id: WindowId) -> impl std::future::Future<Output = Result<serde_json::Value, AgentError>> + Send;
     fn send_key(&self, window_id: WindowId, key: &str) -> impl std::future::Future<Output = Result<bool, AgentError>> + Send;
 }
 
@@ -129,7 +151,7 @@ impl AgentClient {
     pub async fn click_menu(&self, window_id: WindowId, menu_path: &str) -> Result<bool, AgentError> {
         self.inner.click_menu_boxed(window_id, menu_path).await
     }
-    pub async fn set_checkbox(&self, window_id: WindowId, label: &str, state: Option<bool>) -> Result<bool, AgentError> {
+    pub async fn set_checkbox(&self, window_id: WindowId, label: &str, state: Option<bool>) -> Result<CheckboxOutcome, AgentError> {
         self.inner.set_checkbox_boxed(window_id, label, state).await
     }
     pub async fn select_list_item(&self, window_id: WindowId, item_text: &str) -> Result<bool, AgentError> {
@@ -144,8 +166,8 @@ impl AgentClient {
     pub async fn dump_components(&self, window_id: WindowId) -> Result<serde_json::Value, AgentError> {
         self.inner.dump_components_boxed(window_id).await
     }
-    pub async fn list_tabs(&self, window_id: WindowId) -> Result<serde_json::Value, AgentError> {
-        self.inner.list_tabs_boxed(window_id).await
+    pub async fn list_clients(&self, window_id: WindowId) -> Result<serde_json::Value, AgentError> {
+        self.inner.list_clients_boxed(window_id).await
     }
     pub async fn send_key(&self, window_id: WindowId, key: &str) -> Result<bool, AgentError> {
         self.inner.send_key_boxed(window_id, key).await
@@ -164,12 +186,12 @@ trait AgentApiBoxed: Send + Sync {
     fn click_button_boxed<'a>(&'a self, window_id: WindowId, label: &'a str) -> BoxFut<'a, Result<bool, AgentError>>;
     fn type_text_boxed<'a>(&'a self, window_id: WindowId, field_index: usize, text: &'a str) -> BoxFut<'a, Result<bool, AgentError>>;
     fn click_menu_boxed<'a>(&'a self, window_id: WindowId, menu_path: &'a str) -> BoxFut<'a, Result<bool, AgentError>>;
-    fn set_checkbox_boxed<'a>(&'a self, window_id: WindowId, label: &'a str, state: Option<bool>) -> BoxFut<'a, Result<bool, AgentError>>;
+    fn set_checkbox_boxed<'a>(&'a self, window_id: WindowId, label: &'a str, state: Option<bool>) -> BoxFut<'a, Result<CheckboxOutcome, AgentError>>;
     fn select_list_item_boxed<'a>(&'a self, window_id: WindowId, item_text: &'a str) -> BoxFut<'a, Result<bool, AgentError>>;
     fn click_at_boxed(&self, window_id: WindowId, x: i32, y: i32) -> BoxFut<'_, Result<bool, AgentError>>;
     fn select_tree_node_boxed<'a>(&'a self, window_id: WindowId, node_name: &'a str) -> BoxFut<'a, Result<bool, AgentError>>;
     fn dump_components_boxed(&self, window_id: WindowId) -> BoxFut<'_, Result<serde_json::Value, AgentError>>;
-    fn list_tabs_boxed(&self, window_id: WindowId) -> BoxFut<'_, Result<serde_json::Value, AgentError>>;
+    fn list_clients_boxed(&self, window_id: WindowId) -> BoxFut<'_, Result<serde_json::Value, AgentError>>;
     fn send_key_boxed<'a>(&'a self, window_id: WindowId, key: &'a str) -> BoxFut<'a, Result<bool, AgentError>>;
 }
 
@@ -190,7 +212,7 @@ impl<T: AgentApi> AgentApiBoxed for T {
     fn click_menu_boxed<'a>(&'a self, window_id: WindowId, menu_path: &'a str) -> BoxFut<'a, Result<bool, AgentError>> {
         Box::pin(self.click_menu(window_id, menu_path))
     }
-    fn set_checkbox_boxed<'a>(&'a self, window_id: WindowId, label: &'a str, state: Option<bool>) -> BoxFut<'a, Result<bool, AgentError>> {
+    fn set_checkbox_boxed<'a>(&'a self, window_id: WindowId, label: &'a str, state: Option<bool>) -> BoxFut<'a, Result<CheckboxOutcome, AgentError>> {
         Box::pin(self.set_checkbox(window_id, label, state))
     }
     fn select_list_item_boxed<'a>(&'a self, window_id: WindowId, item_text: &'a str) -> BoxFut<'a, Result<bool, AgentError>> {
@@ -205,8 +227,8 @@ impl<T: AgentApi> AgentApiBoxed for T {
     fn dump_components_boxed(&self, window_id: WindowId) -> BoxFut<'_, Result<serde_json::Value, AgentError>> {
         Box::pin(self.dump_components(window_id))
     }
-    fn list_tabs_boxed(&self, window_id: WindowId) -> BoxFut<'_, Result<serde_json::Value, AgentError>> {
-        Box::pin(self.list_tabs(window_id))
+    fn list_clients_boxed(&self, window_id: WindowId) -> BoxFut<'_, Result<serde_json::Value, AgentError>> {
+        Box::pin(self.list_clients(window_id))
     }
     fn send_key_boxed<'a>(&'a self, window_id: WindowId, key: &'a str) -> BoxFut<'a, Result<bool, AgentError>> {
         Box::pin(self.send_key(window_id, key))
@@ -248,7 +270,7 @@ impl AgentApi for UdsAgent {
         let resp: AgentResponse<serde_json::Value> = self.post(&path, &body).await?;
         Ok(resp.ok)
     }
-    async fn set_checkbox(&self, window_id: WindowId, label: &str, state: Option<bool>) -> Result<bool, AgentError> {
+    async fn set_checkbox(&self, window_id: WindowId, label: &str, state: Option<bool>) -> Result<CheckboxOutcome, AgentError> {
         let path = format!("/windows/{}/checkbox", window_id.0);
         let body = if let Some(s) = state {
             serde_json::json!({ "label": label, "state": s.to_string() })
@@ -256,7 +278,20 @@ impl AgentApi for UdsAgent {
             serde_json::json!({ "label": label })
         };
         let resp: AgentResponse<serde_json::Value> = self.post(&path, &body).await?;
-        Ok(resp.ok)
+        // Inner data is the Swing-side JSON:
+        //   {"found":true,"label":"…","selected":true,"changed":false,"class":"…"}
+        //   {"found":false,"error":"Checkbox not found: …"}
+        // If envelope-level error path fires (data is None), surface it as
+        // found:false with the envelope error attached — same shape as the
+        // Swing-side miss so the caller has one thing to branch on.
+        match resp.data {
+            Some(v) => serde_json::from_value(v).map_err(AgentError::ParseError),
+            None => Ok(CheckboxOutcome {
+                found: false,
+                error: resp.error,
+                ..Default::default()
+            }),
+        }
     }
     async fn select_list_item(&self, window_id: WindowId, item_text: &str) -> Result<bool, AgentError> {
         let path = format!("/windows/{}/selectlist", window_id.0);
@@ -281,8 +316,8 @@ impl AgentApi for UdsAgent {
         let resp: AgentResponse<serde_json::Value> = self.get(&path).await?;
         self.unwrap_response(resp)
     }
-    async fn list_tabs(&self, window_id: WindowId) -> Result<serde_json::Value, AgentError> {
-        let path = format!("/windows/{}/tabs", window_id.0);
+    async fn list_clients(&self, window_id: WindowId) -> Result<serde_json::Value, AgentError> {
+        let path = format!("/windows/{}/clients", window_id.0);
         let resp: AgentResponse<serde_json::Value> = self.get(&path).await?;
         self.unwrap_response(resp)
     }
@@ -386,6 +421,13 @@ pub struct MockAgent {
     /// Tests set this to simulate specific Gateway UI states
     /// (e.g. labels = ["API Server","disconnected"] for a disconnected gateway).
     pub dump_response: serde_json::Value,
+    /// Response returned by `list_clients()` for ALL window IDs.
+    /// Tests set this to simulate API Client row status + tab list.
+    pub list_clients_response: serde_json::Value,
+    /// Labels for which `set_checkbox` returns `found: false`. Any label not
+    /// in this set returns `found: true`. Used to simulate the drift bug
+    /// Lcstyle/ibctl#4 surfaced.
+    pub not_found_labels: std::collections::HashSet<String>,
 }
 
 #[cfg(test)]
@@ -396,6 +438,11 @@ impl Default for MockAgent {
             healthy: true,
             click_result: true,
             dump_response: serde_json::json!({}),
+            list_clients_response: serde_json::json!({
+                "api_client_row_status": serde_json::Value::Null,
+                "tabs": []
+            }),
+            not_found_labels: std::collections::HashSet::new(),
         }
     }
 }
@@ -407,12 +454,30 @@ impl AgentApi for MockAgent {
     async fn click_button(&self, _: WindowId, _: &str) -> Result<bool, AgentError> { Ok(self.click_result) }
     async fn type_text(&self, _: WindowId, _: usize, _: &str) -> Result<bool, AgentError> { Ok(true) }
     async fn click_menu(&self, _: WindowId, _: &str) -> Result<bool, AgentError> { Ok(self.click_result) }
-    async fn set_checkbox(&self, _: WindowId, _: &str, _: Option<bool>) -> Result<bool, AgentError> { Ok(true) }
+    async fn set_checkbox(&self, _: WindowId, label: &str, state: Option<bool>) -> Result<CheckboxOutcome, AgentError> {
+        if self.not_found_labels.contains(label) {
+            Ok(CheckboxOutcome {
+                found: false,
+                error: Some(format!("Checkbox not found: {label}")),
+                ..Default::default()
+            })
+        } else {
+            Ok(CheckboxOutcome {
+                found: true,
+                label: Some(label.to_string()),
+                selected: state,
+                changed: Some(true),
+                error: None,
+            })
+        }
+    }
     async fn select_list_item(&self, _: WindowId, _: &str) -> Result<bool, AgentError> { Ok(true) }
     async fn click_at(&self, _: WindowId, _: i32, _: i32) -> Result<bool, AgentError> { Ok(true) }
     async fn select_tree_node(&self, _: WindowId, _: &str) -> Result<bool, AgentError> { Ok(true) }
     async fn dump_components(&self, _: WindowId) -> Result<serde_json::Value, AgentError> { Ok(self.dump_response.clone()) }
-    async fn list_tabs(&self, _: WindowId) -> Result<serde_json::Value, AgentError> { Ok(serde_json::json!({"tabs": []})) }
+    async fn list_clients(&self, _: WindowId) -> Result<serde_json::Value, AgentError> {
+        Ok(self.list_clients_response.clone())
+    }
     async fn send_key(&self, _: WindowId, _: &str) -> Result<bool, AgentError> { Ok(true) }
 }
 

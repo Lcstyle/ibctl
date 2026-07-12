@@ -14,8 +14,10 @@ from __future__ import annotations
 import logging
 import re
 import socket
+import time
 from dataclasses import dataclass, field
-from datetime import datetime, time
+from datetime import datetime
+from datetime import time as dt_time
 from enum import Enum
 from typing import ClassVar
 from zoneinfo import ZoneInfo
@@ -103,8 +105,8 @@ class SystemAlert:
 @dataclass(frozen=True)
 class ResetWindow:
     region: str  # NA, EU, APAC
-    start_time: time
-    end_time: time
+    start_time: dt_time
+    end_time: dt_time
     timezone: str  # IANA timezone name
     is_weekend: bool = False
     description: str = ""
@@ -161,6 +163,9 @@ class ScraperConfig:
         region: str = "NA",
         backend_hosts: list[str] | None = None,
         fallback_host: str = "interactivebrokers.com",
+        probe_retries: int = 2,
+        probe_retry_delay: float = 0.2,
+        promote_after_consecutive_failures: int = 3,
     ):
         self.url = url
         self.timeout = timeout
@@ -172,6 +177,15 @@ class ScraperConfig:
         self.region = region
         self.backend_hosts = ["cdc1-hb1.ibllc.com", "cdc1-hb2.ibllc.com"] if backend_hosts is None else backend_hosts
         self.fallback_host = fallback_host
+        # Per-host retry inside a single check_internet() call. Absorbs
+        # sub-second DNS/AAAA/roam glitches without flipping status.
+        self.probe_retries = probe_retries
+        self.probe_retry_delay = probe_retry_delay
+        # Consecutive-failure hysteresis on fetch_status(). Nine flap events
+        # between 2026-04-15 and 2026-07-09 traced to single-cycle probe
+        # failures; requiring N consecutive cycles removes the false positives
+        # while keeping detection latency <= N * check_interval.
+        self.promote_after_consecutive_failures = promote_after_consecutive_failures
 
 
 class IBStatusScraper:
@@ -183,6 +197,10 @@ class IBStatusScraper:
         self.config = config or ScraperConfig()
         self._session: requests.Session | None = None
         self._last_status: IBSystemStatus | None = None
+        # Tracks how many consecutive fetch_status() cycles have seen an
+        # internet-probe failure. Reset to 0 on any successful probe. Only
+        # promote status to NO_INTERNET when this crosses the config threshold.
+        self._consecutive_internet_failures: int = 0
 
     def _get_session(self) -> requests.Session:
         if self._session is None:
@@ -229,20 +247,64 @@ class IBStatusScraper:
         return len(reachable) > 0, reachable
 
     def check_internet(self) -> bool:
-        """Check basic internet connectivity (TCP to backends first, then CDN fallback)."""
-        backends_ok, _ = self.check_backends()
-        if backends_ok:
-            return True
-        return self._check_host(self.config.fallback_host)
+        """Check basic internet connectivity with per-host retry.
+
+        Tries each backend host + CDN fallback in order. Each host gets
+        `probe_retries + 1` total attempts with `probe_retry_delay` seconds
+        between them. First successful probe returns True; only after ALL
+        hosts have exhausted their retries do we return False.
+
+        Rationale: a single-shot 3s TCP probe is fragile against transient
+        DNS/AAAA/roam glitches. Nine "no_internet -> available" flap events
+        between 2026-04 and 2026-07 traced to sub-10s probe failures during
+        routine network cycling. Per-host retry absorbs the transient class
+        without slowing the happy path (first host / first attempt wins in
+        the common case, one _check_host call total).
+        """
+        for host in self.config.backend_hosts + [self.config.fallback_host]:
+            for attempt in range(self.config.probe_retries + 1):
+                if self._check_host(host, 443):
+                    return True
+                if attempt < self.config.probe_retries:
+                    time.sleep(self.config.probe_retry_delay)
+        return False
 
     def fetch_status(self) -> IBSystemStatus:
         """Fetch and parse the IB system status page."""
-        # Check internet first
+        # Hysteresis gate: only promote to NO_INTERNET after N consecutive
+        # failed probe cycles. A single failed cycle returns the cached
+        # status (or UNKNOWN if none) to avoid audit-log flap.
         if not self.check_internet():
+            self._consecutive_internet_failures += 1
+            threshold = self.config.promote_after_consecutive_failures
+            if self._consecutive_internet_failures < threshold:
+                logger.info(
+                    "Internet probe failed (%d/%d consecutive) — deferring promotion",
+                    self._consecutive_internet_failures, threshold,
+                )
+                if self._last_status is not None:
+                    return self._last_status
+                return IBSystemStatus(
+                    status=SystemStatus.UNKNOWN,
+                    fetch_error=(
+                        f"Internet probe failed ({self._consecutive_internet_failures}/"
+                        f"{threshold} consecutive) — deferring promotion; no cached status yet"
+                    ),
+                )
+            logger.warning(
+                "Internet probe failed %d consecutive cycles — promoting to NO_INTERNET",
+                self._consecutive_internet_failures,
+            )
             return IBSystemStatus(
                 status=SystemStatus.NO_INTERNET,
                 fetch_error="Internet connectivity check failed — backends and CDN unreachable",
             )
+        if self._consecutive_internet_failures > 0:
+            logger.info(
+                "Internet probe recovered after %d consecutive failures",
+                self._consecutive_internet_failures,
+            )
+        self._consecutive_internet_failures = 0
 
         # Backend TCP probe is informational — if backends are down but CDN is up,
         # we still scrape the status page (it's the authoritative source)
@@ -264,8 +326,7 @@ class IBStatusScraper:
             except requests.RequestException as e:
                 logger.debug("Scrape attempt %d failed: %s", attempt + 1, e)
                 if attempt < self.config.max_retries:
-                    import time as time_mod
-                    time_mod.sleep(delay)
+                    time.sleep(delay)
                     delay *= 2
 
         # All retries failed
@@ -394,10 +455,10 @@ class IBStatusScraper:
         return windows
 
     @staticmethod
-    def _parse_time(time_str: str) -> time | None:
+    def _parse_time(time_str: str) -> dt_time | None:
         match = re.match(r"(\d{1,2}):(\d{2})", time_str)
         if match:
-            return time(int(match.group(1)), int(match.group(2)))
+            return dt_time(int(match.group(1)), int(match.group(2)))
         return None
 
     def _determine_status(self, status: IBSystemStatus) -> SystemStatus:

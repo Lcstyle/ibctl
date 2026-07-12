@@ -280,6 +280,8 @@ public class MultiplexedServer {
             }
             if ("GET".equals(method) && "/tabs".equals(subPath))
                 return wrapOk(SwingInspector.listTabs(windowId));
+            if ("GET".equals(method) && "/clients".equals(subPath))
+                return wrapOk(SwingInspector.listClients(windowId));
             if ("POST".equals(method) && "/selectlist".equals(subPath)) {
                 String item = extractJsonField(body, "item");
                 if (item == null) return wrapError("Missing 'item' field");

@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -99,11 +100,24 @@ def main() -> None:
     # TOML generation
     if targets_to_run in ("all", "toml"):
         print("Generating TOML configs...")
-        docker_toml = render_docker_toml(cfg)
+        # Collect field descriptions from Pkl `///` doc comments while
+        # rendering the deployment TOML. The dashboard reads this JSON at
+        # boot to hydrate tooltips on the /config page.
+        descriptions: dict[str, str] = {}
+        docker_toml = render_docker_toml(cfg, descriptions_out=descriptions)
         write_or_print(ROOT / "docker" / "ibctl.toml", docker_toml, args.dry_run)
 
-        example_toml = render_example_toml(cfg)
+        example_toml = render_example_toml(cfg, descriptions_out=descriptions)
         write_or_print(ROOT / "ibctl.toml.example", example_toml, args.dry_run)
+
+        descriptions_json = json.dumps(
+            dict(sorted(descriptions.items())), indent=2, ensure_ascii=False
+        ) + "\n"
+        write_or_print(
+            ROOT / "dashboard" / "app" / "preflight" / "descriptions.json",
+            descriptions_json,
+            args.dry_run,
+        )
 
     # Compose generation
     if targets_to_run in ("all", "compose"):

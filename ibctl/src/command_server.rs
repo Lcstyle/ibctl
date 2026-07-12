@@ -80,6 +80,17 @@ pub(crate) fn parse_command(input: &str) -> Option<ParsedCommand> {
         }
         Some("RESUME") => Some(ParsedCommand::Action(Command::Resume)),
         Some("HITL_RESUME") => Some(ParsedCommand::Action(Command::HitlResume)),
+        Some("RESUME_RECONNECT") => {
+            // Preserve original casing on the token; the argument is an
+            // opaque signed value (stage 5 wires HMAC verification).
+            let orig_parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
+            let token = orig_parts.get(1).copied().unwrap_or("").trim().to_string();
+            if token.is_empty() {
+                None
+            } else {
+                Some(ParsedCommand::Action(Command::ResumeReconnect(token)))
+            }
+        }
         Some("SETSTATE") => {
             // Use the original (non-uppercased) input to preserve state name casing
             let orig_parts: Vec<&str> = trimmed.split_whitespace().collect();
@@ -387,7 +398,8 @@ fn is_privileged_command(cmd: &Command) -> bool {
             | Command::Pause
             | Command::PauseAt(_)
             | Command::Exit
-            | Command::HitlResume,
+            | Command::HitlResume
+            | Command::ResumeReconnect(_),
     )
 }
 
@@ -742,6 +754,42 @@ mod tests {
             }
             other => panic!("expected IBSTATUS to parse; got {:?}", other),
         }
+    }
+
+    // --- RESUME_RECONNECT parsing ---
+
+    #[test]
+    fn resume_reconnect_rejects_empty_token() {
+        // A bare `RESUME_RECONNECT` with no argument must NOT parse —
+        // downstream, the state machine mints the resume token using
+        // `nonce_material: token_str`, and an empty string collapses the
+        // single-use nonce invariant (all `RESUME_RECONNECT<empty>`
+        // taps in the same wall-second would produce the same hash).
+        // Fail-fast at the parser so operators see the ERROR immediately.
+        assert!(parse_command("RESUME_RECONNECT").is_none());
+        assert!(parse_command("RESUME_RECONNECT   ").is_none());
+    }
+
+    #[test]
+    fn resume_reconnect_preserves_token_original_casing() {
+        // The token payload MUST NOT be uppercased — stage 5 will HMAC-
+        // verify against a dashboard-signed URL where the token is
+        // case-sensitive. The wire format uses `splitn(2, ' ')` on the
+        // ORIGINAL (non-uppercased) input, so casing must survive.
+        match parse_command("RESUME_RECONNECT AbCdEf-123-XyZ") {
+            Some(ParsedCommand::Action(Command::ResumeReconnect(t))) => {
+                assert_eq!(t, "AbCdEf-123-XyZ");
+            }
+            other => panic!("expected ResumeReconnect with preserved casing, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn resume_reconnect_is_privileged_command() {
+        // Privileged → localhost-only. The three-phase recovery fail-
+        // safe leans on this gate to keep container-network peers from
+        // firing the resume path.
+        assert!(is_privileged_command(&Command::ResumeReconnect("any".into())));
     }
 
     #[test]

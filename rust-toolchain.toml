@@ -1,3 +1,8 @@
 [toolchain]
+# `stable` here so distro-provided rustc (Fedora, Debian) works — pinning
+# to a specific minor breaks devs without rustup. CI images explicitly pin
+# rust:1.97-bookworm (see .woodpecker/pipeline.yml + Dockerfile) so the
+# CI/local drift is bounded to lint additions between the local stable
+# and 1.97. Consider pinning when the team standardizes on rustup.
 channel = "stable"
 components = ["rustfmt", "clippy"]

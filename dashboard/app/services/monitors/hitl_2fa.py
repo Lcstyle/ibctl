@@ -21,8 +21,13 @@ from __future__ import annotations
 import logging
 import os
 
-from app.services import hitl_tokens
+from app.services import callback_common, hitl_tokens
 from app.services.monitor_manager import Alert, TransitionMonitor
+
+# Re-export the shared resolver under its historical name so existing tests
+# and callers (see test_twofa.py::TestDashboardBaseUrlFallback) keep working
+# after the extraction into ``app.services.callback_common``.
+_resolve_dashboard_base_url = callback_common.resolve_dashboard_base_url
 
 logger = logging.getLogger("dashboard.services.monitors.hitl_2fa")
 
@@ -48,36 +53,6 @@ def _ntfy_send_retries() -> int:
     except ValueError:
         return _DEFAULT_NTFY_SEND_RETRIES
     return max(0, min(_NTFY_SEND_RETRIES_CEILING, raw))
-
-
-def _resolve_dashboard_base_url() -> tuple[str, bool]:
-    """Return (base_url, is_fallback).
-
-    Preference order:
-      1. IBCTL_DASHBOARD_EXTERNAL_URL — what an operator's phone can reach
-      2. IBCTL_DASHBOARD_INTERNAL_URL — last-ditch fallback (warn)
-      3. Construct http://localhost:<port> from IBCTL_DASHBOARD_PORT (warn)
-    """
-    external = os.environ.get("IBCTL_DASHBOARD_EXTERNAL_URL", "").strip().rstrip("/")
-    if external:
-        return external, False
-
-    internal = os.environ.get("IBCTL_DASHBOARD_INTERNAL_URL", "").strip().rstrip("/")
-    if internal:
-        logger.warning(
-            "IBCTL_DASHBOARD_EXTERNAL_URL not set; falling back to "
-            "IBCTL_DASHBOARD_INTERNAL_URL — phone click-through may not work",
-        )
-        return internal, True
-
-    port = os.environ.get("IBCTL_DASHBOARD_PORT", "8080").strip()
-    logger.warning(
-        "Neither IBCTL_DASHBOARD_EXTERNAL_URL nor IBCTL_DASHBOARD_INTERNAL_URL "
-        "is set; HITL callback URL will point to http://localhost:%s which "
-        "is not reachable from a phone",
-        port,
-    )
-    return f"http://localhost:{port}", True
 
 
 def _format_next_retry(secs: int | None) -> str:
@@ -244,6 +219,12 @@ class Hitl2faEntryMonitor(TransitionMonitor):
                 total = 1 + max_retries
                 logger.info("HITL ntfy send attempt %d/%d for mode=%s", attempt_num, total, mode)
 
+                # force=True bypasses NotificationService's per-event_type cooldown so the
+                # initial alert fires even if a same-event-type send happened recently.
+                # The transport-layer kind-keyed coalescer in NtfyClient still applies —
+                # it stamps on HTTP 200, so the SECOND mode entering HITL within the
+                # 30s coalesce window will be suppressed at the transport layer even
+                # though we passed force=True up here.
                 success = await ns.send_alert(
                     event_type=alert.event_type,
                     title=alert.title,

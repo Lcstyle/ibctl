@@ -65,6 +65,14 @@ pub enum Command {
     /// Privileged (localhost-only). Only takes effect when the state machine
     /// is in `State::WaitingForHitl2fa`; ignored in all other states.
     HitlResume,
+    /// Resume from three-phase recovery `GivenUp` — operator tapped the
+    /// signed callback URL on the ntfy give-up alert. Argument is the
+    /// opaque resume-token string; stage 3 accepts any non-empty value
+    /// (stage 5 adds HMAC verification against the dashboard-signed URL).
+    ///
+    /// Privileged (localhost-only). Only takes effect when the recovery
+    /// coordinator is in `RecoveryPhase::GivenUp`; ignored otherwise.
+    ResumeReconnect(String),
 }
 
 /// Query commands that expect a JSON response via oneshot channel.
@@ -96,21 +104,60 @@ impl std::fmt::Debug for Query {
 }
 
 /// Signals that ibctl handles for lifecycle management.
-/// Produced by: signals (OS signal handler)
-/// Consumed by: state_machine (main select loop)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Produced by: signals (OS signal handler), recovery coordinator
+/// Consumed by: state_machine (main select loop), external subscribers
+///
+/// `Copy` was intentionally dropped in PR-C stage 5 when `RecoveryGaveUp`
+/// landed: the variant carries a `String` (mode) and a `jiff::Zoned`
+/// (phase_entered_at), neither of which is `Copy`. Existing OS-signal
+/// pattern matches on `Signal::Terminate | Signal::Interrupt` still work
+/// because `Clone` is preserved.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Signal {
     /// SIGTERM — graceful shutdown requested (e.g., Docker stop)
     Terminate,
     /// SIGINT — interrupt (Ctrl+C)
     Interrupt,
+    /// Recovery coordinator entered `GivenUp` and fired its give-up
+    /// alert. Additive to the existing in-line halt behaviour (JVM kill +
+    /// WaitingForLaunch park) — external subscribers (SSE bus,
+    /// dashboard) use this for push-side notification with lower latency
+    /// than STATUS-poll would allow. Dedupe-gated: at most one send per
+    /// GivenUp phase entry.
+    RecoveryGaveUp {
+        /// Trading mode ("live" | "paper") of the coordinator that gave up.
+        mode: String,
+        /// Wall-clock instant of the GivenUp phase entry (same clock the
+        /// coordinator persists as `phase_entered_at`).
+        phase_entered_at: jiff::Zoned,
+    },
 }
 
-/// Marker signal for the Sunday cold restart timer.
+/// Why a scheduled cold restart was skipped. Surfaced via STATUS JSON
+/// so the dashboard can render distinct messages for "we already
+/// re-authed today" vs "this site is on standby".
+#[derive(Debug, Clone)]
+pub enum ColdRestartSkipReason {
+    /// A fresh login completed earlier today, so the scheduled fire is
+    /// redundant. Carries the timestamp of that completed login.
+    FreshAuthToday { at: jiff::Zoned },
+    /// The site is in a dormant state (standby, shutdown, or HITL-stalled)
+    /// and has no JVM to restart. The fire is a no-op.
+    DormantSite,
+}
+
+/// Signals from the Sunday cold restart timer.
 /// Produced by: cold_restart (background timer task)
 /// Consumed by: state_machine (main select loop)
 #[derive(Debug, Clone)]
-pub struct ColdRestartSignal;
+pub enum ColdRestartSignal {
+    /// Time to cold-restart the JVM — full re-auth required.
+    Fire,
+    /// Scheduled time arrived but the fire was suppressed. The state
+    /// machine records the reason so the dashboard can render distinct
+    /// messages via STATUS JSON.
+    Skipped(ColdRestartSkipReason),
+}
 
 /// Pre-built query responses published via `watch` channel.
 ///

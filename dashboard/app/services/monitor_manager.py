@@ -76,7 +76,15 @@ class TransitionMonitor(Monitor):
 
             result = self._scan_history(mode, state.history)
             if result is None:
-                self._last_seen_key.pop(mode, None)
+                # `None` means "nothing worth alerting right now" — which can
+                # happen either because no qualifying transition is in history
+                # OR because a qualifying one exists but is being suppressed
+                # (e.g., within a scheduled-restart suppression window).
+                # Do NOT clear the dedup key here: if we're suppressing the
+                # same transition we already alerted on, we'd otherwise
+                # re-fire the alert as soon as the window ends. Dedup keys
+                # naturally roll over on the next new transition because the
+                # timestamp component makes each transition uniquely keyed.
                 continue
 
             key, alert = result

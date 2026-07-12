@@ -118,11 +118,22 @@ class MarketDayFileHandler(BaseRotatingHandler):
 
 
 def setup_dashboard_logging(log_dir: str | None = None, log_level: str = "INFO"):
-    """Configure the dashboard root logger with file handler."""
+    """Configure the dashboard root logger with file handler.
+
+    Idempotent: if a MarketDayFileHandler is already attached to root we
+    return immediately. bootstrap.py calls this once before any other
+    module imports; create_app() may call it a second time depending on
+    env var presence — the guard prevents double-handlers (which would
+    log every record twice).
+    """
     import logging
 
     if not log_dir:
         return  # No file logging
+
+    root = logging.getLogger()
+    if any(isinstance(h, MarketDayFileHandler) for h in root.handlers):
+        return
 
     handler = MarketDayFileHandler(log_dir=log_dir, filename_prefix="dashboard-")
     formatter = logging.Formatter(
@@ -133,8 +144,20 @@ def setup_dashboard_logging(log_dir: str | None = None, log_level: str = "INFO")
     handler.setLevel(getattr(logging, log_level.upper(), logging.INFO))
 
     # Add to root logger so all dashboard.* loggers get file output
-    root = logging.getLogger()
     root.addHandler(handler)
     # Ensure root logger level allows messages through to the handler
     if root.level > handler.level:
         root.setLevel(handler.level)
+
+    # Route uvicorn's own loggers and warnings into the same file handler so
+    # that "Application startup failed" + traceback land in the durable JSONL
+    # log. Without this they only reach docker stderr — the exact path that
+    # lost the 2026-06-20 traceback when the container was later removed.
+    # We APPEND the handler (don't clear existing ones) so uvicorn's own
+    # stderr emission is preserved for live `docker logs` use.
+    logging.captureWarnings(True)
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "py.warnings"):
+        lg = logging.getLogger(name)
+        lg.addHandler(handler)
+        if lg.level > handler.level or lg.level == 0:
+            lg.setLevel(handler.level)

@@ -44,6 +44,9 @@ class DashboardSettings:
         oidc_scopes: str = "openid profile email",
         oidc_allowed_users: tuple[str, ...] = (),
         oidc_allowed_groups: tuple[str, ...] = (),
+        build_sha: str = "",
+        build_time_human: str = "",
+        build_time_utc: str = "",
     ):
         self.port = port
         self.token = token
@@ -67,6 +70,11 @@ class DashboardSettings:
         self.oidc_scopes = oidc_scopes
         self.oidc_allowed_users = oidc_allowed_users
         self.oidc_allowed_groups = oidc_allowed_groups
+        # Build-badge inputs (baked into the image at docker build time).
+        # Empty string on local dev / first boot before CI wires the ARGs.
+        self.build_sha = build_sha
+        self.build_time_human = build_time_human
+        self.build_time_utc = build_time_utc
 
     @property
     def github_oauth_enabled(self) -> bool:
@@ -141,6 +149,9 @@ class DashboardSettings:
                 for value in os.environ.get("IBCTL_OIDC_ALLOWED_GROUPS", "").split(",")
                 if value.strip()
             ),
+            build_sha=os.environ.get("IBCTL_BUILD_SHA", "").strip(),
+            build_time_human=os.environ.get("IBCTL_BUILD_TIME_HUMAN", "").strip(),
+            build_time_utc=os.environ.get("IBCTL_BUILD_TIME_UTC", "").strip(),
         )
         logger.info(
             "Config loaded: port=%d mode=%s auth=%s debug=%s log_level=%s github_oauth=%s oidc=%s",

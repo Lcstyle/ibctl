@@ -1,6 +1,7 @@
 //! Core types for the state machine: State enum, Stats, Transition, Channels, errors.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use std::sync::Arc;
@@ -9,13 +10,23 @@ use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 
 use crate::agent_client::AgentClient;
-use crate::types::{ColdRestartSignal, Command, Query, QuerySnapshot};
+use crate::types::{ColdRestartSignal, ColdRestartSkipReason, Command, Query, QuerySnapshot};
 use crate::config::ValidConfig;
 use crate::handlers::DialogHandlerRegistry;
 use crate::types::Signal;
 use crate::supervisor::Supervisor;
 
+use super::recovery::{AbortOnDrop, DwellSuccess, RecoveryCoordinator, ResumeToken};
 use super::revocation::RevocationTracker;
+
+/// Captured at the moment we observed a cold-restart skip — both the
+/// time we recorded it and why we skipped. Cleared on the next
+/// `ColdRestartSignal::Fire`.
+#[derive(Debug, Clone)]
+pub struct ColdRestartSkipRecord {
+    pub recorded_at: jiff::Zoned,
+    pub reason: ColdRestartSkipReason,
+}
 
 #[derive(Debug, Error)]
 pub enum StateMachineError {
@@ -86,6 +97,35 @@ pub enum State {
 }
 
 impl State {
+    /// Returns true when the JVM is performing or about to perform a fresh
+    /// authentication: credentials submission, 2FA (immediate or HITL),
+    /// post-auth API configuration, JVM relaunch with pending re-auth, or
+    /// the initial launch leading into the login form.
+    ///
+    /// This is the single source of truth for "did a real human-or-credential
+    /// event drive the transition into Connected?" Used by `apply_transition`
+    /// to gate writing the fresh-auth marker — adding a new credential-gathering
+    /// state requires only updating this list, not chasing the predicate
+    /// across distant files.
+    ///
+    /// `ReconnectingSession` is intentionally excluded: that path can
+    /// self-resolve without any credential entry (the Connected->revoke->
+    /// Connected flap we explicitly filter out).
+    pub fn is_credential_gathering(&self) -> bool {
+        matches!(
+            self,
+            State::WaitingForLogin
+                | State::Authenticating
+                | State::WaitingFor2fa
+                | State::WaitingForHitl2fa
+                | State::DismissingPopups
+                | State::WaitingForApiReady
+                | State::ConfiguringApi
+                | State::Restarting
+                | State::Launching
+        )
+    }
+
     /// Parse a state name from a string (for SETSTATE command).
     pub fn from_name(name: &str) -> Option<State> {
         match name {
@@ -141,6 +181,16 @@ pub struct Stats {
     pub dialogs_dismissed: u32,
     pub last_2fa_duration_secs: Option<f64>,
     pub config_apply_duration_secs: Option<f64>,
+    /// Cumulative count of PRECAUTION_LABELS entries the Gateway UI didn't
+    /// match. Non-zero here means the Java-side tolerant matcher failed
+    /// too — either Gateway renamed a checkbox or added Unicode punctuation
+    /// the normalizer doesn't handle. TRIPWIRE for Lcstyle/ibctl#4-class
+    /// drift; surfaces on /api/status via inline serialize in queries.rs.
+    pub precaution_labels_not_found: u32,
+    /// Same tripwire, one field for the Read-Only API label specifically.
+    /// Kept separate so oncall can see at a glance whether the drift hit
+    /// the API-settings page or the API-precautions page.
+    pub read_only_api_label_not_found: u32,
 }
 
 /// A recorded state transition.
@@ -167,7 +217,7 @@ pub struct Channels {
 pub(super) enum Interrupt {
     Signal(Signal),
     Command(Command),
-    ColdRestart,
+    ColdRestart(ColdRestartSignal),
     AgentEvent(crate::agent_events::AgentEvent),
 }
 
@@ -297,6 +347,18 @@ pub struct StateMachine {
     pub(super) hitl_ntfy_attempts: u32,
     /// Whether the initial ntfy push succeeded for the current HITL entry.
     pub(super) hitl_ntfy_sent: bool,
+    /// Consecutive ticks where the world-state suggests the JVM has dropped
+    /// back to a login form (login form visible AND no 2FA dialog). Once this
+    /// reaches `HITL_DEMOTE_TICK_THRESHOLD`, the handler demotes to
+    /// WaitingForLogin. Cleared on entry to / exit from WaitingForHitl2fa.
+    pub(super) hitl_login_form_observation_ticks: u8,
+    /// Consecutive ticks where the world-state suggests the JVM has
+    /// reached the connected steady state (main Gateway window present,
+    /// "API Server: connected" label visible, no 2FA dialog). Once this
+    /// reaches `HITL_DEMOTE_TICK_THRESHOLD`, the handler demotes to
+    /// WaitingForApiReady so the standard post-auth setup runs (including
+    /// socat start). Cleared on entry to / exit from WaitingForHitl2fa.
+    pub(super) hitl_connected_observation_ticks: u8,
     /// When Connected was first entered continuously. Reset on any exit from
     /// Connected. Used by `counter_reset = "stable"` to decide when the counter
     /// may reset.
@@ -307,6 +369,73 @@ pub struct StateMachine {
     pub(super) api_port_probe_failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Handle for the TCP probe task, for cancellation on Connected exit.
     pub(super) api_port_probe_task: Option<tokio::task::JoinHandle<()>>,
+    /// Absolute path to the per-mode cold-restart-equivalent marker. Updated
+    /// when a real cold-restart-equivalent completes (arrival into Connected
+    /// from a credential-gathering state AND a 2FA challenge was answered
+    /// successfully during this JVM lifecycle). The cold-restart scheduler
+    /// reads this to decide whether to skip an upcoming scheduled fire.
+    ///
+    /// Renamed from `fresh_auth_marker_path` when the semantics narrowed:
+    /// the marker now specifically records a "JVM-kill + answered 2FA"
+    /// event, not just any arrival at Connected. Warm restarts (IBC's
+    /// daily -Drestart= pattern) that bypass 2FA do NOT write this marker.
+    pub(super) cold_restart_equivalent_marker_path: PathBuf,
+    /// Set to true when a 2FA challenge was answered successfully since the
+    /// last Launching state entry. Consulted in apply_transition's Connected-
+    /// entry branch to decide whether to write the cold-restart-equivalent
+    /// marker — only real cold-restart-equivalents (full kill + relaunch +
+    /// 2FA response) should count for the Sunday cold-restart skip policy.
+    /// Warm restarts (IBC's daily -Drestart= pattern) do NOT pass through
+    /// WaitingFor2fa or WaitingForHitl2fa, so this stays false through them.
+    ///
+    /// Lifecycle (in apply_transition):
+    /// - Reset to false on every entry into State::Launching (covers every
+    ///   JVM (re)start: warm/cold/error recovery/HITL auto-retry).
+    /// - Set to true on WaitingFor2fa -> {DismissingPopups, WaitingForApiReady,
+    ///   ConfiguringApi, Connected} when self.twofa_seen == true (the
+    ///   twofa_seen gate excludes the grace-period escape at line 1188
+    ///   where no 2FA dialog was ever presented).
+    /// - Set to true on WaitingForHitl2fa -> WaitingForApiReady (the
+    ///   positive-direction probe added in commit 7a7bb5d).
+    /// - Reset to false immediately after writing the marker on Connected
+    ///   entry — so a subsequent Connected->revoke->ReconnectingSession->
+    ///   Connected loop doesn't carry stale truth.
+    ///
+    /// Intentionally NOT exposed via STATUS JSON: internal bookkeeping.
+    pub(super) cold_restart_equivalent_pending: bool,
+    /// Most recent cold-restart fire that was suppressed, with the reason.
+    /// Cleared when a subsequent `ColdRestartSignal::Fire` is accepted, so
+    /// STATUS JSON consumers don't see a stale "skip" indefinitely.
+    /// Surfaced in STATUS JSON (serialized at the JSON boundary) so the
+    /// dashboard can render distinct messages for "fresh auth today" vs
+    /// "site is dormant" and dedup against same-day re-auth alerts.
+    pub(super) last_cold_restart_skip: Option<ColdRestartSkipRecord>,
+
+    // --- PR-C stage 3: three-phase reconnection recovery coordinator ---
+    /// Recovery coordinator — owns phase + marker I/O. Ticked once per
+    /// main-loop iteration; every mutation goes through
+    /// `RecoveryCoordinator::apply`.
+    pub(super) recovery: RecoveryCoordinator,
+    /// Dwell timer for Connected → record_success. Populated on entering
+    /// Connected via `apply_transition`, dropped (auto-aborts the task)
+    /// on leaving Connected. When the task fires uncancelled, it sends
+    /// a `DwellSuccess` down `dwell_success_tx`; the main loop drains
+    /// the receiver and applies via `recovery.record_success`.
+    pub(super) dwell_guard: Option<AbortOnDrop>,
+    /// Sender half held by the spawned dwell task (via `clone()`).
+    pub(super) dwell_success_tx: tokio::sync::mpsc::UnboundedSender<DwellSuccess>,
+    /// Receiver half drained by the main loop each tick. Unbounded is
+    /// fine because a Connected dwell only fires once per Connected
+    /// entry — the queue never grows.
+    pub(super) dwell_success_rx: tokio::sync::mpsc::UnboundedReceiver<DwellSuccess>,
+    /// Pending resume token from a `Command::ResumeReconnect`. Taken by
+    /// `take_pending_resume_token` on the next recovery tick and passed
+    /// into `RecoveryCoordinator::compute` / `::apply`.
+    pub(super) pending_resume_token: Option<ResumeToken>,
+    /// Trading-mode tag ("live" | "paper") used for the resume token's
+    /// mode field. Determined from `config.auth.trading_mode` at
+    /// construction; recovery marker paths are scoped by this same tag.
+    pub(super) recovery_mode_tag: String,
 }
 
 impl StateMachine {
@@ -317,7 +446,47 @@ impl StateMachine {
         handler_registry: DialogHandlerRegistry,
         channels: Channels,
         snapshot_tx: watch::Sender<Arc<QuerySnapshot>>,
+        cold_restart_equivalent_marker_path: PathBuf,
     ) -> Self {
+        // Recovery coordinator — settings_dir derived from the cold-restart
+        // marker's parent (already resolved from TWS_SETTINGS_PATH in
+        // main.rs). Mode tag maps TradingMode → "live" | "paper"; "both"
+        // maps to "paper" pending PR-D per-mode split (paper is the
+        // dominant use case and matches the marker convention already in
+        // production).
+        let settings_dir = cold_restart_equivalent_marker_path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("/home/ibgateway/Jts"));
+        let recovery_mode_tag = match config.auth.trading_mode {
+            crate::config::TradingMode::Live => "live".to_string(),
+            crate::config::TradingMode::Paper | crate::config::TradingMode::Both => {
+                "paper".to_string()
+            }
+        };
+        let recovery_config = config.timing.recovery.to_runtime();
+        let (recovery, recovery_outcome) = RecoveryCoordinator::boot(
+            settings_dir,
+            recovery_mode_tag.clone(),
+            recovery_config,
+        );
+        match &recovery_outcome {
+            super::recovery::RecoveryLoadOutcome::Loaded(state) => {
+                log::info!(
+                    "recovery.loaded phase={} phase_entered_at={}",
+                    state.phase.as_str(),
+                    state.phase_entered_at,
+                );
+            }
+            super::recovery::RecoveryLoadOutcome::Defaulted { reason } => {
+                log::warn!("recovery.defaulted reason={reason}");
+            }
+            super::recovery::RecoveryLoadOutcome::RefusedGivenUpAutoReset { reason } => {
+                log::warn!("recovery.blocked_by_refuse_givenup reason={reason}");
+            }
+        }
+        let (dwell_success_tx, dwell_success_rx) = tokio::sync::mpsc::unbounded_channel();
+
         Self {
             state: State::Init,
             config,
@@ -362,11 +531,22 @@ impl StateMachine {
             hitl_intervals_index: 0,
             hitl_ntfy_attempts: 0,
             hitl_ntfy_sent: false,
+            hitl_login_form_observation_ticks: 0,
+            hitl_connected_observation_ticks: 0,
             connected_continuously_since: None,
             api_port_probe_failed: std::sync::Arc::new(
                 std::sync::atomic::AtomicBool::new(false),
             ),
             api_port_probe_task: None,
+            cold_restart_equivalent_marker_path,
+            cold_restart_equivalent_pending: false,
+            last_cold_restart_skip: None,
+            recovery,
+            dwell_guard: None,
+            dwell_success_tx,
+            dwell_success_rx,
+            pending_resume_token: None,
+            recovery_mode_tag,
         }
     }
 
@@ -523,5 +703,55 @@ mod tests {
         assert!(matches!(State::from_name("Init"), Some(State::Init)));
         assert!(matches!(State::from_name("WaitingForLogin"), Some(State::WaitingForLogin)));
         assert!(State::from_name("NotARealState").is_none());
+    }
+
+    #[test]
+    fn test_is_credential_gathering_covers_expected_states() {
+        // The nine states currently classified as "real credential or
+        // login-pipeline work in progress". A successful arrival into
+        // Connected from any of these counts as a fresh authentication
+        // for the cold-restart skip ratchet.
+        let gathering = [
+            State::WaitingForLogin,
+            State::Authenticating,
+            State::WaitingFor2fa,
+            State::WaitingForHitl2fa,
+            State::DismissingPopups,
+            State::WaitingForApiReady,
+            State::ConfiguringApi,
+            State::Restarting,
+            State::Launching,
+        ];
+        for s in &gathering {
+            assert!(
+                s.is_credential_gathering(),
+                "{} must be classified as credential-gathering",
+                s,
+            );
+        }
+
+        // States that must NOT count — either no credential entry happens
+        // (ReconnectingSession self-resolves), the JVM hasn't started yet
+        // (Init, WaitingForLaunch, WaitingForAgent), the gateway is paused
+        // on an external condition (WaitingForIB, HandlingSessionConflict),
+        // or we're already done (Connected, Shutdown, Error).
+        let non_gathering = [
+            State::ReconnectingSession,
+            State::Connected,
+            State::Init,
+            State::Shutdown,
+            State::WaitingForLaunch,
+            State::WaitingForAgent,
+            State::WaitingForIB,
+            State::HandlingSessionConflict,
+            State::Error("boom".into()),
+        ];
+        for s in &non_gathering {
+            assert!(
+                !s.is_credential_gathering(),
+                "{} must NOT be classified as credential-gathering",
+                s,
+            );
+        }
     }
 }

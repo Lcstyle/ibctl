@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import os
 from dataclasses import asdict
+from pathlib import Path
 from urllib.parse import urlencode, parse_qs
 
 import httpx
@@ -24,6 +26,43 @@ from app.middleware.auth import (
 
 logger = logging.getLogger("dashboard.pages")
 router = APIRouter()
+
+
+# --- Pkl-canonical field descriptions ---
+# Read once at module load. The renderer at ``tools/renderers/toml_renderer.py``
+# writes this file alongside ``docker/ibctl.toml`` — it maps ``<section>.<key>``
+# (dotted TOML path) to the Pkl ``///`` doc comment for that field. Missing at
+# dev time (before ``make regenerate-configs`` has ever run) is not fatal:
+# tooltips just degrade to no hover text.
+_DESCRIPTIONS_PATH = Path(__file__).resolve().parents[1] / "preflight" / "descriptions.json"
+
+
+def _load_field_descriptions() -> dict[str, str]:
+    try:
+        with _DESCRIPTIONS_PATH.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+        if not isinstance(payload, dict):
+            logger.warning(
+                "descriptions.json at %s is not a JSON object; ignoring",
+                _DESCRIPTIONS_PATH,
+            )
+            return {}
+        # Coerce values to str — the file is generated but defensively guard
+        # against a hand-edited malformed entry.
+        return {str(k): str(v) for k, v in payload.items()}
+    except FileNotFoundError:
+        logger.warning(
+            "descriptions.json not found at %s — config-page tooltips will be "
+            "empty. Run `make regenerate-configs` to emit it.",
+            _DESCRIPTIONS_PATH,
+        )
+        return {}
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("Failed to read descriptions.json: %s", exc)
+        return {}
+
+
+FIELD_DESCRIPTIONS: dict[str, str] = _load_field_descriptions()
 
 GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
@@ -695,7 +734,7 @@ def _build_config_groups(config_data: dict) -> list[dict]:
             section_data = config_data.get(sk)
             if not isinstance(section_data, dict) or not section_data:
                 continue
-            items = _extract_items(section_data, SECRET_KEYS)
+            items = _extract_items(sk, section_data, SECRET_KEYS)
             if items:
                 subsections.append({
                     "label": SECTION_LABELS.get(sk, sk),
@@ -716,25 +755,41 @@ def _build_config_groups(config_data: dict) -> list[dict]:
     return groups
 
 
-def _extract_items(section_data: dict, secret_keys: set) -> list[dict]:
-    """Extract key-value items from a config section, flattening one level."""
+def _extract_items(
+    section_name: str, section_data: dict, secret_keys: set
+) -> list[dict]:
+    """Extract key-value items from a config section, flattening one level.
+
+    ``section_name`` is the TOML section (e.g. ``"twofa"`` or
+    ``"twofa.backoff"``) — used to look each field's Pkl-canonical description
+    up in ``FIELD_DESCRIPTIONS`` by dotted path. Every returned item carries
+    a ``description`` field: ``str`` when the descriptions.json entry exists,
+    ``None`` otherwise. The template guards on truthiness so ``None`` never
+    leaks as ``title="None"``.
+    """
     items = []
     for key, value in section_data.items():
         if isinstance(value, dict):
             for sub_key, sub_val in value.items():
                 display_key = f"{key}.{sub_key}"
                 masked = any(s in sub_key.lower() for s in secret_keys)
+                # Sub-section fields live under ``section_name.key.sub_key`` in
+                # descriptions.json (e.g. ``twofa.backoff.max_immediate_attempts``).
+                dotted = f"{section_name}.{key}.{sub_key}"
                 items.append({
                     "key": display_key,
                     "value": "********" if masked and sub_val else _format_val(sub_val),
                     "masked": masked,
+                    "description": FIELD_DESCRIPTIONS.get(dotted),
                 })
         else:
             masked = any(s in key.lower() for s in secret_keys)
+            dotted = f"{section_name}.{key}"
             items.append({
                 "key": key,
                 "value": "********" if masked and value else _format_val(value),
                 "masked": masked,
+                "description": FIELD_DESCRIPTIONS.get(dotted),
             })
     return items
 

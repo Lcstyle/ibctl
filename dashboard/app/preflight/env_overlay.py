@@ -34,8 +34,15 @@ def env_or_file(var: str) -> str | None:
 
 
 def coerce_bool(value: str) -> bool:
-    """Coerce a string to bool, matching Rust's matches! behavior."""
-    return value.lower() in ("yes", "true", "1")
+    """Coerce a string to bool, matching Rust's env_bool `matches!` vocabulary.
+
+    Must stay in lock-step with the Rust closure in
+    ``config.rs::RecoveryTimingConfig::to_runtime``:
+        matches!(low.as_str(), "1" | "true" | "yes" | "on")
+    Any drift lets an operator disable a subsystem in Rust while preflight
+    still sees it enabled (or vice-versa).
+    """
+    return value.lower() in ("yes", "true", "1", "on")
 
 
 def _set_nested(data: dict, dotted_path: str, value: Any) -> None:
@@ -88,11 +95,44 @@ _INT_FIELDS = {
     "timing.login_dialog_timeout_secs",
     "timing.restart_delay_secs",
     "timing.relogin_max_attempts",
+    # Recovery coordinator (PR-C stage 3): five int knobs that mirror Rust
+    # RecoveryTimingConfig. Non-numeric values are silently ignored (see the
+    # ValueError branch below) to match Rust env_u64/env_u32 behavior.
+    "timing.recovery.aggressive_phase_max_secs",
+    "timing.recovery.backoff_phase_max_secs",
+    "timing.recovery.backoff_interval_secs",
+    "timing.recovery.min_success_dwell_secs",
+    "timing.recovery.fingerprint_streak_forcing_hitl",
 }
 
 _COMMA_LIST_FIELDS = {
     "command_server.control_from",
 }
+
+# Env vars that hold booleans but have NO TOML mapping. Only the Rust
+# recovery coordinator reads them at boot (wired in a subsequent stage of
+# PR-C — the read-site is currently in `config.rs::to_runtime()` which is
+# not yet called from `main.rs`; see the `#[allow(dead_code)]` on
+# `RecoveryTimingConfig`).
+#   IBCTL_RECOVERY_DISABLED   — inverted from timing.recovery.enabled;
+#     Rust's to_runtime() does the inversion, so leaving unmapped keeps
+#     Python out of the picture (option (b) from the audit spec).
+#   IBCTL_RECOVERY_FORCE_RESET — one-shot marker wipe trigger; consumed
+#     by the coordinator and never persisted anywhere.
+# `apply_env_overrides()` reads this set to reject typo values (anything
+# that isn't in the Rust `env_bool` vocabulary) so they don't propagate
+# downstream as raw strings. Membership alone is not enough — the read
+# site below is what enforces the contract; tests must exercise the read
+# site, not the set.
+_BOOL_ENV_VARS: set[str] = {
+    "IBCTL_RECOVERY_DISABLED",
+    "IBCTL_RECOVERY_FORCE_RESET",
+}
+
+# Valid Rust `env_bool` vocabulary. Must match `coerce_bool` above and the
+# `matches!` closure in Rust's `to_runtime`. Kept as a module-level constant
+# so tests can import it directly.
+_BOOL_STRICT_ACCEPT: frozenset[str] = frozenset({"1", "true", "yes", "on"})
 
 
 def apply_env_overrides(config: dict) -> dict:
@@ -111,12 +151,36 @@ def apply_env_overrides(config: dict) -> dict:
             _set_nested(config, toml_path, coerce_bool(raw))
         elif toml_path in _INT_FIELDS:
             try:
-                _set_nested(config, toml_path, int(raw))
+                parsed = int(raw)
             except ValueError:
-                pass  # Silent fallback, matches Rust behavior
+                continue  # Silent fallback, matches Rust behavior
+            if parsed < 0:
+                # Rust `u64/u32` parse rejects negatives with the same
+                # silent-warn semantics as non-numeric; mirror that so a
+                # typo like `IBCTL_RECOVERY_BACKOFF_INTERVAL_SECS=-1`
+                # doesn't turn Rust's soft-fall-back into a preflight
+                # hard-error (Pydantic `ge=0` would otherwise fire).
+                continue
+            _set_nested(config, toml_path, parsed)
         elif toml_path in _COMMA_LIST_FIELDS:
             _set_nested(config, toml_path, [s.strip() for s in raw.split(",")])
         else:
             _set_nested(config, toml_path, raw)
+
+    # Registered-but-unmapped bool env vars (Rust-only, no TOML round-trip).
+    # We don't inject into `config` — there's no landing zone — but we
+    # actively assert the value is in the Rust vocabulary so a downstream
+    # audit / a typo like `IBCTL_RECOVERY_FORCE_RESET=maybe` is caught
+    # BEFORE Rust silently maps unknown-string to `false`.
+    for env_var in _BOOL_ENV_VARS:
+        raw = env_or_file(env_var)
+        if raw is None or raw == "":
+            continue
+        if raw.lower() not in _BOOL_STRICT_ACCEPT:
+            # Match `_INT_FIELDS` silent-drop semantics: unknown -> ignored,
+            # Rust falls back to its default. No error, no dict mutation.
+            # A future PR that adds an on-disk log/warn sink should hook
+            # here; a hard error would regress every deploy with a typo.
+            continue
 
     return config

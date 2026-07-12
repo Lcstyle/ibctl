@@ -3,8 +3,10 @@ package ibctl.agent;
 import java.awt.*;
 import java.awt.event.KeyEvent;
 import java.lang.reflect.InvocationTargetException;
+import java.text.Normalizer;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.swing.*;
 
@@ -150,6 +152,85 @@ public class SwingInspector {
      * KeyStroke.getKeyStroke() (e.g. "ctrl F", "ENTER", "alt F4").
      * Returns JSON result string.
      */
+    /**
+     * Return rich client-state metadata pulled from the JVM's Swing UI:
+     *
+     *   {
+     *     "api_client_row_status": "connected" | "disconnected" | null,
+     *     "tabs": [{"index": 0, "title": "Client 50", "selected": false}, ...]
+     *   }
+     *
+     * Two signals from inside the JVM, combined:
+     *
+     *   - {@code api_client_row_status} — the connection-status panel renders
+     *     four (purpose, status) JLabel rows; the "API Client" row's status
+     *     is the JVM's aggregate "any client live right now" signal. Null if
+     *     the row has not appeared this session (no client has ever connected).
+     *
+     *   - {@code tabs} — JTabbedPane titles below the panel. Each tab
+     *     corresponds to a Client ID Gateway has seen this session. Tabs
+     *     persist after a client disconnects, so this is historical, not
+     *     necessarily currently active.
+     *
+     * Together they let Rust derive the truthful count: only report tab IDs
+     * when the API Client row says "connected"; otherwise zero.
+     */
+    public static String listClients(long windowId) {
+        Window window = findWindowById(windowId);
+        if (window == null) {
+            return "{\"api_client_row_status\":null,\"tabs\":[]}";
+        }
+
+        // --- Walk JLabels for the API Client row status. The connection
+        // status panel is rendered as a sequence of JLabel components in
+        // row-major order (purpose, status, purpose, status, ...) — the
+        // status sits at the index immediately after the matching purpose.
+        List<JLabel> labels = new ArrayList<>();
+        collectComponents(window, JLabel.class, labels);
+        String apiClientRowStatus = null;
+        for (int i = 0; i < labels.size(); i++) {
+            String text = labels.get(i).getText();
+            if (text == null) continue;
+            if (text.toLowerCase().contains("api client")) {
+                if (i + 1 < labels.size()) {
+                    String next = labels.get(i + 1).getText();
+                    if (next != null && !next.isEmpty()) {
+                        apiClientRowStatus = next;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // --- Walk JTabbedPanes for the client-tab titles.
+        List<JTabbedPane> panes = new ArrayList<>();
+        collectComponents(window, JTabbedPane.class, panes);
+
+        StringBuilder sb = new StringBuilder(256);
+        sb.append("{\"api_client_row_status\":");
+        if (apiClientRowStatus == null) {
+            sb.append("null");
+        } else {
+            sb.append(jsonString(apiClientRowStatus));
+        }
+        sb.append(",\"tabs\":[");
+        boolean first = true;
+        for (JTabbedPane pane : panes) {
+            int sel = pane.getSelectedIndex();
+            for (int i = 0; i < pane.getTabCount(); i++) {
+                if (!first) sb.append(",");
+                first = false;
+                String title = pane.getTitleAt(i);
+                sb.append("{\"index\":").append(i);
+                sb.append(",\"title\":").append(jsonString(title != null ? title : ""));
+                sb.append(",\"selected\":").append(sel == i);
+                sb.append("}");
+            }
+        }
+        sb.append("]}");
+        return sb.toString();
+    }
+
     /**
      * List all JTabbedPane tab titles in a window.
      * Used to enumerate connected API client IDs from the Gateway's client tabs.
@@ -387,6 +468,32 @@ public class SwingInspector {
      * components that extend AbstractButton but are not standard JCheckBox.
      * Matches IBC's SwingUtils approach of searching all AbstractButton types.
      */
+    /**
+     * Normalize a label for tolerant matching against IB Gateway JLabel text.
+     * Handles the class of drift issue Lcstyle/ibctl#4 surfaced: caller sends a
+     * label with ASCII straight quotes (U+0022) but Gateway renders it with
+     * typographic curly quotes (U+201C / U+201D) — raw code-point comparison
+     * misses.
+     *
+     * Steps:
+     *   1. NFC-normalize (guards against combining-mark drift)
+     *   2. Curly quotes → straight (both single and double)
+     *   3. Collapse runs of whitespace to single spaces + trim
+     *   4. Lowercase with Locale.ROOT (Turkish-safe — dotted vs dotless 'i')
+     *
+     * The matcher uses exact-match on the raw string as the fast path and
+     * this normalized comparison only as a fallback, so existing behavior is
+     * preserved for all labels that already match cleanly.
+     */
+    static String normalizeLabel(String s) {
+        if (s == null) return "";
+        String n = Normalizer.normalize(s, Normalizer.Form.NFC);
+        n = n.replace('“', '"').replace('”', '"')
+             .replace('‘', '\'').replace('’', '\'');
+        n = n.replaceAll("\\s+", " ").trim();
+        return n.toLowerCase(Locale.ROOT);
+    }
+
     public static String setCheckBox(long windowId, String label, Boolean desiredState) {
         Window window = findWindowById(windowId);
         if (window == null) {
@@ -398,13 +505,28 @@ public class SwingInspector {
         List<AbstractButton> buttons = new ArrayList<>();
         collectComponents(window, AbstractButton.class, buttons);
 
+        // Precompute the normalized form of the requested label — reused per
+        // button in the fallback comparison.
+        String labelNorm = normalizeLabel(label);
+
         for (AbstractButton btn : buttons) {
             String text = btn.getText();
             if (text == null || text.isEmpty()) continue;
 
-            // Match by exact text or case-insensitive startsWith
-            if (text.equalsIgnoreCase(label) ||
-                text.toLowerCase().startsWith(label.toLowerCase())) {
+            // Fast path — exact / case-insensitive match on the raw strings.
+            // Preserves existing behavior for the 8 labels that already work.
+            boolean matched = text.equalsIgnoreCase(label) ||
+                              text.toLowerCase(Locale.ROOT).startsWith(label.toLowerCase(Locale.ROOT));
+
+            // Fallback — normalized match. Catches the curly-quote drift on
+            // 'Bypass "same action pair trade" warning...' and any similar
+            // Unicode-punctuation mismatches.
+            if (!matched) {
+                String textNorm = normalizeLabel(text);
+                matched = textNorm.equals(labelNorm) || textNorm.startsWith(labelNorm);
+            }
+
+            if (matched) {
                 // Read current state on the EDT for thread safety
                 final AtomicReference<Boolean> stateRef = new AtomicReference<>(null);
                 try {

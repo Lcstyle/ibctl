@@ -1,6 +1,15 @@
 {% extends "base.html" %}
 {% block content %}
-<h2>IB System Status</h2>
+<h2 style="display: flex; align-items: baseline; gap: 8px;">
+    IB System Status
+    <a href="https://www.interactivebrokers.com/en/software/systemStatus.php"
+       target="_blank" rel="noopener noreferrer"
+       title="Open IB's official system status page in a new tab"
+       aria-label="Open IB's official system status page (external site, new tab)"
+       style="font-size: 12px; font-weight: 400; color: #60a5fa; text-decoration: none;">
+        ib.com&nbsp;<span aria-hidden="true">&#8599;</span>
+    </a>
+</h2>
 <div id="ib-status-content"
      hx-get="{{ root_path }}/partials/ib-status"
      hx-trigger="load, every 60s"

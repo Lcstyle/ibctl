@@ -171,13 +171,27 @@ async fn async_main(config: ValidConfig) -> Result<(), Box<dyn std::error::Error
     // Gateway does NOT have a built-in cold restart. IBC implements its own timer,
     // and so does ibctl. The timer fires on Sunday at the configured time, kills
     // the JVM, and the state machine relaunches with full re-auth.
+    //
+    // Skip semantics: the scheduler also reads a per-mode fresh-auth marker
+    // written by the state machine. If a fresh login already happened earlier
+    // today, the scheduled fire is replaced by a `Skipped` signal — the state
+    // machine surfaces that in STATUS JSON instead of restarting.
     let (cold_restart_tx, cold_restart_rx) = tokio::sync::mpsc::channel(1);
     let cold_restart_time = config.session.cold_restart_time.clone();
     let cold_restart_day = config.session.tws_cold_restart_day;
+    let settings_dir_for_marker = if config.gateway.settings_path.is_empty() {
+        std::env::var("TWS_SETTINGS_PATH")
+            .unwrap_or_else(|_| "/home/ibgateway/Jts".to_string())
+    } else {
+        config.gateway.settings_path.clone()
+    };
+    let cold_restart_equivalent_marker_path = std::path::PathBuf::from(&settings_dir_for_marker)
+        .join(".ibctl-cold-restart-equivalent-today");
     if let Some(cold_restart_fut) = cold_restart::cold_restart_scheduler(
         cold_restart_time,
         cold_restart_day,
         cold_restart_tx,
+        cold_restart_equivalent_marker_path.clone(),
     ) {
         tasks.spawn(cold_restart_fut);
     }
@@ -204,6 +218,7 @@ async fn async_main(config: ValidConfig) -> Result<(), Box<dyn std::error::Error
         handler_registry,
         channels,
         snapshot_tx,
+        cold_restart_equivalent_marker_path,
     );
 
     state_machine.run().await?;

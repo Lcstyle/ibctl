@@ -1,0 +1,13 @@
+# mise runtime pins for the ibctl repo.
+#
+# Install: `mise install` at repo root.
+# Bump: edit here, re-run `mise install`, run `make generate-configs`,
+# commit the regenerated artifacts alongside this file.
+#
+# pkl 0.32.0 closes GHSA-87qh-25w9-mh34 (packages readable/writable outside
+# the configured cache directory) and GHSA-fgvf-hh2w-cxff (remote packages
+# reading files past a local dep root). See
+# https://github.com/apple/pkl/security/advisories for the current index.
+# Verify against the 0.32.0 release notes before bumping to a different pin.
+[tools]
+pkl = "0.32.0"
