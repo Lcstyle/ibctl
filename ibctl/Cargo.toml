@@ -7,7 +7,7 @@ edition = "2021"
 # the bump is safe on CI but not yet enforceable as a floor without
 # breaking distro-only dev environments. Bump this to 1.97 once
 # rust-toolchain.toml can also pin (requires rustup on all dev boxes).
-rust-version = "1.96"
+rust-version = "1.83"
 license = "MIT"
 description = "IBC replacement for automated IB Gateway/TWS login and session management"
 
