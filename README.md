@@ -49,7 +49,7 @@ services:
       - "4001:4001"   # live API
       - "4002:4002"   # paper API
       - "7462:7462"   # command server (IBC-compatible)
-      - "5900:5900"   # VNC (optional)
+      - "127.0.0.1:5900:5900"   # VNC (optional; set VNC_SERVER_PASSWORD before exposing it)
 ```
 
 ```bash
@@ -80,6 +80,51 @@ For dual mode (live + paper simultaneously):
       - TWS_PASSWORD_PAPER=paper_pass
       - TWOFA_DEVICE=IB Key
 ```
+
+## Dashboard login and API access
+
+The web dashboard is off by default (`IBCTL_DASHBOARD_ENABLED=true` turns it on)
+and, since 2.0, **it needs a login**. Anonymous visitors see a health summary and
+nothing else: per-mode state, whether the API is ready, and the versions. Choose
+how people sign in:
+
+```yaml
+    environment:
+      - IBCTL_DASHBOARD_ENABLED=true
+      - IBCTL_DASHBOARD_TOKEN=a-long-random-password   # the login password
+      - IBCTL_DASHBOARD_AUTH_SECRET=...                # signs session cookies: openssl rand -hex 32
+```
+
+GitHub OAuth and OIDC logins are also supported (see
+[docs/env-vars.md](docs/env-vars.md#dashboard-access)). With none configured
+the dashboard stays on the health summary. Sessions end after 5 idle minutes
+(`IBCTL_SESSION_IDLE_MINUTES`, `0` turns it off) and there is a Log out button.
+The dashboard binds to `127.0.0.1` unless you set `IBCTL_DASHBOARD_BIND`; put a
+TLS-terminating reverse proxy in front before exposing it.
+
+**Scripts and other services use API tokens, not the password.** Create them on
+the dashboard's API access page: each is named, shown once, stored hashed, and
+has a type that decides which routes it can call (`warm_restart`, and the two
+Gateway-upgrade types, which are off until you enable them). A token reaches
+nothing outside its type, and the password is not accepted as a Bearer token:
+
+```bash
+curl -X POST -H "Authorization: Bearer ibctl_..." https://dashboard.example/api/v1/warm-restart
+```
+
+Other things the login now covers:
+
+- **VNC in the browser** goes through the dashboard (`/websockify`) after the
+  login check; port 6080 is no longer published. A regular VNC client on port
+  5900 still works: it listens on `IBCTL_VNC_BIND` (default `127.0.0.1`), and
+  preflight refuses to start if that is reachable from the network and no
+  `VNC_SERVER_PASSWORD` is set.
+- **The command socket** can be narrowed with `command_server.allowed_commands`
+  (`IBCTL_ALLOWED_COMMANDS`); blank keeps every action command.
+- **Warm restart** (no 2FA) is available as a button and as
+  `POST /api/v1/warm-restart`, at most once per interval per mode.
+
+Details, token types and every setting: [docs/env-vars.md](docs/env-vars.md).
 
 ## Environment variables
 

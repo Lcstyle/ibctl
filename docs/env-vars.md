@@ -26,7 +26,8 @@ and never appear in `ibctl.toml`.
 | `TWS_PASSWORD_PAPER` | IB paper account password. `_FILE` variant supported. |
 | `TWOFACTOR_CODE` | TOTP secret (base32). `_FILE` variant supported. |
 | `IBCTL_NTFY_ACTION_SIGNING_KEY` | HMAC-SHA256 signing key for HITL ntfy action URLs. Generate with `openssl rand -hex 32`. Required when `twofa.backoff.strategy` is `ntfy_callback` or `both`. See [docs/hitl-2fa.md](hitl-2fa.md). |
-| `IBCTL_DASHBOARD_AUTH_SECRET` | Dashboard session cookie signing key. |
+| `IBCTL_DASHBOARD_TOKEN` | The dashboard login password. Used only by the login form; it is not an API token. With no password and no OAuth/OIDC login configured, the dashboard shows the anonymous health summary only. |
+| `IBCTL_DASHBOARD_AUTH_SECRET` | Dashboard session cookie signing key. Defaults to the login password; set it separately so changing the password does not also change the key. |
 | `VNC_SERVER_PASSWORD` | VNC server password. |
 | `IBCTL_GITHUB_OAUTH_CLIENT_SECRET` | GitHub OAuth client secret (when `dashboard.github_oauth_enabled=true`). |
 | `IBCTL_OIDC_CLIENT_SECRET` | OIDC client secret (when `dashboard.oidc_enabled=true`). |
@@ -275,6 +276,35 @@ What it does not do:
 - A session cookie issued before the idle logout existed has no last-activity
   time, so its issue time stands in for it: such a session ends at most the
   idle limit after it was issued.
+
+## Dashboard access
+
+Since 2.0 the dashboard needs a login. What an anonymous visitor can reach:
+
+| Path | What they get |
+|---|---|
+| `/` and `GET /api/v1/health` | Health summary: per-mode state, whether the API is ready and since when, ibctl and Gateway versions. |
+| `GET /api/v1/ib-status` | IB's system status, fixed fields only. |
+| `GET /api/v1/schedule` | The restart schedule. |
+| `/login`, `/logout`, OAuth/OIDC callbacks, signed notification links | Signing in and out; each link carries its own signature. |
+
+Everything else, including the overview, config, logs, VNC page and every other
+API route, needs a login or an API token of the right type (see
+[Dashboard API tokens](#dashboard-api-tokens)).
+
+Ways to log in (at least one is needed to get past the health summary):
+
+- a password: set `IBCTL_DASHBOARD_TOKEN`;
+- GitHub OAuth: `dashboard.github_oauth_enabled` with the client id, redirect URI
+  and allowed users or orgs, plus `IBCTL_GITHUB_OAUTH_CLIENT_SECRET`;
+- OIDC: `dashboard.oidc_enabled` with the issuer and client id, plus
+  `IBCTL_OIDC_CLIENT_SECRET`.
+
+Set `IBCTL_DASHBOARD_AUTH_SECRET` to a random value (`openssl rand -hex 32`) so
+the session cookies are signed with a key of their own. The dashboard is off until `IBCTL_DASHBOARD_ENABLED=true`. In the compose file it
+listens on `IBCTL_DASHBOARD_BIND` (default `127.0.0.1`) port `IBCTL_DASHBOARD_PORT`
+(default `3080`); put a TLS-terminating proxy in front of it before exposing it, and set
+`IBCTL_ROOT_PATH` if the proxy publishes it under a path prefix.
 
 ## Dashboard API tokens
 

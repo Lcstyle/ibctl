@@ -4,60 +4,77 @@
 
 ## [2.0.0] - 2026-11-14
 
+**Breaking: the dashboard now requires authentication.** Read "Authentication" and
+"Upgrading from 1.3.x" below before you update a running install.
+
+### Authentication
+- **Who can see what.** Without logging in, a visitor gets the health summary at
+  `/` (per-mode state, whether the API is ready and since when, versions) and
+  `GET /api/v1/health`, a fixed field list from `GET /api/v1/ib-status`, and
+  `GET /api/v1/schedule`. Signed notification links and the sign-in routes also
+  work. Everything else (overview, config, logs, VNC, every other API route)
+  needs a login or an API token.
+- **Logging in.** Set `IBCTL_DASHBOARD_TOKEN` (the login password), or configure
+  GitHub OAuth or OIDC. Set `IBCTL_DASHBOARD_AUTH_SECRET` too, so session cookies
+  are signed with a key of their own. With no login method configured, the
+  dashboard shows the health summary only. Sessions are a signed cookie, end
+  after 5 idle minutes (`session_idle_minutes`; `0` turns it off, background
+  polling does not keep one alive) and can be ended with the Log out button.
+  Sign-in works behind a reverse proxy path prefix (`IBCTL_ROOT_PATH`).
+- **API tokens, by type.** Scripts and services no longer use the password. The
+  new API access page issues named tokens, shown once and stored hashed. A token
+  has a type that fixes the routes it can call: `warm_restart` (warm restart),
+  `upgrade_ci` and `upgrade_maintenance` (the Gateway upgrade pipeline's read,
+  build report and swap report). A type can be switched off for everyone; the
+  two upgrade types start off. A token reaches nothing outside its type, and the
+  dashboard password is **no longer accepted as a Bearer token**.
+- **VNC behind the login.** The dashboard proxies `/websockify` after the login
+  check and the compose file no longer publishes port 6080. A VNC client on port
+  5900 still works. Preflight refuses to start when `IBCTL_VNC_BIND` is reachable
+  from the network and no VNC password is set.
+- **`command_server.allowed_commands`.** One list that gates every caller of the
+  command socket. Blank keeps today's behaviour; queries are always allowed.
+
 ### Highlights
-- **The dashboard needs a login.** Everything except a short public list now
-  requires one. Anonymous visitors get a health summary at `/` (state, whether
-  the API is ready and since when, versions), `GET /api/v1/health`, a fixed
-  field list from `GET /api/v1/ib-status`, and `GET /api/v1/schedule`. Signing
-  in sets a signed session cookie that works behind a reverse proxy path
-  prefix (`IBCTL_ROOT_PATH`). Sessions end after 5 idle minutes
-  (`session_idle_minutes`, `0` turns it off; background polling does not keep
-  one alive) and there is a Log out button. With no login method configured
-  the dashboard shows the health summary only.
-- **API tokens, by type.** The new API access page issues named tokens, shown
-  once and stored hashed. A token has a type that fixes the routes it can
-  call: `warm_restart` (warm restart), `upgrade_ci` and `upgrade_maintenance`
-  (the Gateway upgrade pipeline's read, build report and swap report). A type
-  can be switched off for everyone; the two upgrade types start off. A token
-  reaches nothing outside its type, and the dashboard password is no longer
-  accepted as a Bearer token.
-- **Warm restart on demand.** `POST /api/v1/warm-restart` (and
-  `GET` for the last result), a Warm restart button, and a `WARMRESTART`
-  command: the Gateway restarts through its saved session, with no 2FA, at
-  most once per interval per mode.
-- **`command_server.allowed_commands`.** One list that gates every caller of
-  the command socket. Blank keeps today's behaviour; queries are always
-  allowed.
-- **VNC behind the login.** The dashboard proxies `/websockify` after the
-  login check, and the compose file no longer publishes port 6080. Preflight
-  refuses to start when `IBCTL_VNC_BIND` is reachable from the network and no
-  VNC password is set.
+- **Warm restart on demand.** `POST /api/v1/warm-restart` (and `GET` for the last
+  result), a Warm restart button, and a `WARMRESTART` command: the Gateway
+  restarts through its saved session, with no 2FA, at most once per interval per
+  mode.
+- **Gateway time zone.** ibctl writes the declared zone before every launch and
+  converts the restart time to it, and passes the Gateway's own Java options from
+  its installer to the launch.
 
 ### Added
-- Gateway time zone: ibctl writes the declared zone before every launch and
-  converts the restart time to it.
-- The Gateway's own Java options (from its installer) are passed to the launch.
-- A paused ibctl reports the live Gateway state; `SETRESTART` reports warm
-  exits.
-- The health summary shows times in the container's time zone (`TZ`); the
-  JSON stays UTC.
-- `docs/env-vars.md`: token types, with a `curl` example for each.
+- A paused ibctl reports the live Gateway state; `SETRESTART` reports warm exits.
+- The health summary shows times in the container's time zone (`TZ`); the JSON
+  stays UTC.
+- README: "Dashboard login and API access". `docs/env-vars.md`: "Dashboard
+  access" and token types, with a `curl` example for each.
 
 ### Changed
-- The Config views show the IB login name as set or not set, and scrub
-  account numbers.
-- Hotkeys are pressed in the right window, only ibctl's own confirmation
-  prompts are confirmed, and the Gateway's main window is found even when the
-  agent reports no visibility flag.
+- The Config views show the IB login name as set or not set, and scrub account
+  numbers.
+- Hotkeys are pressed in the right window, only ibctl's own confirmation prompts
+  are confirmed, and the Gateway's main window is found even when the agent
+  reports no visibility flag.
+
+### Fixed
+- `docker-compose.yml` passed the dashboard port `8080` to the container while
+  publishing `3080` when `IBCTL_DASHBOARD_PORT` was unset; both now default to
+  `3080`.
 
 ### Upgrading from 1.3.x
-- Set `IBCTL_DASHBOARD_TOKEN` (the login password) or configure OAuth/OIDC
-  before upgrading, or the dashboard shows only the health summary.
-- Anything that called the API with the password as a Bearer token needs an
-  API token (or a login session) instead.
-- Anything that used the published port 6080 should use the dashboard's
-  `/websockify` path.
-- Everyone signs in once more: session cookies from 1.3.x are not accepted.
+1. **Before you update,** set `IBCTL_DASHBOARD_TOKEN` (and
+   `IBCTL_DASHBOARD_AUTH_SECRET`) or configure OAuth/OIDC. Otherwise the
+   dashboard shows only the health summary after the update.
+2. Replace anything that called the API with the password as a Bearer token:
+   create an API token of the right type on the API access page and send it as
+   `Authorization: Bearer ibctl_...`. The two Gateway-upgrade types must be
+   switched on there before their tokens work.
+3. Anything that used the published port 6080 should use the dashboard's
+   `/websockify` path instead.
+4. Check `IBCTL_VNC_BIND`: a network-reachable bind needs `VNC_SERVER_PASSWORD`.
+5. Everyone signs in once more: session cookies from 1.3.x are not accepted.
 
 ## [1.3.0] - 2026-11-13
 
