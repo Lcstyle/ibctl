@@ -98,6 +98,9 @@ impl StateMachine {
             client_advisory(&self.state);
 
         let jvm = self.supervisor.jvm_info();
+        // A paused machine does not react to a Gateway that has exited, so its
+        // frozen state can still say Connected with nothing running.
+        let paused_gateway_down = self.pause.paused && !jvm.alive;
 
         // Use cached client IDs (refreshed every 30s in do_connected)
         let client_ids = &self.cached_client_ids;
@@ -296,7 +299,9 @@ impl StateMachine {
         });
         serde_json::json!({
             "version": env!("IBCTL_VERSION"),
-            "ready": is_connected && socat_running,
+            "ready": gateway_ready(is_connected, socat_running, self.pause.paused, jvm.alive),
+            "gateway_running": jvm.alive,
+            "paused_gateway_down": paused_gateway_down,
             "state": self.state.to_string(),
             "trading_mode": self.config.auth.trading_mode.to_string(),
             "uptime_secs": uptime,
@@ -333,7 +338,7 @@ impl StateMachine {
             "ceiling_state": self.pause.ceiling_state.as_ref().map(|s| s.to_string()),
             "stats": self.stats,
             "client_advisory": {
-                "should_connect": should_connect && socat_running,
+                "should_connect": should_connect && socat_running && !paused_gateway_down,
                 "should_wait": should_wait,
                 "wait_reason": wait_reason,
                 "client_id_likely_stale": client_id_likely_stale,
@@ -403,6 +408,10 @@ impl StateMachine {
             // login path is always one of the reasons in `RelaunchReason`;
             // `abandoned_prompt` is the tripwire for one that isn't.
             "last_relaunch": last_relaunch_json,
+            "gateway_time_zone": self.gateway_time_zone.as_ref().and_then(|z| serde_json::to_value(z).ok()),
+            "last_hotkey": self.last_hotkey.as_ref().and_then(|h| serde_json::to_value(h).ok()),
+            "last_jvm_exit": self.last_jvm_exit.as_ref().and_then(|r| serde_json::to_value(r).ok()),
+            "last_setrestart": self.last_setrestart.as_ref().and_then(|r| serde_json::to_value(r).ok()),
             "cold_restart_owed_since": self
                 .cold_restart_owed_since
                 .as_ref()
@@ -488,6 +497,10 @@ impl StateMachine {
                 "port": self.config.command_server.port,
                 "bind_address": self.config.command_server.bind_address,
                 "control_from": self.config.command_server.control_from,
+                "allowed_commands": crate::command_access::CommandAccess::new(
+                    &self.config.command_server.allowed_commands,
+                )
+                .allowed(),
             },
             "timing": {
                 "ui_tick_ms": self.config.timing.ui_tick_ms,
@@ -566,6 +579,14 @@ impl StateMachine {
 // pub(super) helper module; that's a separate refactor.
 // ---------------------------------------------------------------------------
 
+/// Whether clients can use the Gateway now. A paused machine stops reacting to
+/// a Gateway that has exited, so its frozen state can read Connected with the
+/// forwarder still up and nothing behind it; readiness then also needs the
+/// Gateway process itself.
+pub(super) fn gateway_ready(is_connected: bool, socat_running: bool, paused: bool, jvm_alive: bool) -> bool {
+    is_connected && socat_running && (!paused || jvm_alive)
+}
+
 #[cfg(test)]
 mod tests {
     //! RED-phase tests for the recovery STATUS-JSON exposure.
@@ -643,7 +664,13 @@ mod tests {
     /// The trailing marker filename is arbitrary — only its parent is
     /// consumed as the settings_dir for `RecoveryCoordinator::boot`.
     fn make_sm_pointed_at(settings_dir: &std::path::Path) -> StateMachine {
+        make_sm_with_config(settings_dir, |_| {})
+    }
+
+    /// As [`make_sm_pointed_at`], with `tweak` applied to the default config first.
+    fn make_sm_with_config(settings_dir: &std::path::Path, tweak: impl FnOnce(&mut Config)) -> StateMachine {
         let mut cfg = Config::default();
+        tweak(&mut cfg);
         {
             // Test fixture placeholders — leading paren defeats the naive
             // pragma-scanner regex on `USERNAME = <ident>`.
@@ -700,6 +727,26 @@ mod tests {
     fn status_value(sm: &mut StateMachine) -> serde_json::Value {
         let s = sm.build_status_json();
         serde_json::from_str(&s).expect("STATUS JSON must be valid JSON")
+    }
+
+    // -------- the command allow-list in CONFIG -----------
+
+    #[test]
+    fn test_config_reply_reports_the_effective_command_list() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sm = make_sm_pointed_at(dir.path());
+
+        let config: serde_json::Value = serde_json::from_str(&sm.build_config_json()).unwrap();
+        let default: Vec<serde_json::Value> =
+            crate::command_access::ACTION_COMMANDS.iter().map(|n| serde_json::json!(n)).collect();
+        assert_eq!(config["command_server"]["allowed_commands"], serde_json::Value::Array(default));
+
+        // A narrowed, messily written list is reported as it is applied: trimmed and upper-cased.
+        let sm = make_sm_with_config(dir.path(), |cfg| {
+            cfg.command_server.allowed_commands = vec![" setrestart".into(), "RECONNECTDATA ".into()];
+        });
+        let config: serde_json::Value = serde_json::from_str(&sm.build_config_json()).unwrap();
+        assert_eq!(config["command_server"]["allowed_commands"], serde_json::json!(["SETRESTART", "RECONNECTDATA"]));
     }
 
     // -------- Sunday re-authentication outcome in STATUS -----------
@@ -824,6 +871,62 @@ mod tests {
         assert_eq!(r["abandoned_prompt"], false);
         assert!(r["at"].is_string());
         assert!(r["detail"].as_str().unwrap().contains("Cancel"));
+    }
+
+    #[test]
+    fn a_connected_machine_is_ready_only_with_a_forwarder_and_a_gateway_when_paused() {
+        // (connected, socat, paused, jvm alive) -> ready
+        assert!(super::gateway_ready(true, true, false, true));
+        assert!(super::gateway_ready(true, true, false, false), "unpaused, the machine itself reacts to a dead JVM");
+        assert!(super::gateway_ready(true, true, true, true));
+        assert!(!super::gateway_ready(true, true, true, false), "paused with no Gateway process is not ready");
+        assert!(!super::gateway_ready(false, true, true, true));
+        assert!(!super::gateway_ready(true, false, false, true));
+    }
+
+    #[test]
+    fn test_status_says_when_a_paused_machine_has_no_gateway_behind_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut sm = make_sm_pointed_at(dir.path());
+        sm.state = State::Connected;
+
+        sm.pause.paused = true;
+        sm.supervisor.set_test_force_running(false);
+        let v = status_value(&mut sm);
+        assert_eq!(v["state"], "Connected", "the frozen state is still reported as it is");
+        assert_eq!(v["paused"], true);
+        assert_eq!(v["gateway_running"], false);
+        assert_eq!(v["paused_gateway_down"], true);
+        assert_eq!(v["ready"], false);
+        assert_eq!(v["client_advisory"]["should_connect"], false);
+
+        sm.supervisor.set_test_force_running(true);
+        let v = status_value(&mut sm);
+        assert_eq!(v["gateway_running"], true);
+        assert_eq!(v["paused_gateway_down"], false);
+
+        sm.pause.paused = false;
+        sm.supervisor.set_test_force_running(false);
+        let v = status_value(&mut sm);
+        assert_eq!(v["paused_gateway_down"], false, "unpaused, the machine handles the exit itself");
+    }
+
+    #[test]
+    fn test_status_reports_the_gateway_time_zone_once_a_login_has_read_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut sm = make_sm_pointed_at(dir.path());
+        assert!(status_value(&mut sm)["gateway_time_zone"].is_null(), "nothing read before the first login");
+
+        sm.gateway_time_zone = Some(crate::gateway_zone::zone_report(
+            "America/New_York",
+            Some("[Logon]\nTimeZone=Africa/Abidjan\n"),
+        ));
+
+        let z = status_value(&mut sm)["gateway_time_zone"].clone();
+        assert_eq!(z["declared"], "America/New_York");
+        assert_eq!(z["in_jts_ini"], "Africa/Abidjan");
+        assert_eq!(z["effective"], "Africa/Abidjan");
+        assert_eq!(z["matches_declared"], false);
     }
 
     #[test]

@@ -12,8 +12,29 @@ import os
 from pydantic import SecretStr
 
 from app.domain.instance import InstanceEndpoint
+from app.services import effective_config
 
 logger = logging.getLogger("dashboard.config")
+
+DEFAULT_SESSION_IDLE_MINUTES = 5
+MAX_SESSION_IDLE_MINUTES = 24 * 60
+
+
+def _session_idle_minutes() -> int:
+    """`dashboard.session_idle_minutes` from ibctl.toml, IBCTL_SESSION_IDLE_MINUTES on top.
+
+    Preflight rejects a bad value before the dashboard starts; if one gets
+    here anyway the default applies and the log says so, rather than leaving
+    logins that never time out or sessions that end at once.
+    """
+    value = effective_config.setting("dashboard.session_idle_minutes", DEFAULT_SESSION_IDLE_MINUTES)
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= MAX_SESSION_IDLE_MINUTES:
+        logger.warning(
+            "dashboard.session_idle_minutes=%r is not a whole number of minutes from 0 to %d; using the default (%d)",
+            value, MAX_SESSION_IDLE_MINUTES, DEFAULT_SESSION_IDLE_MINUTES,
+        )
+        return DEFAULT_SESSION_IDLE_MINUTES
+    return value
 
 
 class DashboardSettings:
@@ -47,6 +68,7 @@ class DashboardSettings:
         build_sha: str = "",
         build_time_human: str = "",
         build_time_utc: str = "",
+        session_idle_minutes: int = DEFAULT_SESSION_IDLE_MINUTES,
     ):
         self.port = port
         self.token = token
@@ -75,6 +97,8 @@ class DashboardSettings:
         self.build_sha = build_sha
         self.build_time_human = build_time_human
         self.build_time_utc = build_time_utc
+        # Minutes with no user activity before a login ends; 0 = never.
+        self.session_idle_minutes = session_idle_minutes
 
     @property
     def github_oauth_enabled(self) -> bool:
@@ -83,6 +107,34 @@ class DashboardSettings:
     @property
     def oidc_enabled(self) -> bool:
         return bool(self.oidc_issuer and self.oidc_client_id and self.oidc_client_secret.get_secret_value())
+
+    @property
+    def password_enabled(self) -> bool:
+        """A dashboard password (IBCTL_DASHBOARD_TOKEN) is configured."""
+        return bool(self.token)
+
+    @property
+    def login_configured(self) -> bool:
+        """Someone can log in: a password, GitHub OAuth or OIDC is configured.
+
+        Without one, nobody can authenticate, so the dashboard serves only its
+        public health summary and refuses every action.
+        """
+        return self.password_enabled or self.github_oauth_enabled or self.oidc_enabled
+
+    @property
+    def signing_secret(self) -> str:
+        """Key that signs session and OAuth-state cookies.
+
+        The explicit auth secret when set; otherwise the same fallback chain
+        `from_env` uses, so settings built directly (tests) behave alike.
+        """
+        return (
+            self.auth_secret.get_secret_value()
+            or self.token
+            or self.github_client_secret.get_secret_value()
+            or self.oidc_client_secret.get_secret_value()
+        )
 
     @property
     def endpoints(self) -> list[InstanceEndpoint]:
@@ -152,12 +204,22 @@ class DashboardSettings:
             build_sha=os.environ.get("IBCTL_BUILD_SHA", "").strip(),
             build_time_human=os.environ.get("IBCTL_BUILD_TIME_HUMAN", "").strip(),
             build_time_utc=os.environ.get("IBCTL_BUILD_TIME_UTC", "").strip(),
+            session_idle_minutes=_session_idle_minutes(),
         )
+        logins = [
+            name
+            for name, enabled in (
+                ("password", settings.password_enabled),
+                ("github", settings.github_oauth_enabled),
+                ("oidc", settings.oidc_enabled),
+            )
+            if enabled
+        ]
         logger.info(
-            "Config loaded: port=%d mode=%s auth=%s debug=%s log_level=%s github_oauth=%s oidc=%s",
+            "Config loaded: port=%d mode=%s login=%s idle_logout=%s debug=%s log_level=%s",
             settings.port, settings.trading_mode,
-            "token" if settings.token else "open",
+            "+".join(logins) or "none (health summary only; every action is refused)",
+            f"{settings.session_idle_minutes}min" if settings.session_idle_minutes else "off",
             settings.debug_mode, settings.log_level,
-            settings.github_oauth_enabled, settings.oidc_enabled,
         )
         return settings

@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.domain.errors import DashboardError
+from app.services.identity_mask import mask_identity
 from app.services.log_pages import DISPLAY_TZ, LogPage, read_after, read_before
 from app.services.market_day_logging import get_market_day_date
 
@@ -165,10 +166,10 @@ async def get_state(request: Request):
 
 @router.get("/api/v1/config")
 async def get_config(request: Request):
-    """Get running configuration (passwords masked)."""
+    """Get running configuration (passwords masked, login names shown as set / not set)."""
     client = request.app.state.ibctl_client
     try:
-        return await client.config()
+        return mask_identity(await client.config())
     except DashboardError as e:
         return {"error": e.message}
 

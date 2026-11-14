@@ -134,10 +134,10 @@ class ConnectivityStrings {
 /// LIVE / PAPER per-instance section in overview_content.html.
 class ControlsStrings {
   /// Tooltip for the "Reconnect Data" button.
-  reconnectData: String = "Reconnect market data feeds. Sends Ctrl+F to the Gateway, forcing it to re-establish data subscriptions."
+  reconnectData: String = "Reconnect market data feeds. Presses Ctrl+Alt+F in the Gateway, which drops and re-opens its market-data connections. It asks the Gateway to simulate a disconnect, so data pauses for a few seconds."
 
   /// Tooltip for the "Reconnect Account" button.
-  reconnectAccount: String = "Reconnect account data. Sends Ctrl+R to the Gateway, refreshing positions, orders, and account values."
+  reconnectAccount: String = "Reconnect to IB. Presses Ctrl+Alt+R in the Gateway, which re-opens its connection to IB's servers. It asks the Gateway to simulate a disconnect, so the session link drops briefly."
 
   /// Tooltip for the "Restart Socat" button.
   restartSocat: String = "Restart the socat port forwarder. Kills and re-launches the TCP proxy that bridges the API port to the container interface."

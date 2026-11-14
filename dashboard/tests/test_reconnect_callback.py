@@ -28,9 +28,9 @@ from unittest.mock import patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.config import DashboardSettings
 from app.domain.errors import DashboardError
 from app.main import create_app
+from tests.auth_helpers import authed_settings
 from app.services import hitl_tokens
 
 # ---------------------------------------------------------------------------
@@ -88,12 +88,9 @@ def _mint_wrong_signature_reconnect_token(mode: str = "paper") -> str:
 
 def _make_app(trading_mode: str = "both"):
     """Build a test app. trading_mode='both' → both live+paper registered."""
-    settings = DashboardSettings(
-        port=8080,
-        token="",
-        debug_mode=False,
-        ibctl_host="127.0.0.1",
-        ibctl_port=7462,
+    # A dashboard password is configured and the clients stay signed out:
+    # a notification link works without a login.
+    settings = authed_settings(
         trading_mode=trading_mode,
         ibctl_paper_host="127.0.0.1",
         ibctl_paper_port=7463,

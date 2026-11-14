@@ -7,10 +7,13 @@
 mod agent_client;
 mod agent_events;
 mod cold_restart;
+mod command_access;
 mod command_server;
 mod config;
 mod event_stream;
+mod gateway_zone;
 mod handlers;
+mod hotkey;
 mod logging;
 mod maintenance_hold;
 mod payload;

@@ -1,0 +1,173 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>API access</h2>
+
+<p style="margin: 0 0 14px; font-size: 13px; color: #a1a1aa; max-width: 720px;">
+    Scripts call this dashboard with a named API token, one per client, sent as
+    <code>Authorization: Bearer &lt;token&gt;</code>. Every token has a type, chosen when it is created. A token is
+    not a login: it can reach only the routes of its own type, while that type is enabled below, and nothing else.
+    The dashboard password does not work as a Bearer token.
+</p>
+
+{% if file_error %}
+<div class="api-banner api-banner-error" role="alert">
+    The saved API access settings cannot be read, so tokens are not trusted and nothing here can be changed:
+    {{ file_error }}
+</div>
+{% endif %}
+{% if error and not file_error %}
+<div class="api-banner api-banner-error" role="alert">{{ error }}</div>
+{% endif %}
+{% if notice %}
+<div class="api-banner api-banner-ok" role="status">{{ notice }}</div>
+{% endif %}
+
+{% if new_token %}
+<div class="card" style="margin-bottom: 12px; border-color: #166534;">
+    <div class="card-label">New token: {{ new_token_name }}</div>
+    <p style="margin: 8px 0; font-size: 13px;">
+        Copy it now. It is shown once and cannot be shown again; only a hash of it is kept.
+    </p>
+    <code id="new-token" style="display: block; padding: 8px 10px; background: #09090b; border: 1px solid #27272a; border-radius: 4px; word-break: break-all; user-select: all;">{{ new_token }}</code>
+</div>
+{% endif %}
+
+<div class="card" style="margin-bottom: 12px;">
+    <div class="card-label">Tokens</div>
+    {% if tokens %}
+    <table id="tokens" class="api-table">
+        <thead><tr><th>Name</th><th>Type</th><th>Created</th><th>By</th><th></th></tr></thead>
+        <tbody>
+        {% for t in tokens %}
+        <tr>
+            <td><code>{{ t.name }}</code></td>
+            <td>{{ t.type_label }}</td>
+            <td>{{ t.created }}</td>
+            <td>{{ t.created_by }}</td>
+            <td>
+                <form method="post" action="{{ root_path }}/api-access/tokens/{{ t.name }}/revoke"
+                      onsubmit="return confirm('Revoke the token {{ t.name }}? Clients using it will get a 401.');">
+                    <button type="submit" class="btn btn-danger">Revoke</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div id="tokens" style="margin-top: 8px; font-size: 13px; color: #a1a1aa;">No tokens yet.</div>
+    {% endif %}
+
+    <form method="post" action="{{ root_path }}/api-access/tokens" style="margin-top: 12px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+        <label for="token-name" style="font-size: 13px;">New token for</label>
+        <input type="text" id="token-name" name="name" value="{{ name or '' }}" required maxlength="64"
+               pattern="[A-Za-z0-9][A-Za-z0-9._\-]*" placeholder="client name, e.g. nightly-job" autocomplete="off"
+               style="padding: 6px 10px; background: #09090b; border: 1px solid #27272a; border-radius: 4px; color: #e4e4e7; min-width: 220px;">
+        <label for="token-type" style="font-size: 13px;">of type</label>
+        <select id="token-type" name="type" required
+                style="padding: 6px 10px; background: #09090b; border: 1px solid #27272a; border-radius: 4px; color: #e4e4e7;">
+            <option value="" disabled{% if not chosen_type %} selected{% endif %}>choose what it is for</option>
+            {% for t in types %}
+            <option value="{{ t.name }}"{% if chosen_type == t.name %} selected{% endif %}>{{ t.label }}</option>
+            {% endfor %}
+        </select>
+        <button type="submit" class="btn btn-primary">Create token</button>
+        <div style="flex-basis: 100%; font-size: 12px; color: #a1a1aa; max-width: 720px;">
+            {% for t in types %}
+            <div class="api-type-help"><strong>{{ t.label }}</strong>: {{ t.description }}</div>
+            {% endfor %}
+        </div>
+    </form>
+</div>
+
+<form method="post" action="{{ root_path }}/api-access/settings">
+    <div class="card" style="margin-bottom: 12px;">
+        <div class="card-label">Token types</div>
+        <p style="margin: 8px 0 4px; font-size: 12px; color: #a1a1aa; max-width: 720px;">
+            A type must be ticked for the tokens of that type to work; unticked, they get a 403 that says so.
+            This list applies to API tokens only; people signed in use the dashboard's own buttons.
+            Where a type sends ibctl a command, ibctl's own allow-list (<code>command_server.allowed_commands</code>)
+            is the ceiling: a type whose command it blocks cannot be switched on here.
+        </p>
+        {% for c in types %}
+        <div id="api-type-{{ c.name }}" style="margin-top: 10px; font-size: 13px;">
+            <label style="display: flex; align-items: center; gap: 8px;{% if c.blocked %} opacity: 0.55;{% endif %}">
+                <input type="checkbox" name="allow_{{ c.name }}"{% if c.ticked %} checked{% endif %}{% if c.blocked %} disabled{% endif %}>
+                <span>{{ c.label }}</span>
+                <code style="color: #a1a1aa;">{{ c.name }}</code>
+            </label>
+            <div style="margin: 2px 0 0 26px; font-size: 12px; color: #a1a1aa;">{{ c.description }}</div>
+            {% if c.blocked %}
+            <div class="api-cmd-note" style="margin: 2px 0 0 26px; font-size: 12px; color: #fbbf24;">
+                {% if c.ticked %}inactive: blocked by ibctl{% else %}blocked by ibctl{% endif %}{{ c.blocked_on }}
+                (it does not list {{ c.ibctl_command }} in <code>command_server.allowed_commands</code>)
+            </div>
+            {% endif %}
+            {% if c.unread %}
+            <div class="api-cmd-note" style="margin: 2px 0 0 26px; font-size: 12px; color: #a1a1aa;">
+                ibctl's allow-list could not be read for {{ c.unread | join(', ') }}; ibctl still decides when the command is sent.
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+
+    <div class="card" style="margin-bottom: 12px;">
+        <div class="card-label">Warm restart: minimum interval</div>
+        <p style="margin: 8px 0 4px; font-size: 12px; color: #a1a1aa; max-width: 720px;">
+            The shortest time between two accepted warm restarts of the same mode. The Warm restart button and the API
+            share it, whoever asks, and it survives a dashboard restart.
+        </p>
+        <div style="margin-top: 8px; display: grid; grid-template-columns: max-content max-content 1fr; gap: 8px 12px; align-items: center; font-size: 13px;">
+            {% for m in modes %}
+            <label for="interval-{{ m }}">{{ m | upper }}</label>
+            <span><input type="number" id="interval-{{ m }}" name="interval_{{ m }}" value="{{ intervals[m] }}"
+                         min="{{ min_interval }}" max="{{ max_interval }}" style="width: 6em;"> minutes</span>
+            <span style="font-size: 12px; color: #a1a1aa;">{% if last_accepted[m] %}last accepted {{ last_accepted[m] }}{% else %}none accepted yet{% endif %}</span>
+            {% endfor %}
+        </div>
+    </div>
+
+    <button type="submit" class="btn btn-primary">Save</button>
+</form>
+
+<div class="card" style="margin-top: 16px;">
+    <div class="card-label">Using a token</div>
+    <p style="margin: 8px 0 4px; font-size: 12px; color: #a1a1aa; max-width: 720px;">
+        <strong>Warm restart client.</strong> Warm restart takes the mode and nothing else. It answers 202 with the
+        minute the restart is set for, or 429 with <code>Retry-After</code> while the minimum interval has not passed.
+        Read how it went with GET, until <code>warm</code> is set.
+    </p>
+<pre style="margin: 8px 0 0; padding: 8px 10px; background: #09090b; border: 1px solid #27272a; border-radius: 4px; font-size: 12px; overflow-x: auto;">curl -X POST https://your-dashboard.example{{ root_path }}/api/v1/warm-restart \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"mode": "paper"}'
+
+curl -H "Authorization: Bearer $TOKEN" \
+  "https://your-dashboard.example{{ root_path }}/api/v1/warm-restart?mode=paper"</pre>
+    <p style="margin: 12px 0 4px; font-size: 12px; color: #a1a1aa; max-width: 720px;">
+        <strong>Gateway upgrade: CI.</strong> Reads the upgrade state and reports the image CI built.
+        <strong>Gateway upgrade: maintenance.</strong> Reads the same state and reports what the swap did.
+        A token cannot call the other type's report, and neither can save the upgrade policy.
+    </p>
+<pre style="margin: 8px 0 0; padding: 8px 10px; background: #09090b; border: 1px solid #27272a; border-radius: 4px; font-size: 12px; overflow-x: auto;">curl -H "Authorization: Bearer $TOKEN" \
+  https://your-dashboard.example{{ root_path }}/api/v1/gateway/upgrade
+
+curl -X POST https://your-dashboard.example{{ root_path }}/api/v1/gateway/upgrade/candidate \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"version": "10.51.1h", "sha": "&lt;40-hex commit&gt;", "status": "built"}'
+
+curl -X POST https://your-dashboard.example{{ root_path }}/api/v1/gateway/upgrade/swap \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"version": "10.51.1h", "sha": "&lt;40-hex commit&gt;", "result": "ok"}'</pre>
+</div>
+
+<style>
+.api-banner { margin: 0 0 12px; padding: 8px 12px; border-radius: 6px; font-size: 13px; max-width: 720px; }
+.api-banner-error { background: #450a0a; border: 1px solid #991b1b; color: #fca5a5; }
+.api-banner-ok { background: #052e16; border: 1px solid #166534; color: #86efac; }
+.api-table { width: 100%; max-width: 720px; margin-top: 8px; font-size: 13px; border-collapse: collapse; }
+.api-table th { text-align: left; color: #888; font-weight: normal; padding: 4px 8px 4px 0; }
+.api-table td { padding: 4px 8px 4px 0; vertical-align: middle; }
+.api-table form { margin: 0; }
+</style>
+{% endblock %}

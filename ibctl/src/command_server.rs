@@ -17,6 +17,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot, watch};
 
+use crate::command_access::{command_name, unknown_names, CommandAccess};
 use crate::config::CommandServerConfig;
 use crate::types::{Command, Query, QuerySnapshot};
 
@@ -153,14 +154,18 @@ pub(crate) fn parse_command(input: &str) -> Option<ParsedCommand> {
                 .collect();
             Some(ParsedCommand::Action(Command::IbStatus(status, reason)))
         }
-        // Set auto-restart time: SETRESTART 05:30 PM (UTC)
+        // Set the auto-restart time, in the Gateway's own time zone: SETRESTART 5:30 PM.
+        // With no time, the Gateway restarts itself as soon as it can (warm).
         Some("SETRESTART") => {
             let orig_parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
             let time_str = orig_parts.get(1).copied().unwrap_or("").trim().to_string();
             if time_str.is_empty() {
-                None
-            } else {
+                // No time: restart as soon as the Gateway can, a warm restart.
+                Some(ParsedCommand::Action(Command::SetRestartNow))
+            } else if crate::gateway_zone::is_restart_time(&time_str) {
                 Some(ParsedCommand::Action(Command::SetRestartTime(time_str)))
+            } else {
+                None
             }
         }
         // JSON query commands (for dashboard)
@@ -205,6 +210,16 @@ impl CommandServer {
 
         log::info!("Command server listening on {}", addr);
 
+        let unknown = unknown_names(&self.config.allowed_commands);
+        if !unknown.is_empty() {
+            log::warn!(
+                "command_server.allowed_commands names no ibctl command: {} (nothing is allowed by those names)",
+                unknown.join(", "),
+            );
+        }
+        let access = Arc::new(CommandAccess::new(&self.config.allowed_commands));
+        log::info!("Command server accepts: {}", access.allowed().join(" "));
+
         // Limit concurrent connections to prevent resource exhaustion
         let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
 
@@ -220,12 +235,13 @@ impl CommandServer {
                         }
                     };
                     let control_from = self.config.control_from.clone();
+                    let access = access.clone();
                     let cmd_tx = command_tx.clone();
                     let qry_tx = query_tx.clone();
                     let snap_rx = snapshot_rx.clone();
                     tokio::spawn(async move {
                         if let Err(e) =
-                            handle_connection(stream, peer_addr, &control_from, cmd_tx, qry_tx, snap_rx).await
+                            handle_connection(stream, peer_addr, &control_from, &access, cmd_tx, qry_tx, snap_rx).await
                         {
                             log::error!("Error handling connection from {}: {}", peer_addr, e);
                         }
@@ -246,6 +262,7 @@ async fn handle_connection(
     mut stream: TcpStream,
     peer_addr: SocketAddr,
     control_from: &[String],
+    access: &CommandAccess,
     command_tx: mpsc::Sender<Command>,
     query_tx: mpsc::Sender<Query>,
     snapshot_rx: watch::Receiver<Arc<QuerySnapshot>>,
@@ -282,6 +299,16 @@ async fn handle_connection(
 
     match parse_command(trimmed) {
         Some(ParsedCommand::Action(cmd)) => {
+            // The allow-list is the ceiling for every caller; queries are not subject to it.
+            if !access.allows(&cmd) {
+                log::warn!(
+                    "Refused {} from {}: not in command_server.allowed_commands",
+                    command_name(&cmd),
+                    peer_addr,
+                );
+                writer.write_all(b"ERROR command not allowed by command_server.allowed_commands\n").await?;
+                return Ok(());
+            }
             // Privileged commands (SETSTATE, PAUSE, EXIT) require localhost
             if is_privileged_command(&cmd) && !is_localhost(&peer_addr.ip()) {
                 log::warn!(
@@ -508,26 +535,43 @@ mod tests {
 
     #[test]
     fn test_empty_allowlist_rejects_all() {
-        let addr: IpAddr = "192.168.1.1".parse().unwrap();
+        let addr: IpAddr = "192.0.2.1".parse().unwrap();
         assert!(!is_allowed(&addr, &[]));
     }
 
     #[test]
     fn test_wildcard_allows_all() {
-        let addr: IpAddr = "10.0.0.1".parse().unwrap();
+        let addr: IpAddr = "198.51.100.1".parse().unwrap();
         assert!(is_allowed(&addr, &["*".to_string()]));
     }
 
     #[test]
     fn test_exact_match() {
-        let addr: IpAddr = "192.168.1.100".parse().unwrap();
-        assert!(is_allowed(&addr, &["192.168.1.100".to_string()]));
+        let addr: IpAddr = "192.0.2.100".parse().unwrap();
+        assert!(is_allowed(&addr, &["192.0.2.100".to_string()]));
     }
 
     #[test]
     fn test_exact_match_rejects_different_ip() {
-        let addr: IpAddr = "192.168.1.101".parse().unwrap();
-        assert!(!is_allowed(&addr, &["192.168.1.100".to_string()]));
+        let addr: IpAddr = "192.0.2.101".parse().unwrap();
+        assert!(!is_allowed(&addr, &["192.0.2.100".to_string()]));
+    }
+
+    #[test]
+    fn test_setrestart_with_no_time_means_restart_now() {
+        assert!(matches!(parse_command("SETRESTART"), Some(ParsedCommand::Action(Command::SetRestartNow))));
+        assert!(matches!(parse_command("setrestart   "), Some(ParsedCommand::Action(Command::SetRestartNow))));
+    }
+
+    #[test]
+    fn test_setrestart_with_a_time_keeps_it_and_rejects_a_malformed_one() {
+        match parse_command("SETRESTART 5:30 PM") {
+            Some(ParsedCommand::Action(Command::SetRestartTime(t))) => assert_eq!(t, "5:30 PM"),
+            other => panic!("expected SetRestartTime, got {other:?}"),
+        }
+        for bad in ["SETRESTART 17:30", "SETRESTART soon", "SETRESTART 5:30 XM", "SETRESTART 13:00 PM"] {
+            assert!(parse_command(bad).is_none(), "{bad} must be rejected");
+        }
     }
 
     #[test]
@@ -544,10 +588,10 @@ mod tests {
 
     #[test]
     fn test_multiple_allowed_ips() {
-        let addr: IpAddr = "10.0.0.5".parse().unwrap();
+        let addr: IpAddr = "198.51.100.5".parse().unwrap();
         assert!(is_allowed(&addr, &[
-            "192.168.1.1".to_string(),
-            "10.0.0.5".to_string(),
+            "192.0.2.1".to_string(),
+            "198.51.100.5".to_string(),
         ]));
     }
 
@@ -560,26 +604,26 @@ mod tests {
 
     #[test]
     fn test_cidr_slash_16_matches_subnet() {
-        let addr: IpAddr = "192.168.1.50".parse().unwrap();
-        assert!(is_allowed(&addr, &["192.168.0.0/16".to_string()]));
+        let addr: IpAddr = "192.0.2.50".parse().unwrap();
+        assert!(is_allowed(&addr, &["192.0.0.0/16".to_string()]));
     }
 
     #[test]
     fn test_cidr_slash_24_matches_subnet() {
-        let addr: IpAddr = "10.0.1.99".parse().unwrap();
-        assert!(is_allowed(&addr, &["10.0.1.0/24".to_string()]));
+        let addr: IpAddr = "203.0.113.99".parse().unwrap();
+        assert!(is_allowed(&addr, &["203.0.113.0/24".to_string()]));
     }
 
     #[test]
     fn test_cidr_slash_24_rejects_outside_subnet() {
-        let addr: IpAddr = "10.0.2.1".parse().unwrap();
-        assert!(!is_allowed(&addr, &["10.0.1.0/24".to_string()]));
+        let addr: IpAddr = "198.51.100.1".parse().unwrap();
+        assert!(!is_allowed(&addr, &["203.0.113.0/24".to_string()]));
     }
 
     #[test]
     fn test_cidr_slash_32_is_exact_match() {
-        let addr: IpAddr = "10.0.0.1".parse().unwrap();
-        assert!(is_allowed(&addr, &["10.0.0.1/32".to_string()]));
+        let addr: IpAddr = "198.51.100.1".parse().unwrap();
+        assert!(is_allowed(&addr, &["198.51.100.1/32".to_string()]));
     }
 
     #[test]
@@ -864,5 +908,86 @@ mod tests {
             }
             other => panic!("expected IBSTATUS to parse; got {:?}", other),
         }
+    }
+
+    // --- allowed_commands, end to end over a real connection ---
+
+    /// Serve one connection from `peer`'s point of view with `allowed` as the
+    /// list, send `line`, and return the reply plus whatever reached the
+    /// state machine's command channel.
+    async fn exchange(allowed: &[&str], line: &str) -> (String, Option<Command>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (command_tx, mut command_rx) = mpsc::channel(4);
+        let (query_tx, _query_rx) = mpsc::channel(4);
+        let (_snapshot_tx, snapshot_rx) = watch::channel(Arc::new(QuerySnapshot::initializing()));
+        let access = CommandAccess::new(&allowed.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+
+        let server = tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            handle_connection(stream, peer, &["*".to_string()], &access, command_tx, query_tx, snapshot_rx)
+                .await
+                .unwrap();
+        });
+
+        let mut client = TcpStream::connect(addr).await.unwrap();
+        client.write_all(format!("{line}\n").as_bytes()).await.unwrap();
+        let mut reply = String::new();
+        client.read_to_string(&mut reply).await.unwrap();
+        server.await.unwrap();
+        (reply.trim().to_string(), command_rx.try_recv().ok())
+    }
+
+    #[tokio::test]
+    async fn a_command_outside_the_list_is_refused_and_never_reaches_the_state_machine() {
+        let (reply, delivered) = exchange(&["SETRESTART"], "STOP").await;
+
+        assert_eq!(reply, "ERROR command not allowed by command_server.allowed_commands");
+        assert!(delivered.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_command_in_the_list_goes_through() {
+        let (reply, delivered) = exchange(&["SETRESTART"], "SETRESTART").await;
+
+        assert_eq!(reply, "OK SETRESTART");
+        assert!(matches!(delivered, Some(Command::SetRestartNow)));
+    }
+
+    #[tokio::test]
+    async fn the_name_in_the_list_covers_the_command_with_an_argument() {
+        let (reply, delivered) = exchange(&["setrestart"], "SETRESTART 5:05 PM").await;
+
+        assert_eq!(reply, "OK SETRESTART 5:05 PM");
+        assert!(matches!(delivered, Some(Command::SetRestartTime(t)) if t == "5:05 PM"));
+    }
+
+    #[tokio::test]
+    async fn queries_are_allowed_whatever_the_list_says() {
+        let (reply, delivered) = exchange(&["SETRESTART"], "STATUS").await;
+
+        assert!(reply.starts_with("OK {"), "{reply}");
+        assert!(delivered.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_command_still_gets_the_unknown_reply() {
+        let (reply, _) = exchange(&["SETRESTART"], "FROBNICATE").await;
+
+        assert_eq!(reply, "ERROR unknown command: FROBNICATE");
+    }
+
+    #[tokio::test]
+    async fn a_privileged_command_in_the_list_stays_privileged() {
+        // The list allows EXIT; being listed does not make it unprivileged. (A client on
+        // loopback is all this test can be, so it checks the allowed path and that the
+        // privilege classification is unchanged.)
+        let (reply, delivered) = exchange(&["EXIT"], "EXIT").await;
+        assert_eq!(reply, "OK EXIT");
+        assert!(matches!(delivered, Some(Command::Exit)));
+        assert!(is_privileged_command(&Command::Exit));
+        assert!(!is_privileged_command(&Command::SetRestartNow));
     }
 }

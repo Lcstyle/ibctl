@@ -627,11 +627,148 @@ class TestCommandServerNetworkValidators:
     def test_command_server_control_from_valid_accepted(self, toml_file):
         toml = (
             '[command_server]\n'
-            'control_from = ["127.0.0.1", "10.0.0.0/8"]\n'
+            'control_from = ["127.0.0.1", "198.51.100.0/24"]\n'
         )
         result = validate_config(toml_path=toml_file(toml), check_env=False)
         cf_errs = [e for e in result.errors if "control_from" in e.field]
         assert not cf_errs
+
+
+ACTION_COMMANDS = [
+    "STOP", "START", "RESTART", "RECONNECTDATA", "RECONNECTACCOUNT", "ENABLEAPI",
+    "EXIT", "RESTARTSOCAT", "PAUSE", "RESUME", "HITL_RESUME", "RESUME_RECONNECT",
+    "MAINT_HOLD", "MAINT_RELEASE", "SETSTATE", "IBSTATUS", "SETRESTART",
+]
+
+
+class TestCommandServerAllowedCommands:
+    """command_server.allowed_commands: which action commands ibctl accepts."""
+
+    def _errors(self, toml_file, value: str):
+        toml = f"[command_server]\nallowed_commands = {value}\n"
+        result = validate_config(toml_path=toml_file(toml), check_env=False)
+        return [e for e in result.errors if "allowed_commands" in e.field]
+
+    def test_default_is_every_action_command(self):
+        from app.preflight.models import CommandServerConfig
+
+        assert CommandServerConfig().allowed_commands == ACTION_COMMANDS
+
+    def test_every_action_command_is_valid(self, toml_file):
+        quoted = ", ".join(f'"{c}"' for c in ACTION_COMMANDS)
+        assert not self._errors(toml_file, f"[{quoted}]")
+
+    def test_messy_but_valid_value_is_accepted(self, toml_file):
+        assert not self._errors(toml_file, '["setrestart", " reconnectdata ", ""]')
+
+    def test_messy_value_is_normalised(self):
+        from app.preflight.models import CommandServerConfig
+
+        cfg = CommandServerConfig(allowed_commands=["setrestart", " reconnectdata ", "", "SETRESTART"])
+        assert cfg.allowed_commands == ["SETRESTART", "RECONNECTDATA"]
+
+    def test_unknown_name_is_rejected_and_named(self, toml_file):
+        errs = self._errors(toml_file, '["STOP", "STPO"]')
+        assert errs
+        assert "STPO" in errs[0].message
+        assert "SETRESTART" in errs[0].message  # lists the valid names
+
+    def test_query_name_is_rejected(self, toml_file):
+        errs = self._errors(toml_file, '["STATUS"]')
+        assert errs
+        assert "STATUS" in errs[0].message
+
+    def test_empty_list_is_accepted(self, toml_file):
+        assert not self._errors(toml_file, "[]")
+
+    def test_env_var_maps_to_the_toml_path(self):
+        from app.preflight.models import ENV_MAP
+
+        assert ENV_MAP["command_server.allowed_commands"] == "IBCTL_ALLOWED_COMMANDS"
+
+    def test_env_value_becomes_a_list(self, monkeypatch):
+        from app.preflight.env_overlay import apply_env_overrides
+
+        monkeypatch.setenv("IBCTL_ALLOWED_COMMANDS", "SETRESTART, RECONNECTDATA ,")
+        got = apply_env_overrides({})
+        assert got["command_server"]["allowed_commands"] == ["SETRESTART", "RECONNECTDATA", ""]
+
+    def test_blank_env_value_keeps_the_toml_value(self, monkeypatch):
+        from app.preflight.env_overlay import apply_env_overrides
+
+        monkeypatch.setenv("IBCTL_ALLOWED_COMMANDS", "")
+        got = apply_env_overrides({"command_server": {"allowed_commands": ["STOP"]}})
+        assert got["command_server"]["allowed_commands"] == ["STOP"]
+
+
+class TestDashboardSessionIdleMinutes:
+    """dashboard.session_idle_minutes: whole minutes 0..1440, 5 by default, 0 = off."""
+
+    def _errors(self, toml_file, value: str):
+        toml = f"[dashboard]\nsession_idle_minutes = {value}\n"
+        result = validate_config(toml_path=toml_file(toml), check_env=False)
+        return [e for e in result.errors if "session_idle_minutes" in e.field]
+
+    def test_default_is_five_minutes(self):
+        from app.preflight.models import DashboardConfig
+
+        assert DashboardConfig().session_idle_minutes == 5
+
+    @pytest.mark.parametrize("value", ["0", "1", "5", "60", "1440"])
+    def test_whole_minutes_in_range_are_accepted(self, toml_file, value):
+        assert not self._errors(toml_file, value)
+
+    @pytest.mark.parametrize("value", ["1441", "-1", "100000", "2.5", "5.0", '"abc"', '"5"', "true"])
+    def test_anything_else_is_rejected_and_names_the_variable(self, toml_file, value):
+        errs = self._errors(toml_file, value)
+
+        assert errs, value
+        assert "IBCTL_SESSION_IDLE_MINUTES" in errs[0].message
+        assert "0 to 1440" in errs[0].message
+
+    def test_the_toml_value_is_the_one_shown_back(self, toml_file):
+        assert "1441" in self._errors(toml_file, "1441")[0].message
+
+    def test_env_var_maps_to_the_toml_path(self):
+        from app.preflight.models import ENV_MAP
+
+        assert ENV_MAP["dashboard.session_idle_minutes"] == "IBCTL_SESSION_IDLE_MINUTES"
+
+    @pytest.mark.parametrize("raw", ["0", "5", "1440", " 7 "])
+    def test_a_good_env_value_passes(self, monkeypatch, toml_file, raw):
+        _set_valid_creds(monkeypatch)
+        monkeypatch.setenv("IBCTL_SESSION_IDLE_MINUTES", raw)
+
+        result = validate_config(toml_path=toml_file(""), check_env=True)
+
+        assert result.ok, [e.message for e in result.errors]
+
+    @pytest.mark.parametrize("raw", ["1441", "-1", "abc", "1.5", "5m", "0x10"])
+    def test_a_bad_env_value_fails_preflight_naming_the_variable(self, monkeypatch, toml_file, raw):
+        _set_valid_creds(monkeypatch)
+        monkeypatch.setenv("IBCTL_SESSION_IDLE_MINUTES", raw)
+
+        result = validate_config(toml_path=toml_file(""), check_env=True)
+
+        assert not result.ok
+        [err] = [e for e in result.errors if "session_idle_minutes" in e.field]
+        assert "IBCTL_SESSION_IDLE_MINUTES" in err.message and raw in err.message
+
+    def test_a_blank_env_value_keeps_the_toml_value(self, monkeypatch, toml_file):
+        from app.preflight.env_overlay import apply_env_overrides
+
+        monkeypatch.setenv("IBCTL_SESSION_IDLE_MINUTES", "")
+        got = apply_env_overrides({"dashboard": {"session_idle_minutes": 12}})
+
+        assert got["dashboard"]["session_idle_minutes"] == 12
+
+    def test_env_becomes_a_whole_number_over_the_toml_value(self, monkeypatch):
+        from app.preflight.env_overlay import apply_env_overrides
+
+        monkeypatch.setenv("IBCTL_SESSION_IDLE_MINUTES", "9")
+        got = apply_env_overrides({"dashboard": {"session_idle_minutes": 12}})
+
+        assert got["dashboard"]["session_idle_minutes"] == 9 and type(got["dashboard"]["session_idle_minutes"]) is int
 
 
 class TestAgentSocketAbsolute:

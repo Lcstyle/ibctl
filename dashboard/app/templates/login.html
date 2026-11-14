@@ -59,6 +59,14 @@
             margin-bottom: 12px;
             font-size: 13px;
         }
+        .login-notice {
+            background: #1e293b;
+            color: #cbd5e1;
+            padding: 8px 12px;
+            border-radius: 4px;
+            margin-bottom: 12px;
+            font-size: 13px;
+        }
         .login-divider {
             text-align: center;
             color: #52525b;
@@ -71,10 +79,15 @@
     <div class="login-container">
         <h2>ibctl Dashboard</h2>
 
+        {% if notice and not error %}
+        <div class="login-notice" role="status">{{ notice }}</div>
+        {% endif %}
+
         {% if error %}
         <div class="login-error">{{ error }}</div>
         {% endif %}
 
+        {% if password_login_enabled %}
         <form method="post" action="{{ root_path }}/login">
             <input type="hidden" name="next" value="{{ next_path }}">
             <input type="password" name="password" placeholder="Dashboard password" autofocus>
@@ -83,6 +96,7 @@
 
         {% if github_oauth_enabled or oidc_enabled %}
         <div class="login-divider">or</div>
+        {% endif %}
         {% endif %}
 
         {% if github_oauth_enabled %}

@@ -39,7 +39,7 @@ async def test_status_contains_state(client):
 async def test_health_returns_ok(client):
     response = await client.get("/api/v1/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
+    assert response.json()["status"] == "ok"
 
 
 # ---------------------------------------------------------------------------

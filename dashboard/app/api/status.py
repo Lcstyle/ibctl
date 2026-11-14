@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 
 from app.domain.errors import DashboardError
 from app.domain.models import GatewayStatus
+from app.services.health_summary import build_health_summary
 from app.services.monitors.session_lost import (
     SCHEDULE_CORRELATION_MINUTES,
     _scheduled_restart_grace_minutes,
@@ -98,7 +99,7 @@ async def get_status_raw(request: Request, mode: str | None = None):
         return {"state": "unreachable", "error": e.message, "paused": False, "ceiling_state": None}
 
 
-@router.get("/api/v1/schedule")
+@router.api_route("/api/v1/schedule", methods=["GET", "HEAD"])
 async def get_schedule():
     """ibctl's own scheduled-restart configuration, for external clients.
 
@@ -171,7 +172,15 @@ async def get_schedule():
     }
 
 
-@router.get("/api/v1/health")
-async def health():
-    """Simple health check — always returns 200 if dashboard is running."""
-    return {"status": "ok"}
+@router.api_route("/api/v1/health", methods=["GET", "HEAD"])
+async def health(request: Request):
+    """Public health summary — 200 whenever the dashboard is running.
+
+    Open to anyone, logged in or not, so it carries only the fixed whitelist
+    in `build_health_summary`: per-mode state, API ready and since when, and
+    the ibctl and Gateway versions. Never pass the raw STATUS payload through.
+    """
+    return build_health_summary(
+        request.app.state.instance_registry,
+        getattr(request.app.state, "gateway_version", None),
+    )

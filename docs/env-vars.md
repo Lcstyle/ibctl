@@ -77,8 +77,30 @@ All knobs also have full operator docs in [docs/hitl-2fa.md](hitl-2fa.md).
 | `TWS_PATH` | `gateway.tws_path` | `/home/ibgateway/Jts` |
 | `TWS_SETTINGS_PATH` | `gateway.tws_settings_path` | (uses `tws_path`) |
 | `TWS_MAJOR_VRSN` | `gateway.tws_major_vrsn` | auto-detected |
+| `TIME_ZONE` | `gateway.time_zone` | `""` (ibctl leaves jts.ini alone). The Gateway's session time zone, an IANA name such as `America/New_York`. See [Gateway session time zone](#gateway-session-time-zone). |
+| `TIME_ZONE_LIVE` | `gateway.time_zone_live` | `""` (uses `time_zone`). Overrides `time_zone` for live mode. |
+| `TIME_ZONE_PAPER` | `gateway.time_zone_paper` | `""` (uses `time_zone`). Overrides `time_zone` for paper mode. |
 | `JAVA_HEAP_SIZE` | `gateway.java_heap_size` | `768` (MB) |
 | `GATEWAY_OR_TWS` | `gateway.gateway_or_tws` | `"gateway"` |
+
+### Gateway session time zone
+
+The Gateway's session time zone comes from the `[Logon] TimeZone` line of its
+`jts.ini`, not from the container's `TZ`. `TZ` only sets the clock zone of the
+container and the JVM.
+
+- Leave `TIME_ZONE` empty and ibctl does not touch the line: an existing install
+  keeps the zone it has now, and ibctl only reports it.
+- Set `TIME_ZONE` (or `TIME_ZONE_LIVE` / `TIME_ZONE_PAPER` for one mode) and ibctl
+  writes it into that mode's `jts.ini` before every Gateway launch, then checks
+  it after login.
+- The two-space time strings IB sends (such as `20240102  15:30:00`) are in the
+  Gateway's session zone. An API client that parses them should use the same zone.
+- `AUTO_RESTART_TIME` is written in the container's `TZ`; ibctl converts it to the
+  Gateway's session zone at every login.
+
+Values are an IANA name (`America/New_York`, `Etc/GMT+5`, `UTC`) or empty. Pkl
+checks the shape, preflight also looks the name up in the tz database.
 
 ## `[session]`
 
@@ -121,6 +143,33 @@ All knobs also have full operator docs in [docs/hitl-2fa.md](hitl-2fa.md).
 | `IBCTL_COMMAND_SERVER_ENABLED` | `command_server.enabled` | `false` |
 | `IBCTL_COMMAND_PORT` | `command_server.port` | `7462` |
 | `IBCTL_CONTROL_FROM` | `command_server.control_from` | `"127.0.0.1"` (comma-separated) |
+| `IBCTL_ALLOWED_COMMANDS` | `command_server.allowed_commands` | every action command (comma-separated). See [Allowed commands](#allowed-commands). |
+
+### Allowed commands
+
+`allowed_commands` lists the action commands the command server accepts. Any
+other action command is refused with
+`ERROR command not allowed by command_server.allowed_commands`.
+
+- Default (unset or blank) is every action command: `STOP`, `START`, `RESTART`,
+  `RECONNECTDATA`, `RECONNECTACCOUNT`, `ENABLEAPI`, `EXIT`, `RESTARTSOCAT`, `PAUSE`,
+  `RESUME`, `HITL_RESUME`, `RESUME_RECONNECT`, `MAINT_HOLD`, `MAINT_RELEASE`,
+  `SETSTATE`, `IBSTATUS`, `SETRESTART`. A blank value means "use the default", not
+  "nothing".
+- Names are trimmed and compared case-insensitively; duplicates are dropped. An
+  unknown name fails preflight with the list of valid names.
+- Queries (`STATUS`, `STATE`, `CONFIG`, `LOGS`, `WINDOWS`, `SUBSCRIBE`) are always
+  allowed and are not valid names for this list.
+- It is one list shared by the live and paper instances, and it gates every caller:
+  TCP clients, dashboard buttons and API tokens alike. The localhost-only rule for
+  privileged commands still applies on top.
+
+Example: `IBCTL_ALLOWED_COMMANDS=SETRESTART,RECONNECTDATA` leaves those two as the
+only action commands that work.
+
+Warning: listing too few commands can break tooling that sends the others, for
+example an approval flow that sends `STOP` and `START`. Those callers get the
+refusal above.
 
 ## `[agent]`
 
@@ -187,6 +236,92 @@ All knobs also have full operator docs in [docs/hitl-2fa.md](hitl-2fa.md).
 | `IBCTL_SESSION_DOWN_RENAG_MINUTES` | `dashboard.session_down_renag_minutes` | `60` (0 = one alert per outage) |
 | `IBCTL_SCHEDULED_RESTART_GRACE_MINUTES` | `dashboard.scheduled_restart_grace_minutes` | `20` |
 | `IBCTL_VERSION_PROBE_CLIENT_ID` | `dashboard.version_probe_client_id` | `9172` (uses this ID and the next 7) |
+| `IBCTL_SESSION_IDLE_MINUTES` | `dashboard.session_idle_minutes` | `5` (0 = never sign out for inactivity; 0..1440) |
+
+### Dashboard sessions: idle logout
+
+A login ends after `session_idle_minutes` with no user activity, for the
+password login and for GitHub OAuth / OIDC alike. Every session also still ends
+7 days after it was issued, however active the person is, unless the idle
+logout is off (0 removes only the idle limit). Set the value in `ibctl.toml` or
+with `IBCTL_SESSION_IDLE_MINUTES`; the env var wins, an empty one is ignored,
+and a change takes effect when the dashboard restarts. Preflight rejects a
+value that isn't a whole number from 0 to 1440, naming the variable.
+
+What counts as activity: a page navigation, any request that is not a GET or
+HEAD (a button press, a form post), and the heartbeat the page sends while its
+user is using it (`POST /api/session/touch`). A page's own background refreshes
+(`/partials/*`, JSON reads, the event stream, static files) are checked against
+the limit but never extend it, so a tab left open on the Overview does sign out.
+Each of those requests moves the session's last-activity time at most once every
+15 seconds.
+
+In the browser, `static/session.js` watches mouse, keyboard, wheel and touch
+input. Open tabs share it through `localStorage`, so activity in one tab keeps
+the others signed in. It warns 30 seconds before the limit and, at the limit,
+posts the logout form and goes to the login page. Any request the page makes
+that comes back 401 sends it to the login page too. Browsers that block
+`localStorage` still time out, per tab. The **Log out** button in the header
+signs out at any time.
+
+What it does not do:
+
+- An API token is not a session and is not affected.
+- A VNC websocket that is already open is not cut by the server, which checks
+  the login only when the socket opens (a new socket from an idle session is
+  refused). The browser's timer ends an open one, by signing out and leaving the
+  page. If the browser stops running timers (a closed laptop, a frozen or
+  sleeping tab) the socket stays open until it runs them again.
+- A session cookie issued before the idle logout existed has no last-activity
+  time, so its issue time stands in for it: such a session ends at most the
+  idle limit after it was issued.
+
+## Dashboard API tokens
+
+Scripts call the dashboard with a named API token, created on the API access
+page and sent as `Authorization: Bearer <token>`. The token is shown once and
+only a hash of it is kept. Every token has a **type**, chosen when it is
+created, and a token can call only the routes of its own type:
+
+| Type | Routes | Enabled by default |
+|---|---|---|
+| Warm restart client (`warm_restart`) | `GET` and `POST /api/v1/warm-restart` | yes |
+| Gateway upgrade: CI (`upgrade_ci`) | `GET /api/v1/gateway/upgrade`, `POST /api/v1/gateway/upgrade/candidate` | no |
+| Gateway upgrade: maintenance (`upgrade_maintenance`) | `GET /api/v1/gateway/upgrade`, `POST /api/v1/gateway/upgrade/swap` | no |
+
+A type must also be enabled on the API access page before its tokens work, and
+the two upgrade types start disabled: tokens of a disabled type get a 403 that
+names the type. A token of one type gets a 403 on another type's routes (a CI
+token cannot post the swap report, a maintenance token cannot post the
+candidate). Warm restart is also capped by ibctl's own
+`command_server.allowed_commands`, which must list `SETRESTART`.
+
+```sh
+# Warm restart client
+curl -X POST https://dashboard.example/api/v1/warm-restart \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"mode": "paper"}'
+
+# Gateway upgrade: CI (the image it built)
+curl -X POST https://dashboard.example/api/v1/gateway/upgrade/candidate \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"version": "10.51.1h", "sha": "<40-hex commit>", "status": "built"}'
+
+# Gateway upgrade: maintenance (what the swap did)
+curl -X POST https://dashboard.example/api/v1/gateway/upgrade/swap \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"version": "10.51.1h", "sha": "<40-hex commit>", "result": "ok"}'
+```
+
+A token is not a login and reaches nothing else: not the other API routes, not
+the upgrade policy, not the pages, and not `/api/session/touch`. A route added
+to the dashboard later is closed to every token until it is added to a type.
+The dashboard password is not a Bearer token. An unknown or revoked token gets
+a 401. Every token request, accepted or refused, is logged with the token's
+name, its type and the caller's address.
+
+An `api_access.json` saved by an earlier build loads as is: its tokens count as
+warm restart tokens and its warm restart tick carries over.
 
 ## Env-only switches and paths
 
@@ -199,6 +334,44 @@ No TOML key. The Config page lists the switches under Runtime when they're set.
 | `IBCTL_CONFIG` | Path of `ibctl.toml` (default `/opt/ibctl/ibctl.toml`). |
 | `IBCTL_PERSIST_DIR` | Dashboard state directory (default `/opt/ibctl/persist`): Gateway version check and upgrade records. |
 | `IBCTL_BIN` | ibctl binary preflight's payload check runs (default `/opt/ibctl/ibctl`). |
+
+## VNC
+
+`VNC_SERVER_PASSWORD` turns VNC on. There are two ways in.
+
+- **The VNC tab of the dashboard.** The browser's websocket goes to the
+  dashboard's own `/websockify` (under `IBCTL_ROOT_PATH`, if set), and the
+  dashboard relays it to websockify inside the container. websockify listens on
+  `127.0.0.1:${IBCTL_NOVNC_PORT:-6080}` there and is not published. This needs a
+  login (a dashboard password, GitHub OAuth or OIDC): a visitor who isn't signed
+  in, an API token and a dashboard with no login configured are all refused
+  before the socket opens, and the VNC password is only written into the page of
+  someone who is signed in. An idle login ends (see "Dashboard sessions"): the
+  socket closes when the browser's idle timer signs out, and an idle session
+  can't open a new one.
+- **A regular VNC client** on port 5900, published as
+  `${IBCTL_VNC_BIND:-127.0.0.1}:5900`. That is loopback unless the operator sets
+  `IBCTL_VNC_BIND` (a compose variable) to another address, which is opt-in; the
+  VNC password is then the only thing protecting it.
+  Preflight enforces this: if `IBCTL_VNC_BIND` is anything but a loopback address
+  and `VNC_SERVER_PASSWORD` (or `VNC_SERVER_PASSWORD_FILE`) is empty, the container
+  refuses to start and says so. Compose passes `IBCTL_VNC_BIND` into the container
+  for that check.
+
+A reverse proxy in front of the dashboard must send the websocket path to the
+**dashboard**, not to port 6080 (nothing publishes that port). With nginx, next
+to the location that already proxies the dashboard:
+
+```nginx
+location /ibctl/websockify {
+    proxy_pass http://127.0.0.1:3080/websockify;   # the dashboard: IBCTL_DASHBOARD_PORT
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_read_timeout 3600s;
+}
+```
 
 ---
 

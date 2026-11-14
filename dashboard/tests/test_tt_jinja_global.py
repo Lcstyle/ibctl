@@ -21,8 +21,8 @@ from __future__ import annotations
 from jinja2 import DictLoader, Environment
 
 from app.api import pages as pages_mod
-from app.config import DashboardSettings
 from app.main import create_app
+from tests.auth_helpers import authed_settings
 
 
 _SAMPLE_DESCRIPTIONS: dict[str, str] = {
@@ -103,14 +103,7 @@ def test_tt_is_registered_on_create_app_templates_env(monkeypatch):
     """
     monkeypatch.setattr(pages_mod, "FIELD_DESCRIPTIONS", dict(_SAMPLE_DESCRIPTIONS))
 
-    settings = DashboardSettings(
-        port=8080,
-        token="",
-        debug_mode=False,
-        ibctl_host="127.0.0.1",
-        ibctl_port=7462,
-    )
-    app = create_app(settings=settings)
+    app = create_app(settings=authed_settings())
 
     templates = app.state.templates
     tt = templates.env.globals.get("tt")

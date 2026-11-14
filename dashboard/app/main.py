@@ -30,6 +30,9 @@ from app.config import DashboardSettings
 from app.instance_registry import InstanceRegistry
 from app.mbb import SPEC_VERSION as MBB_SPEC_VERSION, mbb
 from app.middleware.auth import TokenAuthMiddleware
+from app.services.api_access import ApiAccessStore
+from app.services.ibctl_access import IbctlAccessReader
+from app.services.warm_restart import WarmRestartService
 from app.services.market_day_logging import setup_dashboard_logging
 
 CRASH_STAMP_PATH = Path(
@@ -268,6 +271,12 @@ def create_app(settings: DashboardSettings | None = None) -> FastAPI:
     # (existing API endpoints like /api/v1/status use this)
     app.state.ibctl_client = registry.get_client(registry.primary_mode())
 
+    # API tokens and which token types are on, saved on the persist volume; and ibctl's
+    # own command allow-list, which caps what those tokens may do.
+    app.state.api_access = ApiAccessStore()
+    app.state.ibctl_access = IbctlAccessReader(registry)
+    app.state.warm_restart = WarmRestartService(app.state.api_access, registry, access=app.state.ibctl_access)
+
     # Auth middleware (must be added before routes)
     app.add_middleware(TokenAuthMiddleware)
 
@@ -319,6 +328,8 @@ def create_app(settings: DashboardSettings | None = None) -> FastAPI:
     # Templates (for web UI) — inject root_path as global variable
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     templates.env.globals["root_path"] = root_path
+    templates.env.globals["password_login_enabled"] = settings.password_enabled
+    templates.env.globals["session_idle_minutes"] = settings.session_idle_minutes
     templates.env.globals["build_badge"] = build_badge
 
     # Register the tt(key) Jinja global for dotted UI-string lookups.

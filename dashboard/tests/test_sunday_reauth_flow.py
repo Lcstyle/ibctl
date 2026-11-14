@@ -423,12 +423,13 @@ def test_hitl_button_reads_retry_login_not_approve():
 
 @pytest.fixture
 async def dash(fake_client):
-    from app.config import DashboardSettings
     from app.instance_registry import _CachedResponse
     from app.main import create_app
+    from tests.auth_helpers import authed_settings
 
-    app = create_app(settings=DashboardSettings(
-        port=8080, token="", debug_mode=False, ibctl_host="127.0.0.1", ibctl_port=7462))
+    # A dashboard password is configured and the client stays signed out:
+    # a notification link works without a login.
+    app = create_app(settings=authed_settings())
     registry = app.state.instance_registry
     for mode in registry.modes():
         registry._clients[mode] = fake_client

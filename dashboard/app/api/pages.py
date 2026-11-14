@@ -15,14 +15,21 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app.domain.errors import DashboardError
+from app.urls import app_url, cookie_path, legacy_cookie_paths
 from app.middleware.auth import (
     AUTH_COOKIE_NAME,
+    NO_LOGIN_HELP,
     OAUTH_COOKIE_NAME,
+    LOGIN_REASONS,
     OAUTH_STATE_COOKIE_NAME,
     build_oauth_session,
     build_oauth_state,
+    build_password_session,
     parse_oauth_state,
+    session_cookie_attributes,
 )
+from app.services.health_summary import build_health_summary, display_zone, local_time
+from app.services.identity_mask import mask_identity
 
 logger = logging.getLogger("dashboard.pages")
 router = APIRouter()
@@ -82,6 +89,22 @@ def _safe_next_path(next_path: str | None) -> str:
     return next_path
 
 
+def _login_notice(reason: str | None, idle_minutes: int) -> str | None:
+    """The line the login page shows for `?reason=`, or None.
+
+    Only the two literal values in LOGIN_REASONS are recognised, and the text is
+    ours, so nothing the visitor put in the URL is ever echoed back.
+    """
+    if reason not in LOGIN_REASONS:
+        return None
+    if reason == "logout":
+        return "You have been signed out."
+    if idle_minutes <= 0:
+        return "You were signed out because of inactivity."
+    unit = "minute" if idle_minutes == 1 else "minutes"
+    return f"You were signed out after {idle_minutes} {unit} of inactivity."
+
+
 def _github_redirect_uri(request: Request) -> str:
     settings = request.app.state.settings
     if settings.github_redirect_uri:
@@ -89,19 +112,32 @@ def _github_redirect_uri(request: Request) -> str:
     return str(request.url_for("github_oauth_callback"))
 
 
+def _clear_legacy_cookies(request: Request, response, *names: str) -> None:
+    """Expire the copies of these cookies an earlier build set at `Path=/`.
+
+    A browser that still holds one sends it beside the current cookie; clearing it
+    on login and logout means it does not linger for the rest of its lifetime.
+    """
+    for path in legacy_cookie_paths(request):
+        for name in names:
+            response.delete_cookie(name, path=path)
+
+
 # --- Authentication pages ---
 
 
 @router.get("/login", response_class=HTMLResponse, name="login_page")
-async def login_page(request: Request, next: str | None = None):
+async def login_page(request: Request, next: str | None = None, reason: str | None = None):
     settings = request.app.state.settings
-    if not settings.token and not settings.github_oauth_enabled and not settings.oidc_enabled:
-        return RedirectResponse(url="/", status_code=303)
+    if not settings.login_configured:
+        # Nobody can log in; the summary at "/" explains how to enable it.
+        return RedirectResponse(url=app_url(request, "/"), status_code=303)
 
     templates = request.app.state.templates
     return templates.TemplateResponse(request, "login.html", {
         "next_path": _safe_next_path(next),
         "error": None,
+        "notice": _login_notice(reason, settings.session_idle_minutes),
         "github_oauth_enabled": settings.github_oauth_enabled,
         "oidc_enabled": settings.oidc_enabled,
     })
@@ -111,15 +147,25 @@ async def login_page(request: Request, next: str | None = None):
 async def login_submit(request: Request):
     settings = request.app.state.settings
     token = settings.token
-    if not token:
-        return RedirectResponse(url="/", status_code=303)
+    if not settings.login_configured:
+        return RedirectResponse(url=app_url(request, "/"), status_code=303)
 
     body = (await request.body()).decode("utf-8")
     form = parse_qs(body, keep_blank_values=True)
     password = form.get("password", [""])[0]
     next_path = _safe_next_path(form.get("next", ["/"])[0])
 
-    if not hmac.compare_digest(password, token):
+    if not token:
+        # GitHub OAuth or OIDC is configured but no dashboard password.
+        templates = request.app.state.templates
+        return templates.TemplateResponse(request, "login.html", {
+            "next_path": next_path,
+            "error": "Password login is not enabled on this dashboard.",
+            "github_oauth_enabled": settings.github_oauth_enabled,
+            "oidc_enabled": settings.oidc_enabled,
+        }, status_code=403)
+
+    if not hmac.compare_digest(password.encode("utf-8"), token.encode("utf-8")):
         templates = request.app.state.templates
         return templates.TemplateResponse(request, "login.html", {
             "next_path": next_path,
@@ -128,15 +174,13 @@ async def login_submit(request: Request):
             "oidc_enabled": settings.oidc_enabled,
         }, status_code=401)
 
-    response = RedirectResponse(url=next_path, status_code=303)
+    response = RedirectResponse(url=app_url(request, next_path), status_code=303)
     response.set_cookie(
         key=AUTH_COOKIE_NAME,
-        value=token,
-        httponly=True,
-        samesite="lax",
-        secure=request.url.scheme == "https",
-        path="/",
+        value=build_password_session(settings.signing_secret),
+        **session_cookie_attributes(request),
     )
+    _clear_legacy_cookies(request, response, AUTH_COOKIE_NAME)
     return response
 
 
@@ -202,10 +246,10 @@ def _github_user_allowed(settings, login: str, orgs: list[str]) -> bool:
 async def github_oauth_start(request: Request, next: str | None = None):
     settings = request.app.state.settings
     if not settings.github_oauth_enabled:
-        return RedirectResponse(url="/login", status_code=303)
+        return RedirectResponse(url=app_url(request, "/login"), status_code=303)
 
     next_path = _safe_next_path(next)
-    state = build_oauth_state(next_path, settings.auth_secret.get_secret_value())
+    state = build_oauth_state(next_path, settings.signing_secret)
     redirect_uri = _github_redirect_uri(request)
     scope = "read:user"
     if settings.github_allowed_orgs:
@@ -223,7 +267,7 @@ async def github_oauth_start(request: Request, next: str | None = None):
         httponly=True,
         samesite="lax",
         secure=request.url.scheme == "https",
-        path="/",
+        path=cookie_path(request),
         max_age=600,
     )
     return response
@@ -233,10 +277,10 @@ async def github_oauth_start(request: Request, next: str | None = None):
 async def github_oauth_callback(request: Request, code: str | None = None, state: str | None = None, error: str | None = None):
     settings = request.app.state.settings
     if not settings.github_oauth_enabled:
-        return RedirectResponse(url="/login", status_code=303)
+        return RedirectResponse(url=app_url(request, "/login"), status_code=303)
 
     cookie_state = request.cookies.get(OAUTH_STATE_COOKIE_NAME, "")
-    state_payload = parse_oauth_state(state or "", settings.auth_secret.get_secret_value()) if state and state == cookie_state else None
+    state_payload = parse_oauth_state(state or "", settings.signing_secret) if state and state == cookie_state else None
     next_path = _safe_next_path(state_payload["next"]) if state_payload else "/"
 
     if error:
@@ -283,25 +327,24 @@ async def github_oauth_callback(request: Request, code: str | None = None, state
             "oidc_enabled": settings.oidc_enabled,
         }, status_code=401)
 
-    response = RedirectResponse(url=next_path, status_code=303)
+    response = RedirectResponse(url=app_url(request, next_path), status_code=303)
     response.set_cookie(
         key=OAUTH_COOKIE_NAME,
-        value=build_oauth_session(login, settings.auth_secret.get_secret_value()),
-        httponly=True,
-        samesite="lax",
-        secure=request.url.scheme == "https",
-        path="/",
+        value=build_oauth_session(login, settings.signing_secret),
+        **session_cookie_attributes(request),
     )
-    response.delete_cookie(OAUTH_STATE_COOKIE_NAME, path="/")
+    response.delete_cookie(OAUTH_STATE_COOKIE_NAME, path=cookie_path(request))
+    _clear_legacy_cookies(request, response, OAUTH_COOKIE_NAME, OAUTH_STATE_COOKIE_NAME)
     return response
 
 
 @router.post("/logout")
 async def logout(request: Request):
-    response = RedirectResponse(url="/login", status_code=303)
-    response.delete_cookie(AUTH_COOKIE_NAME, path="/")
-    response.delete_cookie(OAUTH_COOKIE_NAME, path="/")
-    response.delete_cookie(OAUTH_STATE_COOKIE_NAME, path="/")
+    response = RedirectResponse(url=app_url(request, "/login?reason=logout"), status_code=303)
+    response.delete_cookie(AUTH_COOKIE_NAME, path=cookie_path(request))
+    response.delete_cookie(OAUTH_COOKIE_NAME, path=cookie_path(request))
+    response.delete_cookie(OAUTH_STATE_COOKIE_NAME, path=cookie_path(request))
+    _clear_legacy_cookies(request, response, AUTH_COOKIE_NAME, OAUTH_COOKIE_NAME, OAUTH_STATE_COOKIE_NAME)
     return response
 
 
@@ -319,7 +362,7 @@ def _oidc_redirect_uri(request: Request) -> str:
 async def oidc_start(request: Request, next: str | None = None):
     settings = request.app.state.settings
     if not settings.oidc_enabled:
-        return RedirectResponse(url="/login", status_code=303)
+        return RedirectResponse(url=app_url(request, "/login"), status_code=303)
 
     # Discover OIDC endpoints from issuer
     discovery_url = f"{settings.oidc_issuer.rstrip('/')}/.well-known/openid-configuration"
@@ -329,7 +372,7 @@ async def oidc_start(request: Request, next: str | None = None):
         oidc_config = resp.json()
 
     next_path = _safe_next_path(next)
-    state = build_oauth_state(next_path, settings.auth_secret.get_secret_value())
+    state = build_oauth_state(next_path, settings.signing_secret)
     redirect_uri = _oidc_redirect_uri(request)
     params = urlencode({
         "client_id": settings.oidc_client_id,
@@ -346,7 +389,7 @@ async def oidc_start(request: Request, next: str | None = None):
         httponly=True,
         samesite="lax",
         secure=request.url.scheme == "https",
-        path="/",
+        path=cookie_path(request),
         max_age=600,
     )
     return response
@@ -356,10 +399,10 @@ async def oidc_start(request: Request, next: str | None = None):
 async def oidc_callback(request: Request, code: str | None = None, state: str | None = None, error: str | None = None):
     settings = request.app.state.settings
     if not settings.oidc_enabled:
-        return RedirectResponse(url="/login", status_code=303)
+        return RedirectResponse(url=app_url(request, "/login"), status_code=303)
 
     cookie_state = request.cookies.get(OAUTH_STATE_COOKIE_NAME, "")
-    state_payload = parse_oauth_state(state or "", settings.auth_secret.get_secret_value()) if state and state == cookie_state else None
+    state_payload = parse_oauth_state(state or "", settings.signing_secret) if state and state == cookie_state else None
     next_path = _safe_next_path(state_payload["next"]) if state_payload else "/"
 
     if error:
@@ -442,25 +485,42 @@ async def oidc_callback(request: Request, code: str | None = None, state: str | 
             "oidc_enabled": settings.oidc_enabled,
         }, status_code=401)
 
-    response = RedirectResponse(url=next_path, status_code=303)
+    response = RedirectResponse(url=app_url(request, next_path), status_code=303)
     response.set_cookie(
         key=OAUTH_COOKIE_NAME,
-        value=build_oauth_session(username, settings.auth_secret.get_secret_value()),
-        httponly=True,
-        samesite="lax",
-        secure=request.url.scheme == "https",
-        path="/",
+        value=build_oauth_session(username, settings.signing_secret),
+        **session_cookie_attributes(request),
     )
-    response.delete_cookie(OAUTH_STATE_COOKIE_NAME, path="/")
+    response.delete_cookie(OAUTH_STATE_COOKIE_NAME, path=cookie_path(request))
+    _clear_legacy_cookies(request, response, OAUTH_COOKIE_NAME, OAUTH_STATE_COOKIE_NAME)
     return response
 
 
 # --- Page routes ---
 
 
-@router.get("/", response_class=HTMLResponse)
+@router.api_route("/", methods=["GET", "HEAD"], response_class=HTMLResponse)
 async def overview_page(request: Request):
+    """The overview for a logged-in visitor; for anyone else, the health summary.
+
+    This path is public (see the auth middleware), so the choice is made here
+    from `request.state.login` and defaults to the summary.
+    """
     templates = request.app.state.templates
+    if getattr(request.state, "login", None) is None:
+        settings = request.app.state.settings
+        summary = build_health_summary(
+            request.app.state.instance_registry,
+            getattr(request.app.state, "gateway_version", None),
+        )
+        zone = display_zone()
+        for mode in summary["modes"]:  # the page shows local time; the API keeps UTC
+            mode["since_local"] = local_time(mode["since"], zone)
+        return templates.TemplateResponse(request, "health_summary.html", {
+            "summary": summary,
+            "login_configured": settings.login_configured,
+            "no_login_help": NO_LOGIN_HELP,
+        })
     return templates.TemplateResponse(request, "overview.html", {"active_tab": "overview"})
 
 
@@ -494,7 +554,7 @@ async def logs_page(request: Request):
 async def controls_page(request: Request):
     """Redirect to state machine tab (controls are integrated there now)."""
     from fastapi.responses import RedirectResponse
-    return RedirectResponse(url="/state")
+    return RedirectResponse(url=app_url(request, "/state"))
 
 
 @router.get("/ib-status", response_class=HTMLResponse)
@@ -518,10 +578,8 @@ async def notifications_page(request: Request):
 @router.get("/vnc", response_class=HTMLResponse)
 async def vnc_page(request: Request):
     templates = request.app.state.templates
-    novnc_port = int(os.environ.get("IBCTL_NOVNC_PORT", "6080"))
     return templates.TemplateResponse(request, "vnc.html", {
         "active_tab": "vnc",
-        "novnc_port": novnc_port,
         "vnc_password": os.environ.get("VNC_SERVER_PASSWORD", ""),
     })
 
@@ -605,7 +663,16 @@ async def overview_partial(request: Request):
         gateway_version["checked_display"] = et_display(gv_state.checked_at)
         gateway_version["next_display"] = et_display(gv_next)
 
+    # The Warm restart button's state per mode (it shares its interval and ibctl's
+    # allow-list with the API). Skipped for a mode whose ibctl is not answering.
+    warm_restart = {
+        item["mode"]: await request.app.state.warm_restart.button_state(item["mode"])
+        for item in instances_data
+        if not item["error"]
+    }
+
     return templates.TemplateResponse(request, "partials/overview_content.html", {
+        "warm_restart": warm_restart,
         "instances": instances_data,
         "ib_status": ib_data,
         "scraper_info": scraper_info,
@@ -703,16 +770,19 @@ def _load_local_config() -> dict:
     if env_only:
         config["environment"] = env_only
 
-    return config
+    # The Config page and its summary line read only this masked copy.
+    return mask_identity(config)
 
 
 # Env vars with no TOML key, shown under "Runtime" when set: label, tooltip.
 ENV_ONLY_SETTINGS: dict[str, tuple[str, str]] = {
-    "TZ": ("Timezone", "Time zone of the container (an IANA name such as America/New_York). (env: TZ)"),
+    "TZ": ("Timezone", "Time zone of the container (an IANA name such as America/New_York). Separate from the "
+        "Gateway's own session zone, gateway.time_zone. (env: TZ)"),
     "AUTO_RESTART_TIME": (
         "Auto Restart Time",
-        "The Gateway's daily auto restart time, applied to its API settings. The session-down "
-        "alert holds off when an outage starts at it. (env: AUTO_RESTART_TIME)",
+        "The Gateway's daily auto restart time, in the container's TZ; ibctl converts it to the "
+        "Gateway's session zone at every login. The session-down alert holds off when an outage "
+        "starts at it. (env: AUTO_RESTART_TIME)",
     ),
     "READ_ONLY_API": ("Read-Only API", "Applied to the Gateway's API settings: the API accepts no orders. (env: READ_ONLY_API)"),
     "BYPASS_WARNING": (

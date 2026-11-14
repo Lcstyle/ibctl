@@ -27,7 +27,7 @@ use tokio::sync::mpsc;
 
 use crate::types::{ColdRestartOutcome, ColdRestartSignal, ColdRestartSkipReason, Command, Signal};
 
-use types::{ColdRestartOutcomeRecord, HitlParkReason, Interrupt, RelaunchReason, RelaunchRecord, RetryBy};
+use types::{ColdRestartOutcomeRecord, HitlParkReason, Interrupt, JvmExitRecord, RelaunchReason, RelaunchRecord, RestartTimeRecord, RetryBy};
 
 /// Select result: either an interrupt from a channel, or a completed
 /// state transition.
@@ -2656,11 +2656,15 @@ impl StateMachine {
             self.config_retries, MAX_CONFIG_RETRIES
         );
 
-        let settings = crate::handlers::api_config::ApiConfigSettings::from_env();
+        let mut settings = crate::handlers::api_config::ApiConfigSettings::from_env();
+        self.localize_restart_time(&mut settings);
 
         match crate::handlers::api_config::apply_api_config(&self.agent_client, &settings, self.config.timing.ui_tick_ms).await {
             Ok(report) => {
                 log::info!("API configuration complete");
+                if let Some(outcome) = report.auto_restart.clone() {
+                    self.record_restart_time("login", outcome);
+                }
                 self.stats.precaution_labels_not_found = self
                     .stats
                     .precaution_labels_not_found
@@ -3306,9 +3310,160 @@ impl StateMachine {
         } else {
             log::info!("No autorestart token — crash or unexpected exit");
         }
+        self.last_jvm_exit = Some(JvmExitRecord {
+            at: jiff::Zoned::now().to_string(),
+            from_state: self.state.to_string(),
+            warm: autorestart_hash.is_some(),
+        });
         self.warm_restart_pending = autorestart_hash;
         let _ = std::fs::remove_file(&self.config.agent.socket_path);
         Some(State::Restarting)
+    }
+
+    /// The zone the Gateway's session runs in, read from its `jts.ini` (what the
+    /// Gateway saved at login), else the declared zone, else UTC.
+    fn gateway_zone(&self) -> jiff::tz::TimeZone {
+        let gateway = &self.config.gateway;
+        let settings_dir = if gateway.settings_path.is_empty() { &gateway.tws_path } else { &gateway.settings_path };
+        let ini = std::fs::read_to_string(std::path::Path::new(settings_dir).join("jts.ini")).ok();
+        let name = crate::gateway_zone::effective_zone_name(Some(&gateway.time_zone), ini.as_deref());
+        jiff::tz::TimeZone::get(&name).unwrap_or_else(|_| {
+            log::warn!("Gateway zone {name:?} is not known here; using UTC");
+            jiff::tz::TimeZone::UTC
+        })
+    }
+
+    /// Type `time` (`h:mm AM|PM`, in the Gateway's own zone) into the Gateway's
+    /// auto-restart field, read it back, and record whether it took.
+    async fn set_gateway_restart(&mut self, time: String, source: &'static str) {
+        log::info!("SETRESTART: setting the auto-restart time to {time} in the Gateway's zone");
+        let settings = crate::handlers::api_config::ApiConfigSettings {
+            master_client_id: None,
+            read_only_api: None,
+            bypass_order_precautions: None,
+            allow_blind_trading: None,
+            auto_restart_time: Some(time.clone()),
+            auto_logoff_time: None,
+        };
+        let tick_ms = self.config.timing.ui_tick_ms;
+        let outcome = match crate::handlers::api_config::apply_api_config(&self.agent_client, &settings, tick_ms).await {
+            Ok(report) => report.auto_restart.unwrap_or(crate::handlers::api_config::AutoRestartOutcome {
+                requested: time.clone(),
+                applied: false,
+                error: Some("the settings dialog reported no outcome".to_string()),
+            }),
+            Err(e) => crate::handlers::api_config::AutoRestartOutcome {
+                requested: time.clone(),
+                applied: false,
+                error: Some(e.to_string()),
+            },
+        };
+        self.record_restart_time(source, outcome);
+    }
+
+    fn record_restart_time(&mut self, source: &'static str, outcome: crate::handlers::api_config::AutoRestartOutcome) {
+        match &outcome.error {
+            None => log::info!("Auto-restart time set to {} ({source})", outcome.requested),
+            Some(why) => log::error!("Auto-restart time {} not applied ({source}): {why}", outcome.requested),
+        }
+        self.last_setrestart = Some(RestartTimeRecord {
+            at: jiff::Zoned::now().to_string(),
+            source,
+            requested: outcome.requested,
+            applied: outcome.applied,
+            error: outcome.error,
+        });
+    }
+
+    /// Press a Gateway hotkey in its main window and record what happened.
+    ///
+    /// The key goes to the main window (never the first window listed, which can
+    /// be a dialog), and the dialog handler is told to expect the confirmation
+    /// prompt it causes. The agent's reply is checked: a key it could not send
+    /// is a failure, logged and shown in STATUS, not a success.
+    async fn press_hotkey(&mut self, command: &'static str, key: &'static str) {
+        let windows = match self.agent_client.list_windows().await {
+            Ok(windows) => windows,
+            Err(e) => {
+                self.record_hotkey(command, key, None, Err(format!("cannot list the Gateway's windows: {e}")));
+                return;
+            }
+        };
+        let Some(window) = crate::hotkey::main_gateway_window(&windows, self.config.auth.trading_mode) else {
+            self.record_hotkey(command, key, None, Err("the Gateway's main window is not open".to_string()));
+            return;
+        };
+        let (id, title) = (window.id, window.title.clone());
+        log::info!("{command}: pressing {key} in {title:?}");
+        self.handler_registry.hotkey_expectation.arm();
+        // The Gateway holds the key press open until its confirmation prompt is
+        // answered, and the dialog handler that answers it runs on this same
+        // loop. Waiting for the reply would stall it, so only wait a moment.
+        let outcome = match tokio::time::timeout(crate::hotkey::SEND_REPLY_WAIT, self.agent_client.send_key(id, key)).await {
+            Ok(Ok(true)) => Ok(None),
+            Ok(Ok(false)) => Err("the agent could not send the key".to_string()),
+            Ok(Err(e)) => Err(format!("the agent failed to send the key: {e}")),
+            Err(_) => Ok(Some("no reply yet: the Gateway holds the key press until its confirmation prompt is answered")),
+        };
+        self.record_hotkey(command, key, Some(title), outcome);
+    }
+
+    fn record_hotkey(
+        &mut self,
+        command: &'static str,
+        key: &'static str,
+        window: Option<String>,
+        outcome: Result<Option<&'static str>, String>,
+    ) {
+        match &outcome {
+            Ok(None) => log::info!("{command}: {key} sent"),
+            Ok(Some(note)) => log::info!("{command}: {key} sent ({note})"),
+            Err(why) => log::error!("{command} failed: {why}"),
+        }
+        self.last_hotkey = Some(crate::hotkey::HotkeyRecord {
+            at: jiff::Zoned::now().to_string(),
+            command,
+            key,
+            window,
+            outcome: if outcome.is_ok() { "sent" } else { "failed" },
+            note: outcome.as_ref().ok().copied().flatten(),
+            error: outcome.err(),
+        });
+    }
+
+    /// Read the Gateway's session zone back from its `jts.ini` (the Gateway
+    /// rewrites it at login, so after a login it is the zone the session really
+    /// runs in), record it for STATUS, and turn the configured daily restart time
+    /// from the container's zone into that zone. This runs at every login: the
+    /// Gateway stores a bare time of day, so a value converted once goes wrong at
+    /// the next daylight-saving change.
+    fn localize_restart_time(&mut self, settings: &mut crate::handlers::api_config::ApiConfigSettings) {
+        let gateway = &self.config.gateway;
+        let settings_dir = if gateway.settings_path.is_empty() { &gateway.tws_path } else { &gateway.settings_path };
+        let ini = std::fs::read_to_string(std::path::Path::new(settings_dir).join("jts.ini")).ok();
+        let report = crate::gateway_zone::zone_report(&gateway.time_zone, ini.as_deref());
+        match (&report.declared, &report.in_jts_ini) {
+            (Some(declared), seen) if seen.as_ref() != Some(declared) => log::warn!(
+                "Gateway time zone: declared {declared} but its jts.ini says {}",
+                seen.as_deref().unwrap_or("nothing")
+            ),
+            _ => log::info!("Gateway time zone in use: {}", report.effective),
+        }
+        if let Some(configured) = settings.auto_restart_time.clone() {
+            match crate::gateway_zone::restart_time_to_type(
+                &configured,
+                &report.effective,
+                &jiff::tz::TimeZone::system(),
+                jiff::Timestamp::now(),
+            ) {
+                Ok(typed) => {
+                    log::info!("Daily restart {configured} in the container's zone is {typed} in the Gateway's ({})", report.effective);
+                    settings.auto_restart_time = Some(typed);
+                }
+                Err(why) => log::warn!("Daily restart time {configured:?} typed as it is: {why}"),
+            }
+        }
+        self.gateway_time_zone = Some(report);
     }
 
     /// Single-step: wait for restart delay (deadline-based), then kill and relaunch.
@@ -3747,21 +3902,11 @@ impl StateMachine {
                 Ok(())
             }
             Command::ReconnectData => {
-                log::info!("Sending reconnect data keystroke (Ctrl+F)");
-                if let Ok(windows) = self.agent_client.list_windows().await {
-                    if let Some(win) = windows.first() {
-                        let _ = self.agent_client.send_key(win.id, "ctrl+f").await;
-                    }
-                }
+                self.press_hotkey("RECONNECTDATA", crate::hotkey::RECONNECT_DATA_KEY).await;
                 Ok(())
             }
             Command::ReconnectAccount => {
-                log::info!("Sending reconnect account keystroke (Ctrl+R)");
-                if let Ok(windows) = self.agent_client.list_windows().await {
-                    if let Some(win) = windows.first() {
-                        let _ = self.agent_client.send_key(win.id, "ctrl+r").await;
-                    }
-                }
+                self.press_hotkey("RECONNECTACCOUNT", crate::hotkey::RECONNECT_ACCOUNT_KEY).await;
                 Ok(())
             }
             Command::EnableApi => {
@@ -3871,25 +4016,13 @@ impl StateMachine {
                 Ok(())
             }
             Command::SetRestartTime(ref time_str) => {
-                log::info!("SETRESTART: setting auto-restart time to {} (UTC)", time_str);
-                let settings = crate::handlers::api_config::ApiConfigSettings {
-                    master_client_id: None,
-                    read_only_api: None,
-                    bypass_order_precautions: None,
-                    allow_blind_trading: None,
-                    auto_restart_time: Some(time_str.clone()),
-                    auto_logoff_time: None,
-                };
-                let tick_ms = self.config.timing.ui_tick_ms;
-                match crate::handlers::api_config::apply_api_config(
-                    &self.agent_client, &settings, tick_ms,
-                ).await {
-                    // SETRESTART only touches the auto-restart-time field —
-                    // it doesn't loop precaution labels, so the report's
-                    // counters are always zero here. Log the outcome and move on.
-                    Ok(_report) => log::info!("SETRESTART: auto-restart time set to {}", time_str),
-                    Err(e) => log::error!("SETRESTART failed: {}", e),
-                }
+                self.set_gateway_restart(time_str.clone(), "time").await;
+                Ok(())
+            }
+            Command::SetRestartNow => {
+                let zone = self.gateway_zone();
+                let time = crate::gateway_zone::next_restart_minute(jiff::Timestamp::now(), &zone);
+                self.set_gateway_restart(time, "now").await;
                 Ok(())
             }
             _ => Ok(()),
@@ -8165,5 +8298,204 @@ login_dialog_timeout_secs = 0
             "after entering Connected, no handler — least of all LoginHandler —              should match the main Gateway window; got {:?}",
             result
         );
+    }
+
+    // ----------------------------------------------------------------
+    // Gateway hotkeys (RECONNECTDATA / RECONNECTACCOUNT)
+    // ----------------------------------------------------------------
+
+    fn hotkey_window(id: u64, title: &str, width: i32, height: i32) -> WindowInfo {
+        WindowInfo {
+            id: WindowId(id),
+            title: title.into(),
+            class: "ibgateway.aw".into(),
+            bounds: Some(crate::agent_client::Bounds { x: 0, y: 0, width, height }),
+            // As the real agent lists them: no `visible` field, so it parses as false.
+            visible: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_reconnect_data_presses_ctrl_alt_f_in_the_main_window_not_a_dialog() {
+        let mock = MockAgent {
+            windows: vec![hotkey_window(1, "IBKR Gateway", 450, 170), hotkey_window(2, "IBKR Gateway [PAPER]", 700, 558)],
+            ..MockAgent::default()
+        };
+        let keys = mock.keys_sent.clone();
+        let mut sm = make_test_state_machine(mock);
+
+        sm.handle_command(Command::ReconnectData).await.unwrap();
+
+        assert_eq!(*keys.lock().unwrap(), vec![(2u64, "ctrl alt F".to_string())]);
+        let record = sm.last_hotkey.clone().unwrap();
+        assert_eq!((record.command, record.outcome), ("RECONNECTDATA", "sent"));
+        assert_eq!(record.window.as_deref(), Some("IBKR Gateway [PAPER]"));
+        assert!(
+            sm.handler_registry.hotkey_expectation.consume(Duration::from_secs(30)),
+            "the prompt the key causes must be expected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_reconnect_account_presses_ctrl_alt_r() {
+        let mock = MockAgent { windows: vec![hotkey_window(2, "IBKR Gateway [PAPER]", 700, 558)], ..MockAgent::default() };
+        let keys = mock.keys_sent.clone();
+        let mut sm = make_test_state_machine(mock);
+
+        sm.handle_command(Command::ReconnectAccount).await.unwrap();
+
+        assert_eq!(*keys.lock().unwrap(), vec![(2u64, "ctrl alt R".to_string())]);
+        assert_eq!(sm.last_hotkey.as_ref().unwrap().command, "RECONNECTACCOUNT");
+    }
+
+    #[tokio::test]
+    async fn test_a_key_the_agent_could_not_send_is_a_reported_failure() {
+        let mock = MockAgent {
+            windows: vec![hotkey_window(2, "IBKR Gateway [PAPER]", 700, 558)],
+            send_key_result: false,
+            ..MockAgent::default()
+        };
+        let mut sm = make_test_state_machine(mock);
+
+        sm.handle_command(Command::ReconnectData).await.unwrap();
+
+        let record = sm.last_hotkey.clone().unwrap();
+        assert_eq!(record.outcome, "failed");
+        assert!(record.error.unwrap().contains("could not send the key"));
+    }
+
+    #[tokio::test]
+    async fn test_no_main_window_means_no_key_and_a_reported_failure() {
+        let mock = MockAgent { windows: vec![hotkey_window(1, "IBKR Gateway", 450, 170)], ..MockAgent::default() };
+        let keys = mock.keys_sent.clone();
+        let mut sm = make_test_state_machine(mock);
+
+        sm.handle_command(Command::ReconnectData).await.unwrap();
+
+        assert!(keys.lock().unwrap().is_empty(), "nothing is sent to a dialog");
+        let record = sm.last_hotkey.clone().unwrap();
+        assert_eq!(record.outcome, "failed");
+        assert!(record.error.unwrap().contains("main window"));
+        assert!(!sm.handler_registry.hotkey_expectation.consume(Duration::from_secs(30)), "nothing was pressed, so nothing is expected");
+    }
+
+    // ----------------------------------------------------------------
+    // SETRESTART: next minute or a given time, read back, recorded
+    // ----------------------------------------------------------------
+
+    fn restart_dialog_mock(field_text: &str) -> MockAgent {
+        MockAgent {
+            windows: vec![
+                hotkey_window(1, "IBKR Gateway [PAPER]", 700, 558),
+                hotkey_window(2, "Configuration", 800, 600),
+            ],
+            dump_after_type: Some(serde_json::json!({"textfields": [{"index": 0, "text": field_text}]})),
+            ..MockAgent::default()
+        }
+    }
+
+    fn sm_with_fast_ui(mock: MockAgent) -> StateMachine {
+        make_test_state_machine_with(mock, |cfg| cfg.timing.ui_tick_ms = 1)
+    }
+
+    #[tokio::test]
+    async fn test_setrestart_with_a_time_records_that_it_was_applied() {
+        let mut sm = sm_with_fast_ui(restart_dialog_mock("5:05"));
+
+        sm.handle_command(Command::SetRestartTime("5:05 PM".to_string())).await.unwrap();
+
+        let record = sm.last_setrestart.clone().unwrap();
+        assert_eq!((record.source, record.requested.as_str(), record.applied), ("time", "5:05 PM", true));
+        assert_eq!(record.error, None);
+    }
+
+    #[tokio::test]
+    async fn test_a_restart_time_the_field_did_not_keep_is_recorded_as_not_applied() {
+        let mut sm = sm_with_fast_ui(restart_dialog_mock("9:00"));
+
+        sm.handle_command(Command::SetRestartTime("5:05 PM".to_string())).await.unwrap();
+
+        let record = sm.last_setrestart.clone().unwrap();
+        assert!(!record.applied);
+        assert!(record.error.unwrap().contains("instead of"));
+    }
+
+    #[tokio::test]
+    async fn test_a_bare_setrestart_types_the_next_whole_minute() {
+        let zone = jiff::tz::TimeZone::UTC;
+        let before = crate::gateway_zone::next_restart_minute(jiff::Timestamp::now(), &zone);
+        let field = before.split(' ').next().unwrap().to_string();
+        let mut sm = sm_with_fast_ui(restart_dialog_mock(&field));
+
+        sm.handle_command(Command::SetRestartNow).await.unwrap();
+
+        let after = crate::gateway_zone::next_restart_minute(jiff::Timestamp::now(), &zone);
+        let record = sm.last_setrestart.clone().unwrap();
+        assert_eq!(record.source, "now");
+        assert!(record.requested == before || record.requested == after, "{} not in {{{before}, {after}}}", record.requested);
+    }
+
+    #[tokio::test]
+    async fn test_setrestart_with_no_configuration_dialog_is_recorded_as_failed() {
+        let mock = MockAgent { windows: vec![hotkey_window(1, "IBKR Gateway [PAPER]", 700, 558)], ..MockAgent::default() };
+        let mut sm = make_test_state_machine_with(mock, |cfg| cfg.timing.ui_tick_ms = 0);
+
+        sm.handle_command(Command::SetRestartTime("5:05 PM".to_string())).await.unwrap();
+
+        let record = sm.last_setrestart.clone().unwrap();
+        assert!(!record.applied);
+        assert!(record.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_status_says_a_gateway_exit_with_a_saved_session_was_warm() {
+        let (mut sm, _dir) =
+            make_test_state_machine_with_dead_jvm_and_token(MockAgent::default(), "abcdefghijklmnopabcdefghijklmnopabcdefgh");
+        sm.state = State::Connected;
+
+        assert!(sm.check_jvm_exit().is_some());
+
+        let record = sm.last_jvm_exit.clone().unwrap();
+        assert!(record.warm, "a token on disk means the restart reuses the session");
+        assert_eq!(record.from_state, "Connected");
+    }
+
+    #[tokio::test]
+    async fn test_status_says_a_gateway_exit_without_a_saved_session_was_cold() {
+        let (mut sm, _dir) = make_test_state_machine_with_dead_jvm_no_token(MockAgent::default());
+        sm.state = State::Connected;
+
+        assert!(sm.check_jvm_exit().is_some());
+
+        assert!(!sm.last_jvm_exit.clone().unwrap().warm);
+    }
+
+    #[tokio::test]
+    async fn test_nothing_is_recorded_while_the_gateway_is_still_running() {
+        let mut sm = make_test_state_machine(MockAgent::default());
+
+        assert!(sm.check_jvm_exit().is_none());
+
+        assert!(sm.last_jvm_exit.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_a_key_press_the_gateway_holds_open_behind_its_prompt_is_not_a_failure_and_does_not_stall() {
+        let mock = MockAgent {
+            windows: vec![hotkey_window(2, "IBKR Gateway [PAPER]", 700, 558)],
+            send_key_delay: Some(Duration::from_secs(600)),
+            ..MockAgent::default()
+        };
+        let mut sm = make_test_state_machine(mock);
+        let started = tokio::time::Instant::now();
+
+        sm.handle_command(Command::ReconnectData).await.unwrap();
+
+        assert!(started.elapsed() < Duration::from_secs(5), "must not wait out the agent's reply: {:?}", started.elapsed());
+        let record = sm.last_hotkey.clone().unwrap();
+        assert_eq!(record.outcome, "sent");
+        assert!(record.note.unwrap().contains("confirmation prompt"));
+        assert_eq!(record.error, None);
+        assert!(sm.handler_registry.hotkey_expectation.consume(Duration::from_secs(30)));
     }
 }

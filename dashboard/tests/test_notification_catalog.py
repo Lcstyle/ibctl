@@ -15,6 +15,7 @@ from bs4 import BeautifulSoup
 from httpx import ASGITransport, AsyncClient
 
 from app.main import create_app
+from tests.auth_helpers import log_in
 from app.services.notification_catalog import EVENTS, GROUPS, catalog_json
 from app.services.notification_service import NotificationConfig
 
@@ -102,6 +103,7 @@ async def test_the_config_api_serves_the_catalog(settings):
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test"
     ) as c:
+        await log_in(c)
         d = (await c.get("/api/v1/notifications/config")).json()
 
     assert d["ok"] is True

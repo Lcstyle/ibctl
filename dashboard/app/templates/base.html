@@ -7,6 +7,13 @@
     <link rel="stylesheet" href="{{ root_path }}/static/style.css?v=28">
     <script src="{{ root_path }}/static/htmx.min.js"></script>
     <script>var ROOT_PATH = '{{ root_path }}';</script>
+    {% if request.state.login %}
+    {# Idle sign-out and the heartbeat that keeps an active person signed in (static/session.js).
+       Only a logged-in page gets it; 0 seconds turns its timers off. #}
+    <script src="{{ root_path }}/static/session.js?v=1" defer
+            data-idle-seconds="{{ (session_idle_minutes or 0) * 60 }}"
+            data-root="{{ root_path }}"></script>
+    {% endif %}
     <style>
     /* sr-only utility — visually hidden but announced by screen readers. */
     .sr-only {
@@ -28,6 +35,12 @@
         outline-offset: 2px;
     }
     .tab:focus-visible { outline-offset: -2px; }
+    .logout-form { display: flex; align-items: center; margin: 0 0 0 12px; flex-shrink: 0; }
+    .logout-btn {
+        background: transparent; border: 1px solid #27272a; border-radius: 3px;
+        color: #a1a1aa; font-size: 11px; padding: 2px 8px; cursor: pointer;
+    }
+    .logout-btn:hover { color: #e4e4e7; border-color: #3f3f46; }
     </style>
 </head>
 <body>
@@ -73,6 +86,7 @@
             <a href="{{ root_path }}/state" class="tab {% if active_tab == 'state' %}active{% endif %}">State</a>
             <a href="{{ root_path }}/ib-status" class="tab {% if active_tab == 'ib-status' %}active{% endif %}">IB Status</a>
             <a href="{{ root_path }}/config" class="tab {% if active_tab == 'config' %}active{% endif %}">Config</a>
+            <a href="{{ root_path }}/api-access" class="tab {% if active_tab == 'api-access' %}active{% endif %}">API access</a>
             <a href="{{ root_path }}/logs" class="tab {% if active_tab == 'logs' %}active{% endif %}">Logs</a>
             <a href="{{ root_path }}/gateway" class="tab {% if active_tab == 'gateway' %}active{% endif %}">Gateway</a>
             <a href="{{ root_path }}/notifications" class="tab {% if active_tab == 'notifications' %}active{% endif %}">Alerts</a>
@@ -94,6 +108,12 @@
                     <option value="300">5m</option>
                 </select>
             </span>
+            {% if request.state.login %}
+            {# Sign out: a plain form post, so it works without JS. The tooltip says who is signed in. #}
+            <form method="post" action="{{ root_path }}/logout" class="logout-form">
+                <button type="submit" class="logout-btn" title="Signed in as {{ request.state.login.name }}">Log out</button>
+            </form>
+            {% endif %}
         </nav>
     </header>
     <main{% block main_attrs %}{% endblock %}>

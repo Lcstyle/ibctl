@@ -160,6 +160,19 @@ impl Supervisor {
             self.config.settings_path.clone()
         };
 
+        // The Gateway takes its session time zone from this directory's jts.ini
+        // at startup, and rewrites that file at login. Declaring the zone here,
+        // before every launch, is what makes it hold across cold, warm and
+        // crash relaunches alike.
+        match crate::gateway_zone::prepare_launch(Path::new(&settings_path), &self.config.time_zone) {
+            Ok(Some(crate::gateway_zone::Enforced::AlreadySet)) => {
+                log::info!("Gateway time zone: jts.ini already says {}", self.config.time_zone);
+            }
+            Ok(Some(done)) => log::info!("Gateway time zone set to {} in jts.ini ({:?})", self.config.time_zone, done),
+            Ok(None) => {}
+            Err(why) => log::error!("Gateway time zone not applied: {why}"),
+        }
+
         // Build the command
         let main_class = match self.config.program {
             GatewayProgram::Tws => TWS_MAIN_CLASS,
@@ -180,6 +193,12 @@ impl Supervisor {
         for flag in MODULE_ACCESS_FLAGS {
             cmd.arg(flag);
         }
+
+        // Options the installer's own launcher passes
+        for opt in &plan.installer_opts {
+            cmd.arg(opt);
+        }
+        log::info!("{} Java options added from the installer", plan.installer_opts.len());
 
         // Classpath
         cmd.arg("-cp").arg(&plan.classpath);

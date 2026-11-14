@@ -16,9 +16,9 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.config import DashboardSettings
 from app.domain.models import StateMachineState
 from app.main import create_app
+from tests.auth_helpers import authed_settings
 from app.services import hitl_tokens
 
 # ---------------------------------------------------------------------------
@@ -33,14 +33,9 @@ def _make_valid_token(mode: str = "paper") -> str:
 
 
 def _make_app():
-    settings = DashboardSettings(
-        port=8080,
-        token="",
-        debug_mode=False,
-        ibctl_host="127.0.0.1",
-        ibctl_port=7462,
-    )
-    return create_app(settings=settings)
+    # A dashboard password is configured and the client stays signed out:
+    # a notification link works without a login.
+    return create_app(settings=authed_settings())
 
 
 # ---------------------------------------------------------------------------

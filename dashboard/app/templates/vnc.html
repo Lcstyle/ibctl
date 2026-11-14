@@ -15,12 +15,10 @@
     let rfb;
     const statusEl = document.getElementById('vnc-status');
 
-    // When loaded over HTTPS, route WebSocket through nginx (wss://)
-    // to avoid mixed-content blocking. Falls back to direct ws:// otherwise.
-    const isSecure = location.protocol === 'https:';
-    const url = isSecure
-        ? 'wss://' + location.host + ROOT_PATH + '/websockify'
-        : 'ws://' + location.hostname + ':' + {{ novnc_port }};
+    // The dashboard proxies the VNC websocket (after the login check): same
+    // host, same prefix as this page, wss:// whenever the page is https.
+    const scheme = location.protocol === 'https:' ? 'wss://' : 'ws://';
+    const url = scheme + location.host + ROOT_PATH + '/websockify';
 
     function connect() {
         if (rfb) {

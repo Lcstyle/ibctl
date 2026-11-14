@@ -194,8 +194,8 @@ fn get_gateway_advisory(host: &str, port: u16) -> Option<serde_json::Value> {
 | `WINDOWS` | JSON | Visible Gateway windows and tabs |
 | `STOP` | `OK` | Graceful shutdown |
 | `RESTART` | `OK` | Restart Gateway JVM |
-| `RECONNECTDATA` | `OK` | Reconnect market data (Ctrl+F) |
-| `RECONNECTACCOUNT` | `OK` | Reconnect account (Ctrl+R) |
+| `RECONNECTDATA` | `OK` | Reconnect market data (Ctrl+Alt+F) |
+| `RECONNECTACCOUNT` | `OK` | Reconnect account (Ctrl+Alt+R) |
 | `PAUSE` | `OK` | Freeze state machine (Direct Drive mode) |
 | `RESUME` | `OK` | Resume automatic transitions |
 | `SETSTATE <Name>` | `OK` | Force state (e.g., `SETSTATE Connected`) |
@@ -229,6 +229,11 @@ instance on port 7462. No special handling needed.
 The command server respects the `control_from` configuration, which accepts
 exact IP addresses, CIDR notation (e.g., `172.0.0.0/8`), and wildcards (`*`).
 Connections from unauthorized IPs are rejected.
+
+Separately, `command_server.allowed_commands` (env `IBCTL_ALLOWED_COMMANDS`) lists
+the action commands the server accepts, for every caller; others get
+`ERROR command not allowed by command_server.allowed_commands`. Queries are always
+allowed. The default is every action command; see `docs/env-vars.md`.
 
 ## Graceful Degradation
 

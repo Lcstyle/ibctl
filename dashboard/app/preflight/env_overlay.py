@@ -152,8 +152,17 @@ _INT_FIELDS = {
     "dashboard.version_probe_client_id",
 }
 
+# Whole-number settings only the dashboard reads. Unlike `_INT_FIELDS` there is no
+# Rust fallback to mirror, and a typo must not quietly become the default of a
+# security setting, so a value that isn't a whole number is kept as text for
+# preflight to reject by name.
+_STRICT_INT_FIELDS = {
+    "dashboard.session_idle_minutes",
+}
+
 _COMMA_LIST_FIELDS = {
     "command_server.control_from",
+    "command_server.allowed_commands",
 }
 
 # Comma-separated whole numbers, parsed the way Rust does: entries that aren't
@@ -213,6 +222,11 @@ def apply_env_overrides(config: dict) -> dict:
                 # hard-error (Pydantic `ge=0` would otherwise fire).
                 continue
             _set_nested(config, toml_path, parsed)
+        elif toml_path in _STRICT_INT_FIELDS:
+            try:
+                _set_nested(config, toml_path, int(raw))
+            except ValueError:
+                _set_nested(config, toml_path, raw)
         elif toml_path in _COMMA_LIST_FIELDS:
             _set_nested(config, toml_path, [s.strip() for s in raw.split(",")])
         elif toml_path in _COMMA_INT_LIST_FIELDS:

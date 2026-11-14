@@ -113,17 +113,21 @@ done
 echo "Xvfb ready"
 
 # Optional VNC
+# x11vnc listens on the container's interfaces so that a plain VNC client can
+# reach 5900 where compose publishes it (IBCTL_VNC_BIND, loopback by default).
 if [ -n "${VNC_SERVER_PASSWORD:-}" ]; then
     echo "Starting VNC server"
     x11vnc -ncache_cr -display :1 -forever -shared -bg -noipv6 \
         -passwd "$VNC_SERVER_PASSWORD" &
 fi
 
-# Start websockify for noVNC (websocket proxy to VNC)
+# Start websockify for noVNC (websocket proxy to VNC). It listens on loopback
+# only and is not published: the dashboard serves /websockify itself and relays
+# to this port once the visitor is logged in.
 if [ -n "${VNC_SERVER_PASSWORD:-}" ]; then
     NOVNC_PORT="${IBCTL_NOVNC_PORT:-6080}"
-    echo "Starting websockify on port ${NOVNC_PORT} -> VNC :5900"
-    websockify --daemon ${NOVNC_PORT} localhost:5900
+    echo "Starting websockify on 127.0.0.1:${NOVNC_PORT} -> VNC :5900"
+    websockify --daemon "127.0.0.1:${NOVNC_PORT}" localhost:5900
 fi
 
 # Start dashboard (FastAPI) — optional, disabled by default.
@@ -255,34 +259,6 @@ else
     echo "Dashboard disabled (set IBCTL_DASHBOARD_ENABLED=true to enable)"
 fi
 
-# Convert AUTO_RESTART_TIME from local time (TZ) to UTC
-# IB Gateway always interprets this time in UTC regardless of TIME_ZONE setting
-# See: https://github.com/IbcAlpha/IBC/issues/245
-if [ -n "${AUTO_RESTART_TIME:-}" ] && [ -n "${TZ:-}" ] && [ "$TZ" != "Etc/UTC" ] && [ "$TZ" != "UTC" ]; then
-    UTC_RESTART=$(python3 -c "
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
-import sys
-try:
-    local_tz = ZoneInfo('${TZ}')
-    utc = ZoneInfo('UTC')
-    # Parse the time (e.g. '05:05 PM')
-    t = datetime.strptime('${AUTO_RESTART_TIME}', '%I:%M %p')
-    # Attach today's date in local timezone
-    now = datetime.now(local_tz)
-    local_dt = now.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
-    # Convert to UTC
-    utc_dt = local_dt.astimezone(utc)
-    print(utc_dt.strftime('%I:%M %p').lstrip('0'))
-except Exception as e:
-    print('', file=sys.stderr)
-    sys.exit(1)
-" 2>/dev/null) && {
-        echo "Auto restart: ${AUTO_RESTART_TIME} ${TZ} -> ${UTC_RESTART} UTC"
-        export AUTO_RESTART_TIME="$UTC_RESTART"
-    }
-fi
-
 # Create jts.ini helper — ensures UseSSL=true and API-only mode
 create_jts_ini() {
     local config_dir="$1"
@@ -297,12 +273,8 @@ create_jts_ini() {
         else
             sed -i '/^\[IBGateway\]/a ReadOnlyApi=no' "$config_dir/jts.ini"
         fi
-        # NOTE: Gateway defaults to Africa/Abidjan (UTC) when running headless
-        # and overwrites jts.ini on every login (recreates the file, so chmod
-        # is useless). This is a known IB Gateway bug — gnzsnz documents it.
-        # AUTO_RESTART_TIME must be specified in UTC, not local time.
-        # See: https://github.com/IbcAlpha/IBC/issues/245
-        # See: https://github.com/gnzsnz/ib-gateway-docker/issues/43
+        # The [Logon] TimeZone line is written by ibctl before each launch
+        # when TIME_ZONE is set; it is left alone otherwise.
     fi
     if [ ! -f "$config_dir/jts.ini" ]; then
         echo "Creating jts.ini in $config_dir"
@@ -318,7 +290,6 @@ ReadOnlyApi=no
 
 [Logon]
 Locale=en
-TimeZone=${TIME_ZONE:-America/New_York}
 displayedproxymsg=1
 UseSSL=true
 s3store=true

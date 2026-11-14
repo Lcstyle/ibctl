@@ -95,6 +95,70 @@ const PRECAUTION_LABELS: &[&str] = &[
 pub struct ApiConfigReport {
     pub precaution_labels_not_found: u32,
     pub read_only_api_label_not_found: u32,
+    /// What happened to the auto-restart time, when one was set.
+    pub auto_restart: Option<AutoRestartOutcome>,
+}
+
+/// Whether the auto-restart time reached the Gateway's settings dialog.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AutoRestartOutcome {
+    /// The time asked for, as typed (`h:mm AM|PM`).
+    pub requested: String,
+    /// Every control was found and the time field reads what was typed.
+    pub applied: bool,
+    pub error: Option<String>,
+}
+
+/// Judge one attempt to set the auto-restart time from what each step reported.
+/// `shown` is the time field's text read back after typing.
+fn restart_outcome(
+    requested: &str,
+    time_val: &str,
+    am_pm: &str,
+    typed: bool,
+    am_pm_clicked: bool,
+    option_clicked: bool,
+    shown: Option<&str>,
+) -> AutoRestartOutcome {
+    let same = |a: &str, b: &str| a.trim().trim_start_matches('0') == b.trim().trim_start_matches('0');
+    let problem = if !typed {
+        Some("the time field was not found".to_string())
+    } else if !am_pm_clicked {
+        Some(format!("the {am_pm} choice was not found"))
+    } else if !option_clicked {
+        Some("the Auto restart option was not found".to_string())
+    } else {
+        match shown {
+            None => Some("the time field could not be read back".to_string()),
+            Some(text) if !same(text, time_val) => {
+                Some(format!("the time field reads {text:?} instead of {time_val:?}"))
+            }
+            Some(_) => None,
+        }
+    };
+    AutoRestartOutcome { requested: requested.to_string(), applied: problem.is_none(), error: problem }
+}
+
+/// Type `restart_time` (`h:mm AM|PM`) into the Lock and Exit page of the open
+/// settings dialog `cid`, turn the option on, and read the field back.
+async fn apply_auto_restart(client: &AgentClient, cid: WindowId, restart_time: &str, tick_ms: u64) -> AutoRestartOutcome {
+    let (time_val, am_pm) = parse_time_with_ampm(restart_time);
+    log::info!("Setting Auto Restart: {} {}", time_val, am_pm);
+    let typed = matches!(client.type_text(cid, 0, time_val).await, Ok(true));
+    let am_pm_clicked = matches!(client.click_button(cid, am_pm).await, Ok(true));
+    let option_clicked = matches!(client.click_button(cid, "Auto restart").await, Ok(true));
+    tick(tick_ms).await;
+    let shown = client
+        .dump_components(cid)
+        .await
+        .ok()
+        .and_then(|dump| dump["textfields"][0]["text"].as_str().map(str::to_string));
+    let outcome = restart_outcome(restart_time, time_val, am_pm, typed, am_pm_clicked, option_clicked, shown.as_deref());
+    match &outcome.error {
+        None => log::info!("Auto Restart set: the field reads {time_val}"),
+        Some(why) => log::error!("Auto Restart {restart_time:?} not applied: {why}"),
+    }
+    outcome
 }
 
 /// Gateway version string used only for diagnostic warn logs on label drift.
@@ -286,12 +350,7 @@ pub async fn apply_api_config(
         tick(tick_ms).await;
 
         if let Some(ref restart_time) = settings.auto_restart_time {
-            let (time_val, am_pm) = parse_time_with_ampm(restart_time);
-            log::info!("Setting Auto Restart: {} {}", time_val, am_pm);
-            let _ = client.type_text(cid, 0, time_val).await;
-            let _ = client.click_button(cid, am_pm).await;
-            let _ = client.click_button(cid, "Auto restart").await;
-            tick(tick_ms).await;
+            report.auto_restart = Some(apply_auto_restart(client, cid, restart_time, tick_ms).await);
             dismiss_popups(client, cid).await;
         } else if let Some(ref logoff_time) = settings.auto_logoff_time {
             let (time_val, am_pm) = parse_time_with_ampm(logoff_time);
@@ -516,5 +575,66 @@ mod tests {
             .expect("mock cannot fail");
         assert!(!miss.found);
         assert!(miss.error.is_some());
+    }
+
+    // --- auto-restart time: every step checked, the field read back ---
+
+    fn staged(dump: serde_json::Value) -> AgentClient {
+        AgentClient::mock(MockAgent { dump_after_type: Some(dump), ..Default::default() })
+    }
+
+    #[tokio::test]
+    async fn an_auto_restart_time_that_reads_back_as_typed_is_applied() {
+        let client = staged(serde_json::json!({"textfields": [{"index": 0, "text": "10:05"}]}));
+
+        let outcome = apply_auto_restart(&client, WindowId(1), "10:05 PM", 0).await;
+
+        assert_eq!(outcome, AutoRestartOutcome { requested: "10:05 PM".into(), applied: true, error: None });
+    }
+
+    #[tokio::test]
+    async fn a_leading_zero_does_not_make_the_read_back_differ() {
+        let client = staged(serde_json::json!({"textfields": [{"index": 0, "text": "05:05"}]}));
+        assert!(apply_auto_restart(&client, WindowId(1), "5:05 PM", 0).await.applied);
+    }
+
+    #[tokio::test]
+    async fn a_field_that_reads_something_else_is_not_applied_and_says_so() {
+        let client = staged(serde_json::json!({"textfields": [{"index": 0, "text": "9:00"}]}));
+
+        let outcome = apply_auto_restart(&client, WindowId(1), "10:05 PM", 0).await;
+
+        assert!(!outcome.applied);
+        assert!(outcome.error.unwrap().contains("\"9:00\" instead of \"10:05\""));
+    }
+
+    #[tokio::test]
+    async fn a_field_that_cannot_be_read_back_is_not_applied() {
+        let client = staged(serde_json::json!({"textfields": []}));
+        let outcome = apply_auto_restart(&client, WindowId(1), "10:05 PM", 0).await;
+        assert!(!outcome.applied);
+        assert!(outcome.error.unwrap().contains("read back"));
+    }
+
+    #[tokio::test]
+    async fn a_missing_control_is_named_and_not_applied() {
+        let client = AgentClient::mock(MockAgent {
+            type_text_found: false,
+            dump_after_type: Some(serde_json::json!({"textfields": [{"index": 0, "text": "10:05"}]})),
+            ..Default::default()
+        });
+        let outcome = apply_auto_restart(&client, WindowId(1), "10:05 PM", 0).await;
+        assert!(!outcome.applied);
+        assert!(outcome.error.unwrap().contains("time field was not found"));
+
+        let mut missing = std::collections::HashSet::new();
+        missing.insert("PM".to_string());
+        let client = AgentClient::mock(MockAgent {
+            click_not_found: missing,
+            dump_after_type: Some(serde_json::json!({"textfields": [{"index": 0, "text": "10:05"}]})),
+            ..Default::default()
+        });
+        let outcome = apply_auto_restart(&client, WindowId(1), "10:05 PM", 0).await;
+        assert!(outcome.error.unwrap().contains("PM choice was not found"));
     }
 }

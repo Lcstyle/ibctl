@@ -14,6 +14,7 @@ import re
 from pathlib import Path as _Path
 from typing import Annotated, ClassVar, Literal
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import (
     BaseModel,
@@ -44,6 +45,9 @@ IbStatusRegion = Literal["NA", "EU", "APAC"]
 # PortNumber consolidates the ge=1, le=65535 constraint that was duplicated
 # across 8 port fields — refactor slips re-open port=0 acceptance.
 PortNumber = Annotated[int, Field(ge=1, le=65535)]
+
+# Shape of an IANA time zone name; same pattern as Pkl's OptionalTimeZone.
+_TIME_ZONE_SHAPE = re.compile(r"UTC|GMT|[A-Za-z]+(/[A-Za-z0-9][A-Za-z0-9_+-]*){1,2}")
 
 # --- Config section models ---
 
@@ -180,6 +184,10 @@ class GatewayConfig(BaseModel):
     tws_path: str = "/home/ibgateway/Jts"
     tws_settings_path: str = ""
     tws_major_vrsn: str = ""
+    # IB Gateway's session time zone: an IANA name, or "" to leave jts.ini alone.
+    time_zone: str = ""
+    time_zone_live: str = ""
+    time_zone_paper: str = ""
     java_heap_size: int = Field(default=768, ge=64)
     gateway_or_tws: GatewayProgram = "gateway"
     live_api_port: PortNumber = 4001
@@ -219,6 +227,33 @@ class GatewayConfig(BaseModel):
             )
         return v
 
+    @field_validator("time_zone", "time_zone_live", "time_zone_paper")
+    @classmethod
+    def _time_zone_known(cls, v: str, info) -> str:
+        """Empty, or an IANA zone name the tz database knows.
+
+        Empty means ibctl leaves the Gateway's jts.ini alone. The shape check
+        is the one config/pkl/types.pkl::OptionalTimeZone applies (Pkl cannot
+        read the tz database); the lookup then rejects names that fit the
+        shape but name no zone.
+        """
+        if not v:
+            return v
+        env = ENV_MAP[f"gateway.{info.field_name}"]
+        if not _TIME_ZONE_SHAPE.fullmatch(v):
+            raise ValueError(
+                f"gateway.{info.field_name} must be empty or an IANA time zone name "
+                f"such as America/New_York, got {v!r}. Set {env} accordingly."
+            )
+        try:
+            ZoneInfo(v)
+        except (ZoneInfoNotFoundError, ValueError, OSError):
+            raise ValueError(
+                f"gateway.{info.field_name}={v!r} is not a time zone the tz database "
+                f"knows. Use an IANA name such as America/New_York — env: {env}."
+            ) from None
+        return v
+
 
 class SessionConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -244,6 +279,15 @@ class SessionConfig(BaseModel):
         return self
 
 
+# Action commands ibctl's TCP command server can refuse, by wire name. Mirrors
+# ACTION_COMMANDS in ibctl/src/command_access.rs (a test keeps them in step).
+ACTION_COMMANDS: tuple[str, ...] = (
+    "STOP", "START", "RESTART", "RECONNECTDATA", "RECONNECTACCOUNT", "ENABLEAPI",
+    "EXIT", "RESTARTSOCAT", "PAUSE", "RESUME", "HITL_RESUME", "RESUME_RECONNECT",
+    "MAINT_HOLD", "MAINT_RELEASE", "SETSTATE", "IBSTATUS", "SETRESTART",
+)
+
+
 class CommandServerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -253,6 +297,9 @@ class CommandServerConfig(BaseModel):
     bind_address: str = "0.0.0.0"
     # ibctl refuses every peer when the list is empty (command_server.rs is_allowed).
     control_from: list[str] = Field(default=["127.0.0.1", "172.0.0.0/8"], min_length=1)
+    # Action commands ibctl accepts. Empty means the default (all of them); the
+    # names mirror ACTION_COMMANDS in ibctl/src/command_access.rs.
+    allowed_commands: list[str] = Field(default_factory=lambda: list(ACTION_COMMANDS))
 
     @field_validator("bind_address")
     @classmethod
@@ -289,6 +336,31 @@ class CommandServerConfig(BaseModel):
                     "(e.g. '127.0.0.1,172.0.0.0/8')."
                 ) from exc
         return v
+
+    @field_validator("allowed_commands")
+    @classmethod
+    def _allowed_commands_valid(cls, v: list[str]) -> list[str]:
+        """Names are trimmed, upper-cased and de-duplicated; blanks are dropped.
+
+        An unknown name would silently match nothing and leave the caller
+        locked out of a command it expects, so reject it with the valid set.
+        Queries are always allowed and are not names for this list.
+        """
+        names: list[str] = []
+        for entry in v:
+            name = entry.strip().upper()
+            if not name:
+                continue
+            if name not in ACTION_COMMANDS:
+                raise ValueError(
+                    f"command_server.allowed_commands entry {entry!r} is not an action command. "
+                    f"Valid names: {', '.join(ACTION_COMMANDS)}. "
+                    "Queries (STATUS, STATE, CONFIG, LOGS, WINDOWS, SUBSCRIBE) are always allowed. "
+                    "Set IBCTL_ALLOWED_COMMANDS to a comma-separated list of those names, or leave it empty for all."
+                )
+            if name not in names:
+                names.append(name)
+        return names
 
 
 class AgentConfig(BaseModel):
@@ -519,6 +591,26 @@ class DashboardConfig(BaseModel):
     session_down_renag_minutes: int = Field(default=60, ge=0)
     scheduled_restart_grace_minutes: int = Field(default=20, ge=0)
     version_probe_client_id: int = Field(default=9172, ge=0, le=2147483640)
+    # Descriptions: config/pkl/types.pkl::DashboardConfig.sessionIdleMinutes.
+    session_idle_minutes: int = Field(default=5, ge=0, le=1440)
+
+    @field_validator("session_idle_minutes", mode="before")
+    @classmethod
+    def _session_idle_minutes_is_whole_minutes_in_range(cls, v):
+        """Whole minutes, 0..1440, or an error that names the env var.
+
+        The overlay turns IBCTL_SESSION_IDLE_MINUTES into an int when it is one
+        and hands anything else over as text, so "abc" and "1.5" land here
+        rather than quietly becoming the default of a setting that decides when
+        a login ends. A quoted number or a float in the TOML is refused too.
+        """
+        if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 1440:
+            raise ValueError(
+                f"dashboard.session_idle_minutes must be a whole number of minutes from 0 to 1440 "
+                f"(0 turns the idle logout off), got {v!r}. Set IBCTL_SESSION_IDLE_MINUTES to a "
+                "number in that range, or leave it empty for the default (5)."
+            )
+        return v
 
     @field_validator("token")
     @classmethod
@@ -934,6 +1026,9 @@ ENV_MAP: dict[str, str] = {
     "gateway.tws_path": "TWS_PATH",
     "gateway.tws_settings_path": "TWS_SETTINGS_PATH",
     "gateway.tws_major_vrsn": "TWS_MAJOR_VRSN",
+    "gateway.time_zone": "TIME_ZONE",
+    "gateway.time_zone_live": "TIME_ZONE_LIVE",
+    "gateway.time_zone_paper": "TIME_ZONE_PAPER",
     "gateway.java_heap_size": "JAVA_HEAP_SIZE",
     "gateway.gateway_or_tws": "GATEWAY_OR_TWS",
     # Session
@@ -945,6 +1040,7 @@ ENV_MAP: dict[str, str] = {
     "command_server.enabled": "IBCTL_COMMAND_SERVER_ENABLED",
     "command_server.port": "IBCTL_COMMAND_PORT",
     "command_server.control_from": "IBCTL_CONTROL_FROM",
+    "command_server.allowed_commands": "IBCTL_ALLOWED_COMMANDS",
     # Agent
     "agent.socket_path": "IBCTL_AGENT_SOCKET",
     # Logging
@@ -989,6 +1085,7 @@ ENV_MAP: dict[str, str] = {
     "dashboard.session_down_renag_minutes": "IBCTL_SESSION_DOWN_RENAG_MINUTES",
     "dashboard.scheduled_restart_grace_minutes": "IBCTL_SCHEDULED_RESTART_GRACE_MINUTES",
     "dashboard.version_probe_client_id": "IBCTL_VERSION_PROBE_CLIENT_ID",
+    "dashboard.session_idle_minutes": "IBCTL_SESSION_IDLE_MINUTES",
     # IB System Status
     "ib_system_status.enabled": "IBCTL_IB_STATUS_ENABLED",
     "ib_system_status.check_interval_seconds": "IB_STATUS_CHECK_INTERVAL",
@@ -1000,6 +1097,10 @@ ENV_MAP: dict[str, str] = {
 
 # Reverse mapping for error messages: env var -> TOML path
 ENV_MAP_REVERSE: dict[str, str] = {v: k for k, v in ENV_MAP.items()}
+
+# Env vars that hold the IB login names: not secrets, but not for display either
+# (see app.services.identity_mask).
+IDENTITY_ENV_VARS: set[str] = {"TWS_USERID", "TWS_USERID_PAPER"}
 
 # Env vars that hold secrets (never log their values)
 SECRET_ENV_VARS: set[str] = {

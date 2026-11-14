@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="refresh" content="30">
+    <title>ibctl - Health</title>
+    <link rel="stylesheet" href="{{ root_path }}/static/style.css?v=28">
+    <style>
+        .summary-container {
+            max-width: 560px;
+            margin: 60px auto;
+            padding: 0 20px;
+        }
+        .summary-container h1 {
+            margin: 0 0 16px 0;
+            color: #e4e4e7;
+            font-size: 18px;
+        }
+        .summary-banner {
+            background: #713f12;
+            color: #fde68a;
+            padding: 10px 14px;
+            border-radius: 4px;
+            margin-bottom: 16px;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+        .summary-mode {
+            background: #18181b;
+            border: 1px solid #27272a;
+            border-radius: 8px;
+            padding: 14px 18px;
+            margin-bottom: 12px;
+        }
+        .summary-mode h2 {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: 0 0 10px 0;
+            font-size: 14px;
+        }
+        .summary-mode dl {
+            display: grid;
+            grid-template-columns: max-content 1fr;
+            gap: 4px 16px;
+            font-size: 13px;
+            margin: 0;
+        }
+        .summary-mode dt { color: #a1a1aa; }
+        .summary-mode dd { margin: 0; color: #e4e4e7; }
+        .summary-foot {
+            font-size: 13px;
+            color: #a1a1aa;
+            margin-top: 16px;
+        }
+        .summary-foot a { color: #60a5fa; }
+        .sr-only {
+            position: absolute !important;
+            width: 1px !important; height: 1px !important;
+            padding: 0 !important; margin: -1px !important;
+            overflow: hidden !important; clip: rect(0,0,0,0) !important;
+            white-space: nowrap !important; border: 0 !important;
+        }
+        a:focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
+    </style>
+</head>
+<body>
+    <main class="summary-container">
+        <h1>ibctl Dashboard</h1>
+
+        {% if not login_configured %}
+        <div class="summary-banner" role="note">
+            <strong>No login is configured.</strong>
+            This health summary is all the dashboard shows, and every control is turned off.
+            {{ no_login_help }}
+        </div>
+        {% endif %}
+
+        {% for m in summary.modes %}
+        <section class="summary-mode">
+            <h2>
+                <span class="instance-badge-sm {% if m.mode == 'live' %}badge-live{% else %}badge-paper{% endif %}">{{ m.mode | upper }}</span>
+                <span class="sr-only"> Gateway</span>
+                {% if m.api_ready %}
+                <span class="health-pill health-ok">Ready</span>
+                {% elif m.state == 'unknown' %}
+                <span class="health-pill health-warning">Unknown</span>
+                {% else %}
+                <span class="health-pill health-error">Not ready</span>
+                {% endif %}
+            </h2>
+            <dl>
+                <dt>State</dt>
+                <dd>{{ m.state }}</dd>
+                <dt>API ready</dt>
+                <dd>
+                    {%- if m.api_ready %}Yes{% if m.since %}, since {{ m.since_local }}{% endif %}
+                    {%- else %}No{% endif -%}
+                </dd>
+                <dt>ibctl version</dt>
+                <dd>{{ m.ibctl_version or '&mdash;'|safe }}</dd>
+            </dl>
+        </section>
+        {% endfor %}
+
+        <p class="summary-foot">Gateway version: {{ summary.gateway_version or '&mdash;'|safe }}</p>
+
+        {% if login_configured %}
+        <p class="summary-foot"><a href="{{ root_path }}/login">Log in</a> to see more.</p>
+        {% endif %}
+    </main>
+</body>
+</html>

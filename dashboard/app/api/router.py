@@ -3,11 +3,13 @@
 from fastapi import APIRouter
 
 from app.api import (
-    command, debug, events, gateway_upgrade, gateway_version, logs, notifications, pages, reconnect, status, twofa,
+    api_access, command, debug, events, gateway_upgrade, gateway_version, logs, notifications, pages, reconnect, session, status, twofa, vnc_proxy, warm_restart,
 )
 
 api_router = APIRouter()
 api_router.include_router(status.router)
+api_router.include_router(api_access.router)
+api_router.include_router(warm_restart.router)
 api_router.include_router(command.router)
 api_router.include_router(logs.router)
 api_router.include_router(events.router)
@@ -17,4 +19,6 @@ api_router.include_router(twofa.router)
 api_router.include_router(reconnect.router)
 api_router.include_router(gateway_version.router)
 api_router.include_router(gateway_upgrade.router)
+api_router.include_router(vnc_proxy.router)
+api_router.include_router(session.router)
 api_router.include_router(pages.router)

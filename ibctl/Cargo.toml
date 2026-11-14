@@ -1,6 +1,6 @@
 [package]
 name = "ibctl"
-version = "1.3.0"
+version = "2.0.0"
 edition = "2021"
 # MSRV floor: the highest any dependency needs (tokio 1.54 and toml 1.x need
 # 1.85), kept low so distro-shipped rustc can still build. CI runs 1.97.

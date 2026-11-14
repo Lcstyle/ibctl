@@ -230,7 +230,114 @@ pub struct LaunchPlan {
     pub jar_count: usize,
     pub vmoptions_file: Option<PathBuf>,
     pub vm_opts: Vec<String>,
+    /// Java options the installer's own launcher passes (`javaOptions` in
+    /// `.install4j/i4jparams.conf`) that ibctl's own flags and the vmoptions
+    /// file do not already cover. They can carry values that are secrets to
+    /// log, so only their count is ever logged.
+    pub installer_opts: Vec<String>,
     pub java: ResolvedJava,
+}
+
+/// The Java options the installer's own launcher passes to the Gateway: the
+/// `javaOptions` variable in `.install4j/i4jparams.conf`. Empty when the install
+/// has no such file or variable (the 10.47 layout declares none that matter).
+///
+/// Gateway 10.48 and later bundle a Java whose XML parser limits are too tight
+/// for the Gateway's own settings file; this variable is where the installer
+/// relaxes them. Launching without it makes the Gateway report its settings
+/// file as missing and start on defaults.
+pub fn installer_java_options(install_dir: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(install_dir.join(".install4j").join("i4jparams.conf")) else {
+        return Vec::new();
+    };
+    let Some(name_at) = text.find("name=\"javaOptions\"") else {
+        return Vec::new();
+    };
+    let tag = &text[name_at..];
+    let tag = &tag[..tag.find('>').unwrap_or(tag.len())];
+    let Some(value_at) = tag.find("value=\"") else {
+        return Vec::new();
+    };
+    let value = &tag[value_at + "value=\"".len()..];
+    let value = &value[..value.find('"').unwrap_or(value.len())];
+    value
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
+}
+
+/// What an option sets, so a second option for the same thing can be told from
+/// a different one: `-Dname` for a system property, the whole option for a
+/// module flag (many `--add-opens` can differ), the part before `=` otherwise.
+fn option_key(option: &str) -> &str {
+    if let Some(prop) = option.strip_prefix("-D") {
+        return &option[..2 + prop.find('=').unwrap_or(prop.len())];
+    }
+    if option.starts_with("--add-opens=") || option.starts_with("--add-exports=") || option.starts_with("--add-reads=") {
+        return option;
+    }
+    option.split('=').next().unwrap_or(option)
+}
+
+/// The declared options that `already` does not set, each setting once. The
+/// first value wins, as with the JVM's own `-D` handling.
+pub fn options_to_add(already: &[&str], declared: &[String]) -> Vec<String> {
+    let mut seen: Vec<&str> = already.iter().map(|o| option_key(o)).collect();
+    let mut added = Vec::new();
+    for option in declared {
+        let key = option_key(option);
+        if !seen.contains(&key) {
+            seen.push(key);
+            added.push(option.clone());
+        }
+    }
+    added
+}
+
+/// The XML limits the Gateway's settings parser depends on.
+const XML_LIMIT_KEYS: &[&str] = &[
+    "jdk.xml.elementAttributeLimit",
+    "jdk.xml.maxGeneralEntitySizeLimit",
+    "jdk.xml.totalEntitySizeLimit",
+];
+
+/// Why a launch with `options` on `java` would hit the Java's own XML limits.
+///
+/// A Java that sets a limit in its `conf/jaxp.properties` enforces it unless a
+/// `-D` option overrides it. The Gateway's settings file exceeds the tightened
+/// limits of Java 24 and later, so a launch that leaves them in force makes the
+/// Gateway treat its own settings file as missing.
+pub fn xml_limit_problem(java: &Path, options: &[&str]) -> Option<String> {
+    let java_home = java.parent()?.parent()?;
+    let text = std::fs::read_to_string(java_home.join("conf").join("jaxp.properties")).ok()?;
+    let unrelaxed: Vec<&str> = XML_LIMIT_KEYS
+        .iter()
+        .copied()
+        .filter(|key| {
+            let set_by_java = text.lines().map(str::trim).any(|line| {
+                line.strip_prefix(key)
+                    .and_then(|rest| rest.trim_start().strip_prefix('='))
+                    .is_some_and(|v| !v.trim().is_empty() && v.trim() != "0")
+            });
+            let overridden = options.iter().any(|o| option_key(o) == format!("-D{key}"));
+            set_by_java && !overridden
+        })
+        .collect();
+    if unrelaxed.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "{} sets {} and the launch options do not override {}, so the Gateway cannot read its own settings",
+            java_home.join("conf").join("jaxp.properties").display(),
+            if unrelaxed.len() == 1 { "a limit" } else { "limits" },
+            unrelaxed.join(", ")
+        ))
+    }
 }
 
 /// Resolve a launch for `config`, looking for Java in the given places.
@@ -261,7 +368,11 @@ pub fn plan_launch_with(
         system_candidates: system_java,
     })?;
 
-    Ok(LaunchPlan { version, install_dir, classpath, jar_count, vmoptions_file, vm_opts, java })
+    let mut already: Vec<&str> = crate::supervisor::MODULE_ACCESS_FLAGS.to_vec();
+    already.extend(vm_opts.iter().map(String::as_str));
+    let installer_opts = options_to_add(&already, &installer_java_options(&install_dir));
+
+    Ok(LaunchPlan { version, install_dir, classpath, jar_count, vmoptions_file, vm_opts, installer_opts, java })
 }
 
 /// Resolve a launch for `config` the way production does: `JAVA_PATH` from
@@ -354,6 +465,16 @@ pub fn check_payload(
             result: Ok(format!("{} ({})", plan.java.path.display(), plan.java.source)),
         },
         CheckOutcome { name: "java runs", result: java_runs(&plan.java.path, java_timeout) },
+        CheckOutcome {
+            name: "xml limits",
+            result: {
+                let options: Vec<&str> = plan.vm_opts.iter().chain(&plan.installer_opts).map(String::as_str).collect();
+                match xml_limit_problem(&plan.java.path, &options) {
+                    Some(problem) => Err(problem),
+                    None => Ok(format!("{} options from the installer", plan.installer_opts.len())),
+                }
+            },
+        },
     ];
     checks.push(CheckOutcome {
         name: "agent",
@@ -697,5 +818,148 @@ mod tests {
         let checks = check_payload(plan, &tmp.path().join("missing.jar"), Duration::from_secs(10));
 
         assert_eq!(failed(&checks).iter().map(|f| f.0).collect::<Vec<_>>(), vec!["agent"]);
+    }
+
+    // ── the installer's own Java options ────────────────────────────────
+
+    const I4J_PARAMS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<config>
+    <variable name="winDigest" value="SHA-2" />
+    <variable name="javaOptions" value="--enable-native-access=ALL-UNNAMED,javafx.graphics --add-opens=java.base/java.util=ALL-UNNAMED --add-exports=javafx.web/com.sun.webkit=ALL-UNNAMED -Djdk.xml.elementAttributeLimit=10000 -Djdk.xml.maxGeneralEntitySizeLimit=0 -Djdk.xml.totalEntitySizeLimit=0 -DjxBrowserKey=test-key" />
+</config>
+"#;
+
+    fn write_i4j_params(install: &Path, body: &str) {
+        std::fs::create_dir_all(install.join(".install4j")).unwrap();
+        std::fs::write(install.join(".install4j").join("i4jparams.conf"), body).unwrap();
+    }
+
+    /// The Gateway reads its own settings with XML limits that its bundled Java
+    /// tightens; the installer's launcher relaxes them through this variable.
+    #[test]
+    fn the_java_options_the_installer_declares_are_read_from_its_params_file() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let install = install_tree(tmp.path(), "10.50.1f");
+        write_i4j_params(&install, I4J_PARAMS);
+
+        let opts = installer_java_options(&install);
+
+        assert_eq!(opts.len(), 7, "{opts:?}");
+        assert_eq!(opts[0], "--enable-native-access=ALL-UNNAMED,javafx.graphics");
+        assert!(opts.contains(&"-Djdk.xml.elementAttributeLimit=10000".to_string()));
+        assert!(opts.contains(&"-Djdk.xml.totalEntitySizeLimit=0".to_string()));
+        assert!(opts.contains(&"-DjxBrowserKey=test-key".to_string()));
+    }
+
+    #[test]
+    fn xml_escapes_in_the_declared_options_are_decoded() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let install = install_tree(tmp.path(), "10.50.1f");
+        write_i4j_params(&install, r#"<variable name="javaOptions" value="-Dsome.path=&quot;a&amp;b&quot;" />"#);
+
+        assert_eq!(installer_java_options(&install), vec![r#"-Dsome.path="a&b""#.to_string()]);
+    }
+
+    #[test]
+    fn an_install_without_a_params_file_or_the_variable_declares_no_options() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let install = install_tree(tmp.path(), "10.47.1b");
+        assert!(installer_java_options(&install).is_empty(), "no params file");
+
+        write_i4j_params(&install, r#"<variable name="winDigest" value="SHA-2" />"#);
+        assert!(installer_java_options(&install).is_empty(), "no javaOptions variable");
+
+        write_i4j_params(&install, r#"<variable name="javaOptions" value="" />"#);
+        assert!(installer_java_options(&install).is_empty(), "empty javaOptions");
+    }
+
+    #[test]
+    fn only_options_not_already_passed_are_added() {
+        let declared: Vec<String> = [
+            "--add-opens=java.base/java.util=ALL-UNNAMED", // already passed, exact
+            "--add-exports=javafx.web/com.sun.webkit=ALL-UNNAMED", // new
+            "-Djdk.xml.elementAttributeLimit=10000",       // new
+            "-Dchannel=beta",                              // same property as one already passed
+            "-Djdk.xml.elementAttributeLimit=50",          // repeats a declared one
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let already = ["--add-opens=java.base/java.util=ALL-UNNAMED", "-Dchannel=latest"];
+
+        let added = options_to_add(&already, &declared);
+
+        assert_eq!(
+            added,
+            vec![
+                "--add-exports=javafx.web/com.sun.webkit=ALL-UNNAMED".to_string(),
+                "-Djdk.xml.elementAttributeLimit=10000".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_launch_plan_carries_what_the_installer_declares_beyond_ibctls_own_flags() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let install = install_tree(tmp.path(), "10.50.1f");
+        fake_java(&install.join("jre"));
+        write_i4j_params(&install, I4J_PARAMS);
+
+        let plan = plan_launch_with(&config_for(tmp.path()), None, &tmp.path().join("none"), &[]).unwrap();
+
+        // java.base/java.util is one of ibctl's own flags already.
+        assert!(!plan.installer_opts.iter().any(|o| o.starts_with("--add-opens=java.base/java.util=")));
+        assert!(plan.installer_opts.contains(&"-Djdk.xml.maxGeneralEntitySizeLimit=0".to_string()));
+        assert!(plan.installer_opts.contains(&"--add-exports=javafx.web/com.sun.webkit=ALL-UNNAMED".to_string()));
+    }
+
+    // ── the XML limits check ────────────────────────────────────────────
+
+    fn jre_with_jaxp(jre: &Path, jaxp: &str) {
+        fake_java(jre);
+        std::fs::create_dir_all(jre.join("conf")).unwrap();
+        std::fs::write(jre.join("conf").join("jaxp.properties"), jaxp).unwrap();
+    }
+
+    const STRICT_JAXP: &str = "# defaults\njdk.xml.elementAttributeLimit=200\njdk.xml.totalEntitySizeLimit=100000\njdk.xml.maxGeneralEntitySizeLimit=100000\n";
+
+    #[test]
+    fn a_java_with_strict_xml_limits_and_no_relaxing_options_fails_the_payload() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let install = install_tree(tmp.path(), "10.50.1f");
+        jre_with_jaxp(&install.join("jre"), STRICT_JAXP);
+        // The installer declares nothing, so nothing relaxes the limits.
+        let plan = plan_launch_with(&config_for(tmp.path()), None, &tmp.path().join("none"), &[]);
+
+        let checks = check_payload(plan, &agent_jar(tmp.path()), Duration::from_secs(10));
+
+        let failures = failed(&checks);
+        assert_eq!(failures.iter().map(|f| f.0).collect::<Vec<_>>(), vec!["xml limits"]);
+        assert!(failures[0].1.contains("jdk.xml.elementAttributeLimit"), "{}", failures[0].1);
+    }
+
+    #[test]
+    fn strict_xml_limits_pass_when_the_launch_options_relax_them() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let install = install_tree(tmp.path(), "10.50.1f");
+        jre_with_jaxp(&install.join("jre"), STRICT_JAXP);
+        write_i4j_params(&install, I4J_PARAMS);
+        let plan = plan_launch_with(&config_for(tmp.path()), None, &tmp.path().join("none"), &[]);
+
+        let checks = check_payload(plan, &agent_jar(tmp.path()), Duration::from_secs(10));
+
+        assert!(failed(&checks).is_empty(), "{:?}", failed(&checks));
+    }
+
+    #[test]
+    fn a_java_that_sets_no_xml_limits_needs_no_relaxing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let install = install_tree(tmp.path(), "10.47.1b");
+        jre_with_jaxp(&install.join("jre"), "# nothing set\n");
+        let plan = plan_launch_with(&config_for(tmp.path()), None, &tmp.path().join("none"), &[]);
+
+        let checks = check_payload(plan, &agent_jar(tmp.path()), Duration::from_secs(10));
+
+        assert!(failed(&checks).is_empty(), "{:?}", failed(&checks));
     }
 }

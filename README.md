@@ -118,7 +118,7 @@ For dual mode (live + paper simultaneously):
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `AUTO_RESTART_TIME` | Daily auto-restart time (e.g., `05:05 PM`) | — |
+| `AUTO_RESTART_TIME` | Daily auto-restart time (e.g., `05:05 PM`), in the container's `TZ`; converted to the Gateway's session zone at every login | — |
 | `AUTO_LOGOFF_TIME` | Auto-logoff time (e.g., `11:45 PM`) | — |
 | `TWS_COLD_RESTART` | Sunday cold restart time, 24h format (e.g., `09:00`) | — |
 
@@ -127,6 +127,7 @@ For dual mode (live + paper simultaneously):
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `JAVA_HEAP_SIZE` | JVM heap size in MB | `768` |
+| `TIME_ZONE` | Gateway session time zone (IANA name); empty leaves `jts.ini` alone. `TIME_ZONE_LIVE` / `TIME_ZONE_PAPER` override it per mode. Separate from `TZ`. See [env-vars](docs/env-vars.md#gateway-session-time-zone) | — |
 | `VNC_SERVER_PASSWORD` | Enable VNC with this password | disabled |
 | `IBCTL_COMMAND_PORT` | TCP command server port | `7462` |
 | `IBCTL_LOG_LEVEL` | `debug`, `info`, `warn`, `error` | `info` |

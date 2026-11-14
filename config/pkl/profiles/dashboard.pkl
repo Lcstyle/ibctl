@@ -19,6 +19,5 @@ runtime {
 
 compose {
   exposeVnc = true
-  exposeNoVnc = true
   exposeDashboard = true
 }

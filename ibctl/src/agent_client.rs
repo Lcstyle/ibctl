@@ -577,6 +577,13 @@ pub struct MockAgent {
     /// was *not* clicked, which for a mode-sensitive login is the interesting
     /// half.
     pub clicked: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    /// Every (window, key) passed to `send_key`, in order.
+    pub keys_sent: std::sync::Arc<std::sync::Mutex<Vec<(u64, String)>>>,
+    /// What `send_key` reports; `false` simulates a key the agent could not send.
+    pub send_key_result: bool,
+    /// How long `send_key` takes to reply, to simulate the Gateway holding a
+    /// key press open behind a confirmation prompt.
+    pub send_key_delay: Option<std::time::Duration>,
 }
 
 #[cfg(test)]
@@ -599,6 +606,9 @@ impl Default for MockAgent {
             type_text_found: true,
             list_item_found: true,
             clicked: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            keys_sent: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            send_key_result: true,
+            send_key_delay: None,
         }
     }
 }
@@ -650,7 +660,13 @@ impl AgentApi for MockAgent {
     async fn list_clients(&self, _: WindowId) -> Result<serde_json::Value, AgentError> {
         Ok(self.list_clients_response.clone())
     }
-    async fn send_key(&self, _: WindowId, _: &str) -> Result<bool, AgentError> { Ok(true) }
+    async fn send_key(&self, window: WindowId, key: &str) -> Result<bool, AgentError> {
+        self.keys_sent.lock().unwrap().push((window.0, key.to_string()));
+        if let Some(delay) = self.send_key_delay {
+            tokio::time::sleep(delay).await;
+        }
+        Ok(self.send_key_result)
+    }
 }
 
 #[cfg(test)]

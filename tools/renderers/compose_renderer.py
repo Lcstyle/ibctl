@@ -73,6 +73,7 @@ def render_compose(cfg) -> str:
     env["JAVA_HEAP_SIZE"] = f"${{JAVA_HEAP_SIZE:-{int(rt.gateway.javaHeapSize)}}}"
     env["TZ"] = f"${{TZ:-{dep.timezone}}}"
     env["VNC_SERVER_PASSWORD"] = "${VNC_SERVER_PASSWORD:-}"
+    env["IBCTL_VNC_BIND"] = "${IBCTL_VNC_BIND:-127.0.0.1}"
     env["RUST_LOG"] = "${RUST_LOG:-ibctl=info}"
     env["IBCTL_LOG_DIR"] = "/opt/ibctl/persist/logs"
 
@@ -97,6 +98,7 @@ def render_compose(cfg) -> str:
     env["IBCTL_DASHBOARD_EXTERNAL_URL"] = "${IBCTL_DASHBOARD_EXTERNAL_URL:-}"
     env["IBCTL_ROOT_PATH"] = "${IBCTL_ROOT_PATH:-}"
     env["IBCTL_DEBUG_MODE"] = "${IBCTL_DEBUG_MODE:-}"
+    env["IBCTL_SESSION_IDLE_MINUTES"] = "${IBCTL_SESSION_IDLE_MINUTES:-}"
 
     # Notifications (empty = TOML default)
     env["IBCTL_NOTIFICATIONS_ENABLED"] = "${IBCTL_NOTIFICATIONS_ENABLED:-}"
@@ -184,8 +186,6 @@ def render_compose(cfg) -> str:
         )
     if cp.exposeVnc:
         ports.append("${IBCTL_VNC_BIND:-127.0.0.1}:5900:5900")
-    if cp.exposeNoVnc:
-        ports.append("${IBCTL_VNC_BIND:-127.0.0.1}:6080:6080")
     if cp.exposeCommandServer:
         ports.append(f"127.0.0.1:{int(rt.commandServer.port)}:{int(rt.commandServer.port)}")
     if cp.exposePaperCommandServer:

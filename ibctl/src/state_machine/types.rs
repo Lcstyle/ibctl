@@ -143,6 +143,31 @@ pub struct RelaunchRecord {
     pub abandoned_prompt: bool,
 }
 
+/// The last time the Gateway process was found to have exited, for STATUS.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct JvmExitRecord {
+    pub at: String,
+    /// The state ibctl was in when it noticed.
+    pub from_state: String,
+    /// A saved session was found, so the relaunch reuses it and needs no 2FA.
+    /// `false` is a crash or a cold exit: the relaunch logs in from scratch.
+    pub warm: bool,
+}
+
+/// The last attempt to set the Gateway's auto-restart time, for STATUS.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RestartTimeRecord {
+    pub at: String,
+    /// `now` (a bare SETRESTART), `time` (SETRESTART with a time) or `login`
+    /// (the configured daily time, applied after a login).
+    pub source: &'static str,
+    /// The time typed, `h:mm AM|PM` in the Gateway's own zone.
+    pub requested: String,
+    /// Every control was found and the field read back as typed.
+    pub applied: bool,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Error)]
 pub enum StateMachineError {
     #[error("supervisor error: {0}")]
@@ -640,6 +665,17 @@ pub struct StateMachine {
     /// mode field. Determined from `config.auth.trading_mode` at
     /// construction; recovery marker paths are scoped by this same tag.
     pub(super) recovery_mode_tag: String,
+    /// The Gateway's session time zone as last read after a login: what was
+    /// declared, what its `jts.ini` held, and the zone times are converted
+    /// into. `None` until the first login completes.
+    pub(super) gateway_time_zone: Option<crate::gateway_zone::ZoneReport>,
+    /// The Gateway hotkey ibctl pressed last (RECONNECTDATA / RECONNECTACCOUNT)
+    /// and whether the agent sent it.
+    pub(super) last_hotkey: Option<crate::hotkey::HotkeyRecord>,
+    /// The last attempt to set the auto-restart time and whether it took.
+    pub(super) last_setrestart: Option<RestartTimeRecord>,
+    /// The last Gateway exit ibctl noticed, and whether it was a warm restart.
+    pub(super) last_jvm_exit: Option<JvmExitRecord>,
 }
 
 impl StateMachine {
@@ -772,6 +808,10 @@ impl StateMachine {
             dwell_success_rx,
             pending_resume_token: None,
             recovery_mode_tag,
+            gateway_time_zone: None,
+            last_hotkey: None,
+            last_setrestart: None,
+            last_jvm_exit: None,
         }
     }
 

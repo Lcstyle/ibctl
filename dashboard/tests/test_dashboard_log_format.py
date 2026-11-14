@@ -86,10 +86,10 @@ def test_the_file_handler_writes_each_record_once_in_this_format(tmp_path):
         setup_dashboard_logging(log_dir=str(tmp_path), log_level="INFO")
         root = logging.getLogger()
         [handler] = [h for h in root.handlers if h not in saved[0][1] and isinstance(h, MarketDayFileHandler)]
-        logging.getLogger("uvicorn.access").warning('%s - "%s" %d', "10.0.0.1:1", "GET / HTTP/1.1", 200)
+        logging.getLogger("uvicorn.access").warning('%s - "%s" %d', "198.51.100.1:1", "GET / HTTP/1.1", 200)
         handler.flush()
         [written] = tmp_path.glob("dashboard-*.log")
-        [line] = [x for x in written.read_text(encoding="utf-8").splitlines() if "10.0.0.1:1" in x]
+        [line] = [x for x in written.read_text(encoding="utf-8").splitlines() if "198.51.100.1:1" in x]
     finally:
         logging.captureWarnings(False)
         for lg, handlers, level in saved:
@@ -100,7 +100,7 @@ def test_the_file_handler_writes_each_record_once_in_this_format(tmp_path):
             lg.setLevel(level)
 
     entry = json.loads(line)
-    assert (entry["level"], entry["msg"]) == ("WARNING", '10.0.0.1:1 - "GET / HTTP/1.1" 200')
+    assert (entry["level"], entry["msg"]) == ("WARNING", '198.51.100.1:1 - "GET / HTTP/1.1" 200')
     assert entry["ts"].endswith("Z")
 
 

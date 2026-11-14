@@ -141,6 +141,9 @@ class GatewayStatus:
     socat_running: bool = False
     jvm_running: bool = False
     paused: bool = False
+    # True while ibctl is paused and the Gateway process has exited: the
+    # reported `state` is then frozen, not current.
+    paused_gateway_down: bool = False
     ceiling_state: str | None = None
     stats: Stats = field(default_factory=Stats)
     client_advisory: ClientAdvisory = field(
@@ -179,6 +182,7 @@ class GatewayStatus:
             socat_running=socat_data.get("running", False),
             jvm_running=jvm_data.get("alive", False),
             paused=data.get("paused", False),
+            paused_gateway_down=data.get("paused_gateway_down", False),
             ceiling_state=data.get("ceiling_state"),
             stats=Stats(
                 restarts_today=stats_data.get("restarts_today", 0),

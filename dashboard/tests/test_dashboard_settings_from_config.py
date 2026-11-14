@@ -8,15 +8,19 @@ the Config page shows the escape-hatch env vars that have no TOML key.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from app.api import pages
+from app.config import DashboardSettings
 from app.services import effective_config
 from app.services.gateway_version import probe
 from app.services.monitors import session_lost
 from app.services.monitors.session_lost import SessionLostMonitor
 
 TUNABLES = {
+    "IBCTL_SESSION_IDLE_MINUTES": "session_idle_minutes",
     "IBCTL_SESSION_DOWN_ALERT_MINUTES": "session_down_alert_minutes",
     "IBCTL_SESSION_DOWN_RENAG_MINUTES": "session_down_renag_minutes",
     "IBCTL_SCHEDULED_RESTART_GRACE_MINUTES": "scheduled_restart_grace_minutes",
@@ -113,3 +117,65 @@ def test_a_set_escape_hatch_shows_on_the_config_page_with_a_tooltip(env, toml, m
 
     [item] = [i for i in items if env in (i["description"] or "")]
     assert item["value"] == "1"
+
+
+# --- Idle logout ---
+
+
+def test_the_idle_logout_defaults_to_five_minutes(toml):
+    toml("")
+
+    assert DashboardSettings.from_env().session_idle_minutes == 5
+    assert DashboardSettings().session_idle_minutes == 5
+
+
+@pytest.mark.parametrize("minutes", [0, 1, 25, 1440])
+def test_the_idle_logout_comes_from_the_toml(toml, minutes):
+    toml(f"[dashboard]\nsession_idle_minutes = {minutes}\n")
+
+    assert DashboardSettings.from_env().session_idle_minutes == minutes
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("3", 3), ("0", 0), ("1440", 1440), (" 7 ", 7)])
+def test_its_env_var_wins_over_the_toml(toml, monkeypatch, raw, expected):
+    toml("[dashboard]\nsession_idle_minutes = 25\n")
+    monkeypatch.setenv("IBCTL_SESSION_IDLE_MINUTES", raw)
+
+    assert DashboardSettings.from_env().session_idle_minutes == expected
+
+
+def test_an_empty_env_var_leaves_the_toml_value(toml, monkeypatch):
+    toml("[dashboard]\nsession_idle_minutes = 25\n")
+    monkeypatch.setenv("IBCTL_SESSION_IDLE_MINUTES", "")
+
+    assert DashboardSettings.from_env().session_idle_minutes == 25
+
+
+@pytest.mark.parametrize("raw", ["1441", "-1", "abc", "1.5"])
+def test_a_bad_env_value_that_got_past_preflight_falls_back_to_the_default_and_says_so(toml, monkeypatch, caplog, raw):
+    toml("[dashboard]\nsession_idle_minutes = 25\n")
+    monkeypatch.setenv("IBCTL_SESSION_IDLE_MINUTES", raw)
+
+    with caplog.at_level(logging.WARNING, logger="dashboard.config"):
+        settings = DashboardSettings.from_env()
+
+    assert settings.session_idle_minutes == 5
+    assert "session_idle_minutes" in caplog.text
+
+
+@pytest.mark.parametrize("value", ["1441", "-3", "2.5", "true", '"soon"'])
+def test_a_bad_toml_value_falls_back_to_the_default(toml, caplog, value):
+    toml(f"[dashboard]\nsession_idle_minutes = {value}\n")
+
+    with caplog.at_level(logging.WARNING, logger="dashboard.config"):
+        assert DashboardSettings.from_env().session_idle_minutes == 5
+    assert "session_idle_minutes" in caplog.text
+
+
+def test_the_startup_line_says_how_long_a_login_may_sit_idle(toml, caplog):
+    toml("[dashboard]\nsession_idle_minutes = 12\n")
+
+    with caplog.at_level(logging.INFO, logger="dashboard.config"):
+        DashboardSettings.from_env()
+
+    assert "idle_logout=12min" in caplog.text

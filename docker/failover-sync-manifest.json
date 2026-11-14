@@ -74,6 +74,18 @@
         "toml_path": "twofa.backoff.unattended_hours",
         "env_var": "IBCTL_TWOFA_UNATTENDED_HOURS"
       },
+      "TIME_ZONE": {
+        "toml_path": "gateway.time_zone",
+        "env_var": "TIME_ZONE"
+      },
+      "TIME_ZONE_LIVE": {
+        "toml_path": "gateway.time_zone_live",
+        "env_var": "TIME_ZONE_LIVE"
+      },
+      "TIME_ZONE_PAPER": {
+        "toml_path": "gateway.time_zone_paper",
+        "env_var": "TIME_ZONE_PAPER"
+      },
       "JAVA_HEAP_SIZE": {
         "toml_path": "gateway.java_heap_size",
         "env_var": "JAVA_HEAP_SIZE"
@@ -142,7 +154,7 @@
         "description": "Timezone"
       },
       "AUTO_RESTART_TIME": {
-        "description": "Daily restart time (UTC)"
+        "description": "Daily restart time (container TZ)"
       },
       "READ_ONLY_API": {
         "description": "API write access"
@@ -181,6 +193,10 @@
       "IBCTL_CONTROL_FROM": {
         "toml_path": "command_server.control_from",
         "env_var": "IBCTL_CONTROL_FROM"
+      },
+      "IBCTL_ALLOWED_COMMANDS": {
+        "toml_path": "command_server.allowed_commands",
+        "env_var": "IBCTL_ALLOWED_COMMANDS"
       },
       "IBCTL_AGENT_SOCKET": {
         "toml_path": "agent.socket_path",
@@ -297,6 +313,10 @@
       "IBCTL_VERSION_PROBE_CLIENT_ID": {
         "toml_path": "dashboard.version_probe_client_id",
         "env_var": "IBCTL_VERSION_PROBE_CLIENT_ID"
+      },
+      "IBCTL_SESSION_IDLE_MINUTES": {
+        "toml_path": "dashboard.session_idle_minutes",
+        "env_var": "IBCTL_SESSION_IDLE_MINUTES"
       },
       "IBCTL_IB_STATUS_ENABLED": {
         "toml_path": "ib_system_status.enabled",

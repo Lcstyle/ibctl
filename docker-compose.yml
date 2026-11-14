@@ -40,8 +40,8 @@ services:
       ALLOW_BLIND_TRADING: ${ALLOW_BLIND_TRADING:-no}
 
       # --- Scheduling ---
-      # NOTE: IB Gateway ignores TIME_ZONE and uses UTC internally.
-      # AUTO_RESTART_TIME must be in UTC. Example: for 5:05 PM EDT, use "09:05 PM"
+      # AUTO_RESTART_TIME is written in the container's TZ (local time); ibctl
+      # converts it to the Gateway's session zone at every login.
       AUTO_RESTART_TIME: ${AUTO_RESTART_TIME:-09:05 PM}
       TWS_COLD_RESTART: ${TWS_COLD_RESTART:-}
       TWS_COLD_RESTART_DAY: ${TWS_COLD_RESTART_DAY:-}
@@ -49,7 +49,13 @@ services:
       # --- Gateway ---
       JAVA_HEAP_SIZE: ${JAVA_HEAP_SIZE:-768}
       TZ: ${TZ:-America/New_York}
+      # Gateway session time zone, written into jts.ini before each launch
+      # (empty = leave jts.ini alone). Separate from TZ above.
+      TIME_ZONE: ${TIME_ZONE:-}
+      TIME_ZONE_LIVE: ${TIME_ZONE_LIVE:-}
+      TIME_ZONE_PAPER: ${TIME_ZONE_PAPER:-}
       VNC_SERVER_PASSWORD: ${VNC_SERVER_PASSWORD:-}
+      IBCTL_VNC_BIND: ${IBCTL_VNC_BIND:-127.0.0.1}   # preflight: a non-loopback bind needs VNC_SERVER_PASSWORD
       RUST_LOG: ${RUST_LOG:-ibctl=info}
       IBCTL_LOG_DIR: /opt/ibctl/persist/logs
       # --- Optional overrides (empty = use TOML default) ---
@@ -71,6 +77,7 @@ services:
       # --- Command Server (required for dashboard) ---
       IBCTL_COMMAND_SERVER_ENABLED: ${IBCTL_COMMAND_SERVER_ENABLED:-false}
       IBCTL_CONTROL_FROM: ${IBCTL_CONTROL_FROM:-}
+      IBCTL_ALLOWED_COMMANDS: ${IBCTL_ALLOWED_COMMANDS:-}
 
       # --- Dashboard (disabled by default — set to true to enable) ---
       IBCTL_DASHBOARD_ENABLED: ${IBCTL_DASHBOARD_ENABLED:-false}
@@ -161,6 +168,9 @@ services:
       IBCTL_ZMQ_ENABLED: ${IBCTL_ZMQ_ENABLED:-true}
       IBCTL_ZMQ_PORT: ${IBCTL_ZMQ_PORT:-5556}
 
+      # --- Dashboard idle logout, minutes (empty = TOML, default 5; 0 = off) ---
+      IBCTL_SESSION_IDLE_MINUTES: ${IBCTL_SESSION_IDLE_MINUTES:-}
+
       # --- Session-down alerts and the weekly Gateway version check (empty = TOML) ---
       IBCTL_SESSION_DOWN_ALERT_MINUTES: ${IBCTL_SESSION_DOWN_ALERT_MINUTES:-}
       IBCTL_SESSION_DOWN_RENAG_MINUTES: ${IBCTL_SESSION_DOWN_RENAG_MINUTES:-}
@@ -184,8 +194,9 @@ services:
     ports:
       - "${IBCTL_LIVE_API_BIND:-127.0.0.1}:${IBCTL_LIVE_API_PORT:-4001}:4003"     # Live API
       - "${IBCTL_PAPER_API_BIND:-127.0.0.1}:${IBCTL_PAPER_API_PORT:-4002}:4004"  # Paper API
+      # VNC for a regular client. The browser's VNC goes through the dashboard
+      # (its /websockify, behind the login), so noVNC's own port is not published.
       - "${IBCTL_VNC_BIND:-127.0.0.1}:5900:5900"                            # VNC
-      - "${IBCTL_VNC_BIND:-127.0.0.1}:6080:6080"                            # noVNC websocket
       - "127.0.0.1:7462:7462"                                               # Live command server
       - "127.0.0.1:7463:7463"                                               # Paper command server
       - "${IBCTL_DASHBOARD_BIND:-127.0.0.1}:${IBCTL_DASHBOARD_PORT:-3080}:${IBCTL_DASHBOARD_PORT:-3080}" # Dashboard

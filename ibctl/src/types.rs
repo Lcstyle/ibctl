@@ -58,8 +58,13 @@ pub enum Command {
     SetState(String),
     /// Set IB system status (pushed by dashboard/external clients)
     IbStatus(String, String), // (status, reason)
-    /// Set auto-restart time via Gateway Settings UI (UTC, "HH:MM AM/PM" or "HH:MM")
+    /// Set the auto-restart time through the Gateway's settings dialog, as
+    /// `h:mm AM|PM` in the Gateway's own time zone.
     SetRestartTime(String),
+    /// Make the Gateway restart itself as soon as it can: sets the auto-restart
+    /// time to the next whole minute in the Gateway's zone. The restart reuses
+    /// the session, so it needs no 2FA (a warm restart).
+    SetRestartNow,
     /// Resume from HITL 2FA wait — operator signal that 2FA is approved.
     ///
     /// Privileged (localhost-only). Only takes effect when the state machine

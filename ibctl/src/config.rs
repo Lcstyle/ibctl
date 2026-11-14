@@ -463,6 +463,30 @@ pub struct GatewayConfig {
     /// Socat forwarding port (live: 4003, paper: 4004)
     pub live_socat_port: u16,
     pub paper_socat_port: u16,
+    /// The Gateway's own session time zone (an IANA name), written into the
+    /// `[Logon] TimeZone` line of its `jts.ini` before every launch. Empty
+    /// leaves the file alone. After [`GatewayConfig::resolve_time_zone`] this is
+    /// the value for this instance's mode.
+    pub time_zone: String,
+    /// Replaces `time_zone` for the live instance when set.
+    pub time_zone_live: String,
+    /// Replaces `time_zone` for the paper instance when set.
+    pub time_zone_paper: String,
+}
+
+impl GatewayConfig {
+    /// Fold the mode-specific zone into `time_zone` for an instance running in
+    /// `mode`, so the rest of the program reads one value.
+    pub fn resolve_time_zone(&mut self, mode: TradingMode) {
+        let specific = match mode {
+            TradingMode::Live => &self.time_zone_live,
+            TradingMode::Paper => &self.time_zone_paper,
+            TradingMode::Both => return,
+        };
+        if !specific.is_empty() {
+            self.time_zone = specific.clone();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -485,6 +509,9 @@ pub struct CommandServerConfig {
     pub port: u16,
     pub bind_address: String,
     pub control_from: Vec<String>,
+    /// The action commands the server accepts (the master switch for every
+    /// caller). Empty means the default: every command.
+    pub allowed_commands: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -825,6 +852,9 @@ impl Default for GatewayConfig {
             paper_api_port: 4002,
             live_socat_port: 4003,
             paper_socat_port: 4004,
+            time_zone: String::new(),
+            time_zone_live: String::new(),
+            time_zone_paper: String::new(),
         }
     }
 }
@@ -847,6 +877,7 @@ impl Default for CommandServerConfig {
             port: 7462,
             bind_address: "0.0.0.0".to_string(),
             control_from: vec!["127.0.0.1".to_string(), "172.0.0.0/8".to_string()],
+            allowed_commands: crate::command_access::default_allowed(),
         }
     }
 }
@@ -1068,6 +1099,15 @@ impl Config {
         if let Some(v) = env_nonempty("TWS_MAJOR_VRSN") {
             self.gateway.version = v;
         }
+        if let Some(v) = env_nonempty("TIME_ZONE") {
+            self.gateway.time_zone = v;
+        }
+        if let Some(v) = env_nonempty("TIME_ZONE_LIVE") {
+            self.gateway.time_zone_live = v;
+        }
+        if let Some(v) = env_nonempty("TIME_ZONE_PAPER") {
+            self.gateway.time_zone_paper = v;
+        }
         if let Some(v) = std::env::var("JAVA_HEAP_SIZE").ok().and_then(|s| s.parse().ok()) {
             self.gateway.java_heap_mb = v;
         }
@@ -1121,6 +1161,10 @@ impl Config {
         }
         if let Some(v) = env_nonempty("IBCTL_CONTROL_FROM") {
             self.command_server.control_from =
+                v.split(',').map(|s| s.trim().to_string()).collect();
+        }
+        if let Some(v) = env_nonempty("IBCTL_ALLOWED_COMMANDS") {
+            self.command_server.allowed_commands =
                 v.split(',').map(|s| s.trim().to_string()).collect();
         }
 
@@ -1188,6 +1232,9 @@ impl Config {
         if let Some(v) = env_nonempty("IBCTL_AUTO_LAUNCH") {
             self.site.auto_launch = matches!(v.to_lowercase().as_str(), "true" | "yes" | "1");
         }
+
+        // Last: the trading mode and every zone setting are final here.
+        self.gateway.resolve_time_zone(self.auth.trading_mode);
     }
 
     /// Validate that required fields are present.
@@ -1550,5 +1597,61 @@ auto_launch = false
     fn test_site_role_display() {
         assert_eq!(SiteRole::Primary.to_string(), "primary");
         assert_eq!(SiteRole::Standby.to_string(), "standby");
+    }
+
+    // --- Gateway time zone ---
+
+    #[test]
+    fn the_gateway_time_zone_settings_default_to_empty_and_parse_from_toml() {
+        assert_eq!(GatewayConfig::default().time_zone, "");
+        let g: GatewayConfig = toml::from_str(
+            "time_zone = \"America/New_York\"\ntime_zone_live = \"UTC\"\ntime_zone_paper = \"Europe/London\"",
+        )
+        .unwrap();
+        assert_eq!((g.time_zone.as_str(), g.time_zone_live.as_str(), g.time_zone_paper.as_str()), ("America/New_York", "UTC", "Europe/London"));
+    }
+
+    #[test]
+    fn allowed_commands_default_to_every_command_and_parse_from_toml() {
+        assert_eq!(
+            CommandServerConfig::default().allowed_commands,
+            crate::command_access::default_allowed(),
+            "the default must accept every command accepted today"
+        );
+
+        let cs: CommandServerConfig = toml::from_str("allowed_commands = [\"SETRESTART\", \"RECONNECTDATA\"]").unwrap();
+        assert_eq!(cs.allowed_commands, ["SETRESTART", "RECONNECTDATA"]);
+
+        // A file that doesn't mention the key keeps the default.
+        let cs: CommandServerConfig = toml::from_str("port = 7500").unwrap();
+        assert_eq!(cs.allowed_commands, crate::command_access::default_allowed());
+    }
+
+    #[test]
+    fn a_mode_specific_zone_replaces_the_shared_one_for_that_mode_only() {
+        let base = GatewayConfig {
+            time_zone: "America/New_York".into(),
+            time_zone_paper: "UTC".into(),
+            ..GatewayConfig::default()
+        };
+
+        let mut live = base.clone();
+        live.resolve_time_zone(TradingMode::Live);
+        assert_eq!(live.time_zone, "America/New_York");
+
+        let mut paper = base.clone();
+        paper.resolve_time_zone(TradingMode::Paper);
+        assert_eq!(paper.time_zone, "UTC");
+    }
+
+    #[test]
+    fn a_mode_specific_zone_applies_when_there_is_no_shared_one() {
+        let mut g = GatewayConfig { time_zone_live: "UTC".into(), ..GatewayConfig::default() };
+        g.resolve_time_zone(TradingMode::Live);
+        assert_eq!(g.time_zone, "UTC");
+
+        let mut none = GatewayConfig { time_zone_live: "UTC".into(), ..GatewayConfig::default() };
+        none.resolve_time_zone(TradingMode::Paper);
+        assert_eq!(none.time_zone, "", "no zone declared for paper stays undeclared");
     }
 }

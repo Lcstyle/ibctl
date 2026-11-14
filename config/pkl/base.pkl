@@ -41,6 +41,9 @@ runtime = new RuntimeConfig {
     twsPath = "/home/ibgateway/Jts"
     twsSettingsPath = ""
     twsMajorVrsn = ""
+    timeZone = ""
+    timeZoneLive = ""
+    timeZonePaper = ""
     javaHeapSize = 768
     gatewayOrTws = "gateway"
     liveApiPort = 4001
@@ -112,6 +115,5 @@ compose = new ComposeConfig {
   exposeCommandServer = true
   exposePaperCommandServer = true
   exposeVnc = true
-  exposeNoVnc = true
   exposeDashboard = true
 }

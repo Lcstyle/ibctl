@@ -23,7 +23,7 @@ def generate_manifest() -> str:
 
     must_sync_prefixes = {
         "auth.", "twofa.", "session.", "gateway.gateway_or_tws",
-        "gateway.java_heap_size", "command_server.enabled", "command_server.port",
+        "gateway.java_heap_size", "gateway.time_zone", "command_server.enabled", "command_server.port",
         "dashboard.enabled", "dashboard.port", "site.",
         "timing.restart_delay_secs", "timing.relogin_failure_action",
         "timing.relogin_max_attempts", "timing.login_dialog_timeout_secs",
@@ -40,7 +40,7 @@ def generate_manifest() -> str:
 
     extra_must_sync = {
         "TZ": {"description": "Timezone"},
-        "AUTO_RESTART_TIME": {"description": "Daily restart time (UTC)"},
+        "AUTO_RESTART_TIME": {"description": "Daily restart time (container TZ)"},
         "READ_ONLY_API": {"description": "API write access"},
     }
 

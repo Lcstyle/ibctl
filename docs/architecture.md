@@ -72,7 +72,7 @@ HTTP+JSON over Unix domain socket at `/tmp/ibctl.sock`. The agent uses JDK 17's 
 | POST | `/windows/{id}/find` | Find component by type/index/text |
 | POST | `/windows/{id}/click` | Click a button by label |
 | POST | `/windows/{id}/type` | Type text into a field by index |
-| POST | `/windows/{id}/key` | Send keystroke (for RECONNECTDATA=Ctrl+F etc.) |
+| POST | `/windows/{id}/key` | Send keystroke (for RECONNECTDATA=Ctrl+Alt+F etc.) |
 | GET | `/windows/{id}/screenshot` | Capture window pixels (for future OCR) |
 
 ### Response Format
@@ -95,6 +95,7 @@ Line-based TCP protocol, exactly matching IBC's wire format for drop-in compatib
 - **Response**: `OK message\n` or `ERROR message\n` or `INFO message\n`
 - **Commands**: EXIT, STOP, RESTART, RECONNECTDATA, RECONNECTACCOUNT, ENABLEAPI
 - **Access control**: IP allow-list (env var `IBCTL_CONTROL_FROM`)
+- **Command allow-list**: `command_server.allowed_commands` (env var `IBCTL_ALLOWED_COMMANDS`) limits which action commands are accepted, for every caller; queries are always allowed
 - **Port**: env var `IBCTL_COMMAND_PORT` (default: 7462)
 
 ---
@@ -286,7 +287,7 @@ All env vars override their corresponding config file keys.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `AUTO_RESTART_TIME` | Daily auto-restart time (e.g., `05:05 PM`) | -- |
+| `AUTO_RESTART_TIME` | Daily auto-restart time (e.g., `05:05 PM`), in the container's `TZ`; converted to the Gateway's session zone at every login | -- |
 | `AUTO_LOGOFF_TIME` | Auto-logoff time (e.g., `11:45 PM`) | -- |
 | `TWS_COLD_RESTART` | Sunday cold restart time, 24h format (e.g., `09:00`) | -- |
 
@@ -300,6 +301,7 @@ All env vars override their corresponding config file keys.
 | `JAVA_HEAP_SIZE` | `gateway.java_heap_mb` | JVM heap in MB | `768` |
 | `GATEWAY_OR_TWS` | `gateway.program` | `gateway` or `tws` | `gateway` |
 | `TZ` | -- | Container timezone (e.g., `America/New_York`) | system default |
+| `TIME_ZONE` | `gateway.time_zone` | Gateway session time zone, written into `jts.ini` before each launch; `TIME_ZONE_LIVE` / `TIME_ZONE_PAPER` override it per mode | empty (jts.ini untouched) |
 | `VNC_SERVER_PASSWORD` | -- | Enable VNC with this password | disabled |
 
 #### Infrastructure
@@ -308,6 +310,7 @@ All env vars override their corresponding config file keys.
 |----------|-----------|-------------|---------|
 | `IBCTL_COMMAND_PORT` | `command_server.port` | TCP command server port | `7462` |
 | `IBCTL_CONTROL_FROM` | `command_server.control_from` | IP allow-list (comma-sep) | `127.0.0.1` |
+| `IBCTL_ALLOWED_COMMANDS` | `command_server.allowed_commands` | Action commands accepted (comma-sep) | all |
 | `IBCTL_AGENT_SOCKET` | `agent.socket_path` | UDS path for agent | `/tmp/ibctl.sock` |
 | `IBCTL_LOG_LEVEL` | `logging.level` | Log verbosity | `info` |
 | `IBCTL_CONFIG` | -- | Path to config file | `./ibctl.toml` |

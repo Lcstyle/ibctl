@@ -42,8 +42,8 @@ import pytest
 from bs4 import BeautifulSoup
 from httpx import ASGITransport, AsyncClient
 
-from app.config import DashboardSettings
 from app.main import create_app
+from tests.auth_helpers import authed_settings, logged_in_cookies
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 STATUS_WITH_RECOVERY = FIXTURES_DIR / "status_v1_with_recovery.json"
@@ -129,14 +129,7 @@ def _build_status_dict(*, version: str = _STATUS_VERSION, recovery: dict | None 
 async def _make_client(*, trading_mode: str = "both", with_recovery: bool = False,
                        with_ib_monitor: bool = False, no_build_badge: bool = False):
     """Build a test AsyncClient with app state fully wired for redesign tests."""
-    settings = DashboardSettings(
-        port=8080,
-        token="",
-        debug_mode=False,
-        ibctl_host="127.0.0.1",
-        ibctl_port=7462,
-        trading_mode=trading_mode,
-    )
+    settings = authed_settings(trading_mode=trading_mode)
     app = create_app(settings=settings)
 
     if not no_build_badge:
@@ -161,7 +154,8 @@ async def _make_client(*, trading_mode: str = "both", with_recovery: bool = Fals
         app.state.ib_status_monitor = _FakeIbMonitor()
 
     transport = ASGITransport(app=app)
-    return app, AsyncClient(transport=transport, base_url="http://test")
+    # Signed in: the pages these tests render are login-only.
+    return app, AsyncClient(transport=transport, base_url="http://test", cookies=logged_in_cookies())
 
 
 def _plant_recovery(app, recovery: dict, trading_mode: str = "both") -> None:
@@ -1235,10 +1229,7 @@ async def test_unhealthy_instance_section_carries_data_health_error():
     """Sections whose instance is unreachable must carry
     ``data-health='error'`` so the CSS paints a left-stripe on the whole
     section — not just a small pill in the header row."""
-    settings = DashboardSettings(
-        port=8080, token="", debug_mode=False,
-        ibctl_host="127.0.0.1", ibctl_port=7462, trading_mode="both",
-    )
+    settings = authed_settings(trading_mode="both")
     app = create_app(settings=settings)
     app.state.templates.env.globals["build_badge"] = _BUILD_BADGE
     app.state.build_badge = _BUILD_BADGE
@@ -1257,7 +1248,7 @@ async def test_unhealthy_instance_section_carries_data_health_error():
         registry._clients[mode] = _FakeIbctlClient(healthy)
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://test", cookies=logged_in_cookies()) as client:
         response = await client.get("/partials/overview")
     soup = BeautifulSoup(response.text, "html.parser")
 
@@ -1277,7 +1268,7 @@ async def test_unhealthy_instance_section_carries_data_health_error():
     for mode in registry.modes():
         registry._cache[f"{mode}:STATUS"] = _CachedResponse(not_ready, ttl=60.0)
 
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
+    async with AsyncClient(transport=transport, base_url="http://test", cookies=logged_in_cookies()) as client:
         response2 = await client.get("/partials/overview")
     soup2 = BeautifulSoup(response2.text, "html.parser")
     live2 = soup2.select_one('[data-accordion="live"]')

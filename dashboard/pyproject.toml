@@ -19,6 +19,8 @@ dependencies = [
     # ib_async's event library, listed only so the PyPI pin below applies to it
     # (uv pins sources for direct dependencies). Same range ib_async requires.
     "aeventkit>=2.1.0,<3",
+    # Signs the session and OAuth-state cookies (app/session_cookies.py).
+    "itsdangerous>=2.2",
 ]
 
 [dependency-groups]

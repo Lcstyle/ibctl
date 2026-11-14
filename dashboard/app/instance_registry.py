@@ -22,6 +22,7 @@ from typing import Callable
 
 from app.domain.instance import InstanceEndpoint, InstanceStatus
 from app.ibctl_client import IbctlClientProtocol, TcpIbctlClient
+from app.services.identity_mask import mask_identity
 
 logger = logging.getLogger("dashboard.registry")
 
@@ -210,8 +211,9 @@ class InstanceRegistry:
             return None
 
     async def cached_config(self, mode: str) -> dict | None:
-        """Get CONFIG with 60s TTL cache."""
-        return await self.cached_command(mode, "CONFIG", self.CONFIG_TTL)
+        """Get CONFIG with 60s TTL cache; login names and account numbers masked."""
+        config = await self.cached_command(mode, "CONFIG", self.CONFIG_TTL)
+        return None if config is None else mask_identity(config)
 
     def cached_status_raw(self, mode: str) -> dict | None:
         """Read cached STATUS dict without opening TCP. Returns None if no cache.

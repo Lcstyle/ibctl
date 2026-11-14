@@ -6,6 +6,7 @@ and returns a structured result with errors and warnings.
 
 from __future__ import annotations
 
+import ipaddress
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -15,7 +16,7 @@ from pydantic import ValidationError
 import os
 
 from .env_overlay import EnvFileReadError, apply_env_overrides, env_or_file
-from .models import ENV_MAP, SECRET_ENV_VARS, IbctlConfig
+from .models import ENV_MAP, IDENTITY_ENV_VARS, SECRET_ENV_VARS, IbctlConfig
 
 
 @dataclass
@@ -43,9 +44,9 @@ def _env_var_for_field(field_path: str) -> str | None:
 
 
 def _is_secret_field(field_path: str) -> bool:
-    """Check if a field's env var holds a secret (value should be redacted)."""
+    """Check if a field's value should be redacted: a secret or an IB login name."""
     env_var = ENV_MAP.get(field_path)
-    return env_var in SECRET_ENV_VARS if env_var else False
+    return env_var in SECRET_ENV_VARS | IDENTITY_ENV_VARS if env_var else False
 
 
 def _format_pydantic_errors(exc: ValidationError) -> list[PreflightError]:
@@ -174,6 +175,46 @@ def _check_ntfy_callback_env(model: IbctlConfig) -> list[PreflightError]:
     return errors
 
 
+def _is_loopback_bind(bind: str) -> bool:
+    """Whether a published-port bind address is reachable from this host only.
+
+    Empty means compose's own default, which is loopback. A hostname other than
+    ``localhost`` is treated as a network address.
+    """
+    host = bind.strip().lower().strip("[]")
+    if not host or host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _check_vnc_exposure() -> list[PreflightError]:
+    """Refuse a VNC port that is reachable from the network with no password.
+
+    Compose publishes the VNC port on IBCTL_VNC_BIND, loopback unless the
+    operator opts in. Bound to anything else with no VNC_SERVER_PASSWORD, anyone
+    who can reach the port gets the Gateway's desktop, so the container must not
+    start. Env-only, like the ntfy check: called from validate_config under
+    check_env=True.
+    """
+    bind = os.environ.get("IBCTL_VNC_BIND", "")
+    if _is_loopback_bind(bind):
+        return []
+    if (env_or_file("VNC_SERVER_PASSWORD") or "").strip():
+        return []
+    return [PreflightError(
+        field="vnc.bind",
+        message=(
+            f"IBCTL_VNC_BIND={bind.strip()!r} publishes the VNC port to the network but "
+            "VNC_SERVER_PASSWORD is not set. Set VNC_SERVER_PASSWORD (or VNC_SERVER_PASSWORD_FILE), "
+            "or bind VNC to loopback only: IBCTL_VNC_BIND=127.0.0.1 (or leave it unset)."
+        ),
+        env_var="IBCTL_VNC_BIND",
+    )]
+
+
 def validate_config(
     toml_path: str = "/opt/ibctl/ibctl.toml",
     check_env: bool = True,
@@ -234,6 +275,7 @@ def validate_config(
         try:
             errors.extend(_check_credentials(model))
             errors.extend(_check_ntfy_callback_env(model))
+            errors.extend(_check_vnc_exposure())
         except EnvFileReadError as exc:
             return PreflightResult(
                 ok=False,

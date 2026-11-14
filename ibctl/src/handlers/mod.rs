@@ -118,6 +118,9 @@ pub struct DialogHandlerRegistry {
     /// `StateMachine::new` because the state machine already owns the registry,
     /// so this needs no new constructor parameters anywhere.
     pub login_form_tx: tokio::sync::watch::Sender<Option<crate::agent_events::LoginFormState>>,
+    /// Armed by the state machine just before it presses a Gateway hotkey, so
+    /// the generic dialog handler confirms the prompt that causes and no other.
+    pub hotkey_expectation: crate::hotkey::HotkeyExpectation,
 }
 
 impl DialogHandlerRegistry {
@@ -127,6 +130,7 @@ impl DialogHandlerRegistry {
         Self {
             handlers: Vec::new(),
             login_form_tx,
+            hotkey_expectation: crate::hotkey::HotkeyExpectation::default(),
         }
     }
 
@@ -174,7 +178,9 @@ impl DialogHandlerRegistry {
         registry.register(Box::new(paper_warning::PaperWarningHandler));
         registry.register(Box::new(version_notice::VersionNoticeHandler));
         // Catch-all for Gateway notification dialogs (lowest priority)
-        registry.register(Box::new(gateway_notification::GatewayNotificationHandler));
+        registry.register(Box::new(gateway_notification::GatewayNotificationHandler::new(
+            registry.hotkey_expectation.clone(),
+        )));
 
         registry
     }

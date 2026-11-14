@@ -383,6 +383,7 @@
             <dt><span class="term" tabindex="0" title="{{ tt('ui.gateway.state_term') }}">Gateway state</span></dt>
             <dd>
                 {{- s.get('state', 'unknown') -}}
+                {%- if s.get('paused_gateway_down') %} (paused, Gateway not running){% endif -%}
             </dd>
 
             {% if recovery_visible(rec) | int == 1 %}
@@ -463,6 +464,12 @@
                     title="{{ tt('ui.controls.reconnect_account') }}">Reconnect Account</button>
             <button class="ctrl-btn" onclick="sendCmd('RESTARTSOCAT','{{ mode }}')"
                     title="{{ tt('ui.controls.restart_socat') }}">Restart Socat</button>
+            {# Warm restart: ibctl sets the Gateway's own restart time to the next minute, so it
+               comes back with its saved session and needs no 2FA. Shares its minimum interval
+               with the API; greyed out while ibctl blocks SETRESTART or the interval has not passed. #}
+            {% set warm = warm_restart.get(mode) if warm_restart else none %}
+            <button class="ctrl-btn" onclick="if(confirm('Warm restart the {{ mode | upper }} Gateway now? It restarts with its saved session, so no 2FA is needed.'))sendWarmRestart('{{ mode }}')"
+                    title="{{ (warm.reason or warm.hint) if warm else '' }}{% if not warm or not (warm.reason or warm.hint) %}Restart the Gateway now with its saved session: no 2FA.{% endif %}"{% if warm and warm.disabled %} disabled{% endif %}>Warm restart (no 2FA)</button>
             <button class="ctrl-btn ctrl-btn-danger" onclick="if(confirm('Restart {{ mode | upper }} Gateway?'))sendCmd('RESTART','{{ mode }}')"
                     title="{{ tt('ui.controls.restart_gateway') }}">Restart</button>
             {# STOP parks the Gateway in WaitingForLaunch; START is honoured only
@@ -477,6 +484,16 @@
             {% endif %}
             <button class="ctrl-btn ctrl-btn-go" onclick="if(confirm('{{ start_prompt }}'))sendCmd('START','{{ mode }}')"
                     title="{{ tt('ui.controls.start_gateway') }}"{% if gw_state != 'WaitingForLaunch' %} disabled{% endif %}>Start</button>
+            {% if s.get('paused_gateway_down') %}
+            {# The state machine is paused and its Gateway process has exited, so the
+               state above is frozen. Resume lets it notice and relaunch. #}
+            <button class="ctrl-btn ctrl-btn-go" onclick="sendCmd('RESUME','{{ mode }}')"
+                    title="ibctl is paused and the Gateway has exited. Resume lets ibctl notice and relaunch it.">Resume</button>
+            <span class="ctrl-note">Paused: the Gateway is not running.</span>
+            {% endif %}
+            {% if warm and warm.reason %}
+            <span class="ctrl-note">{{ warm.reason }}</span>
+            {% endif %}
             <span id="cmd-result-{{ mode }}" class="ctrl-result"></span>
         </div>
         {% endif %}
@@ -658,6 +675,7 @@
 .ctrl-btn:disabled,
 .ctrl-btn:disabled:hover { opacity: 0.35; cursor: default; border-color: #3f3f46; color: #a1a1aa; }
 .ctrl-result { font-size: 10px; margin-left: auto; }
+.ctrl-note { font-size: 11px; color: #fbbf24; }
 
 /* IB Status specific */
 .ib-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
@@ -718,5 +736,38 @@ function sendCmd(command, mode) {
             setTimeout(function() { result.innerHTML = ''; }, 3000);
         }
     });
+}
+
+// Warm restart one Gateway now: the same endpoint the API uses, so the minimum
+// interval is shared. Reports the outcome next to the buttons, then refreshes
+// the panel so a button the interval has just greyed out shows it.
+function sendWarmRestart(mode) {
+    var result = document.getElementById('cmd-result-' + mode);
+    function show(ok, text) {
+        if (result) {
+            result.textContent = (ok ? '\u2713 ' : '\u00d7 ') + text;
+            result.style.color = ok ? '#4ade80' : '#ef4444';
+            setTimeout(function() { result.textContent = ''; }, 8000);
+        }
+    }
+    fetch(ROOT_PATH + '/api/v1/warm-restart', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({mode: mode})
+    })
+    .then(function(r) { return r.json().then(function(d) { return {status: r.status, body: d}; }); })
+    .then(function(x) {
+        if (x.status === 202) {
+            show(true, 'warm restart set for ' + new Date(x.body.scheduled_for).toLocaleTimeString());
+        } else if (x.status === 429) {
+            show(false, 'too soon, try again in ' + Math.ceil(x.body.retry_after_s / 60) + ' min');
+        } else {
+            show(false, x.body.detail || x.body.error || 'failed');
+        }
+        document.querySelectorAll('[hx-trigger]').forEach(function(el) {
+            if (el.getAttribute('hx-get')) htmx.trigger(el, 'ibctl-refresh');
+        });
+    })
+    .catch(function() { show(false, 'request failed'); });
 }
 </script>

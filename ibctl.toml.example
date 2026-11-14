@@ -114,6 +114,22 @@ tws_settings_path = ""
 # Gateway/TWS major version. Auto-detected from the installation if empty.
 tws_major_vrsn = ""
 # @env: TWS_MAJOR_VRSN
+# IB Gateway's own session time zone. Empty means ibctl leaves the Gateway's
+# jts.ini alone and only reports the zone in use. When set, ibctl writes it
+# into the `[Logon] TimeZone` line of the mode's jts.ini before every Gateway
+# launch and checks it after login. `time_zone_live` / `time_zone_paper`
+# override `time_zone` for that mode. This is separate from the container's
+# `TZ`, which only sets the clock zone of the container and the JVM.
+time_zone = ""
+# @env: TIME_ZONE
+# Gateway session time zone for live mode; overrides `time_zone` when set.
+# An IANA name such as America/New_York, or empty. See `time_zone`.
+time_zone_live = ""
+# @env: TIME_ZONE_LIVE
+# Gateway session time zone for paper mode; overrides `time_zone` when set.
+# An IANA name such as America/New_York, or empty. See `time_zone`.
+time_zone_paper = ""
+# @env: TIME_ZONE_PAPER
 # JVM heap size in MB. Must be >= 64 or the JVM refuses to launch.
 java_heap_size = 768
 # @env: JAVA_HEAP_SIZE
@@ -142,6 +158,16 @@ bind_address = "0.0.0.0"
 # Empty locks out every client — schema rejects the empty case.
 control_from = ["127.0.0.1"]
 # @env: IBCTL_CONTROL_FROM
+# Action commands the command server accepts; any other action command is refused
+# with "ERROR command not allowed by command_server.allowed_commands". One list for
+# the live and paper instances, and the master switch for every caller: TCP clients,
+# dashboard buttons and API tokens (the localhost-only rule for privileged commands
+# still applies on top). Queries (STATUS, STATE, CONFIG, LOGS, WINDOWS, SUBSCRIBE)
+# are always allowed and are not valid names here. Empty means the default, all of
+# them. Listing too few can break tooling that sends the others (e.g. STOP and START
+# from an approval flow). Env var accepts comma-separated form, e.g. SETRESTART,RECONNECTDATA.
+allowed_commands = ["STOP", "START", "RESTART", "RECONNECTDATA", "RECONNECTACCOUNT", "ENABLEAPI", "EXIT", "RESTARTSOCAT", "PAUSE", "RESUME", "HITL_RESUME", "RESUME_RECONNECT", "MAINT_HOLD", "MAINT_RELEASE", "SETSTATE", "IBSTATUS", "SETRESTART"]
+# @env: IBCTL_ALLOWED_COMMANDS
 
 [agent]
 # Unix domain socket path for Rust↔Java agent IPC.

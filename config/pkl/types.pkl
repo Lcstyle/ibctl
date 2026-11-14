@@ -50,6 +50,9 @@ typealias IbStatusRegion = "NA"|"EU"|"APAC"
 typealias DockerRestartPolicy = "no"|"always"|"on-failure"|"unless-stopped"
 typealias NotificationChannel = "ntfy"|"slack"|"telegram"
 typealias ReloginFailureAction = "reauth"|"restart"
+/// An action command ibctl's TCP command server can accept. Queries (STATUS,
+/// STATE, CONFIG, LOGS, WINDOWS, SUBSCRIBE) are always allowed and not listed.
+typealias CommandName = "STOP"|"START"|"RESTART"|"RECONNECTDATA"|"RECONNECTACCOUNT"|"ENABLEAPI"|"EXIT"|"RESTARTSOCAT"|"PAUSE"|"RESUME"|"HITL_RESUME"|"RESUME_RECONNECT"|"MAINT_HOLD"|"MAINT_RELEASE"|"SETSTATE"|"IBSTATUS"|"SETRESTART"
 typealias TcpPort = UInt16(this >= 1)
 typealias CallbackHours = UInt(this >= 1 && this <= 168)
 typealias DayOfWeek = UInt8(this <= 6)
@@ -71,6 +74,13 @@ typealias IpAddress = String(
 typealias IpOrNetwork = String(
   matches(Regex(#"((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(/(3[0-2]|[12]?\d))?"#))
   || matches(Regex(#"[0-9A-Fa-f.]*:[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*(/(12[0-8]|1[01]\d|[1-9]?\d))?"#))
+)
+
+// An IANA time zone name ("America/New_York", "Etc/GMT+5", "UTC"), or empty. Pkl
+// cannot consult the tz database, so this checks the shape only; preflight looks
+// the name up.
+typealias OptionalTimeZone = String(
+  isEmpty || matches(Regex(#"UTC|GMT|[A-Za-z]+(/[A-Za-z0-9][A-Za-z0-9_+-]*){1,2}"#))
 )
 
 // --- Deployment Layer ---
@@ -312,6 +322,25 @@ class GatewayConfig {
   /// @env TWS_MAJOR_VRSN
   twsMajorVrsn: String = ""
 
+  /// IB Gateway's own session time zone. Empty means ibctl leaves the Gateway's
+  /// jts.ini alone and only reports the zone in use. When set, ibctl writes it
+  /// into the `[Logon] TimeZone` line of the mode's jts.ini before every Gateway
+  /// launch and checks it after login. `time_zone_live` / `time_zone_paper`
+  /// override `time_zone` for that mode. This is separate from the container's
+  /// `TZ`, which only sets the clock zone of the container and the JVM.
+  /// @env TIME_ZONE
+  timeZone: OptionalTimeZone = ""
+
+  /// Gateway session time zone for live mode; overrides `time_zone` when set.
+  /// An IANA name such as America/New_York, or empty. See `time_zone`.
+  /// @env TIME_ZONE_LIVE
+  timeZoneLive: OptionalTimeZone = ""
+
+  /// Gateway session time zone for paper mode; overrides `time_zone` when set.
+  /// An IANA name such as America/New_York, or empty. See `time_zone`.
+  /// @env TIME_ZONE_PAPER
+  timeZonePaper: OptionalTimeZone = ""
+
   /// JVM heap size in MB. Must be >= 64 or the JVM refuses to launch.
   /// @env JAVA_HEAP_SIZE
   javaHeapSize: UInt(this >= 64) = 768
@@ -375,6 +404,21 @@ class CommandServerConfig {
   /// Empty locks out every client — schema rejects the empty case.
   /// @env IBCTL_CONTROL_FROM
   controlFrom: Listing<IpOrNetwork>(!isEmpty) = new Listing { "127.0.0.1"; "172.0.0.0/8" }
+
+  /// Action commands the command server accepts; any other action command is refused
+  /// with "ERROR command not allowed by command_server.allowed_commands". One list for
+  /// the live and paper instances, and the master switch for every caller: TCP clients,
+  /// dashboard buttons and API tokens (the localhost-only rule for privileged commands
+  /// still applies on top). Queries (STATUS, STATE, CONFIG, LOGS, WINDOWS, SUBSCRIBE)
+  /// are always allowed and are not valid names here. Empty means the default, all of
+  /// them. Listing too few can break tooling that sends the others (e.g. STOP and START
+  /// from an approval flow). Env var accepts comma-separated form, e.g. SETRESTART,RECONNECTDATA.
+  /// @env IBCTL_ALLOWED_COMMANDS
+  allowedCommands: Listing<CommandName> = new Listing {
+    "STOP"; "START"; "RESTART"; "RECONNECTDATA"; "RECONNECTACCOUNT"; "ENABLEAPI"; "EXIT"
+    "RESTARTSOCAT"; "PAUSE"; "RESUME"; "HITL_RESUME"; "RESUME_RECONNECT"; "MAINT_HOLD"
+    "MAINT_RELEASE"; "SETSTATE"; "IBSTATUS"; "SETRESTART"
+  }
 }
 
 /// Java agent IPC settings.
@@ -388,7 +432,7 @@ class AgentConfig {
 
 /// Web dashboard settings (consumed by entrypoint + FastAPI, not by Rust directly).
 /// Stored in TOML under [dashboard] — Rust ignores unknown sections via serde(flatten).
-/// Auth secrets (OAuth client secrets, bearer tokens) are env-only — never in TOML.
+/// Auth secrets (the dashboard password, OAuth client secrets) are env-only — never in TOML.
 class DashboardConfig {
   /// Enable the web dashboard. Starts the entrypoint FastAPI when true.
   /// @env IBCTL_DASHBOARD_ENABLED
@@ -398,9 +442,12 @@ class DashboardConfig {
   /// @env IBCTL_DASHBOARD_PORT
   port: TcpPort = 8080
 
-  /// Bearer token for API auth; empty = no auth. Secrets never go in TOML —
-  /// set the actual token via IBCTL_DASHBOARD_TOKEN. The schema enforces
-  /// length == 0 (env-only).
+  /// The dashboard password, used only by the login form. It is not a Bearer token
+  /// and not an HTTP Basic password; API clients use named API tokens, created and
+  /// revoked on the dashboard's API access page. Empty = no password login (set
+  /// GitHub OAuth or OIDC instead, or the dashboard stays read-only). Secrets never
+  /// go in TOML: set the actual password via IBCTL_DASHBOARD_TOKEN. The schema
+  /// enforces length == 0 (env-only).
   /// @env IBCTL_DASHBOARD_TOKEN
   token: String(length == 0) = ""
 
@@ -425,6 +472,15 @@ class DashboardConfig {
   /// OIDC scopes, space-separated.
   /// @env IBCTL_OIDC_SCOPES
   oidcScopes: String = "openid profile email"
+
+  /// Minutes without any user activity before a dashboard login ends and the
+  /// person has to sign in again. 0 turns the idle logout off; the 7-day limit
+  /// on every session still applies. Applies to the password login and to
+  /// GitHub OAuth / OIDC alike. The page's own background refreshes don't count
+  /// as activity, so an open tab left alone does time out. API tokens are not
+  /// sessions and are not affected. A value outside 0..1440 is a preflight error.
+  /// @env IBCTL_SESSION_IDLE_MINUTES
+  sessionIdleMinutes: Int(isBetween(0, 1440)) = 5
 
   /// Enable notifications (ntfy, Slack, Telegram). Requires dashboard.enabled.
   /// @env IBCTL_NOTIFICATIONS_ENABLED
@@ -713,8 +769,6 @@ class ComposeConfig {
   exposePaperCommandServer: Boolean = true
   /// Expose VNC port
   exposeVnc: Boolean = true
-  /// Expose noVNC websocket port
-  exposeNoVnc: Boolean = true
   /// Expose dashboard port
   exposeDashboard: Boolean = true
   /// Named volume for persistent state

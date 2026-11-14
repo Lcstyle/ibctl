@@ -103,20 +103,20 @@ class TestRateLimiterSecondWithinWindow:
         limiter = RateLimiter(window_secs=60.0, max_requests=3)
 
         # First three pass, fourth is rejected — same IP, same window.
-        assert limiter.check("10.0.0.1") is True
-        assert limiter.check("10.0.0.1") is True
-        assert limiter.check("10.0.0.1") is True
-        assert limiter.check("10.0.0.1") is False
+        assert limiter.check("198.51.100.1") is True
+        assert limiter.check("198.51.100.1") is True
+        assert limiter.check("198.51.100.1") is True
+        assert limiter.check("198.51.100.1") is False
 
         # A different IP has its own bucket — not affected by the above.
-        assert limiter.check("10.0.0.2") is True
+        assert limiter.check("198.51.100.2") is True
 
         # A separate limiter instance shares no state (independent counters).
         other = RateLimiter(window_secs=60.0, max_requests=3)
-        assert other.check("10.0.0.1") is True
-        assert other.check("10.0.0.1") is True
-        assert other.check("10.0.0.1") is True
-        assert other.check("10.0.0.1") is False
+        assert other.check("198.51.100.1") is True
+        assert other.check("198.51.100.1") is True
+        assert other.check("198.51.100.1") is True
+        assert other.check("198.51.100.1") is False
 
     def test_callback_common_rate_limiter_window_expiry(self):
         """Timestamps older than `window_secs` fall out of the bucket."""
@@ -132,7 +132,7 @@ class TestRateLimiterSecondWithinWindow:
         # current twofa module) so the extraction test can reach in.
         from collections import deque
 
-        limiter._ip_timestamps["10.0.0.9"] = deque([stale, stale])
+        limiter._ip_timestamps["198.51.100.9"] = deque([stale, stale])
 
         # Fresh request after expiry should be allowed.
-        assert limiter.check("10.0.0.9") is True
+        assert limiter.check("198.51.100.9") is True

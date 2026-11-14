@@ -210,3 +210,45 @@ def _transport(state: str, paused: bool) -> dict:
 )
 def test_the_state_tab_offers_what_the_gateway_will_act_on(state, paused, expected):
     assert _transport(state, paused) == expected
+
+
+# --------------------------------------------------------------------------
+# A paused ibctl whose Gateway has exited
+# --------------------------------------------------------------------------
+
+
+async def _overview_with(paused_gateway_down: bool) -> BeautifulSoup:
+    app, client_ctx = await _make_client()
+    registry = app.state.instance_registry
+    for mode in ("live", "paper"):
+        status = _build_status_dict(state="Connected")
+        status["site"] = {"role": "primary", "auto_launch": True}
+        if paused_gateway_down and mode == "paper":
+            status.update({"paused": True, "paused_gateway_down": True, "gateway_running": False, "ready": False})
+            status["jvm"] = {"pid": None, "alive": False, "uptime_secs": 0}
+        registry._cache[f"{mode}:STATUS"] = _CachedResponse(status, ttl=60.0)
+    async with client_ctx as client:
+        html = (await client.get("/partials/overview")).text
+    return BeautifulSoup(html, "html.parser")
+
+
+@pytest.mark.asyncio
+async def test_a_paused_machine_with_no_gateway_says_so_and_offers_resume():
+    soup = await _overview_with(paused_gateway_down=True)
+
+    bar = soup.find(id="cmd-result-paper").parent
+    by = _by_label(bar.find_all("button"))
+    assert "sendCmd('RESUME','paper')" in by["Resume"]["onclick"]
+    assert "Paused" in bar.get_text() and "Gateway is not running" in bar.get_text()
+
+    live_bar = soup.find(id="cmd-result-live").parent
+    assert "Resume" not in _by_label(live_bar.find_all("button")), "a healthy mode offers no Resume"
+    assert "Gateway is not running" not in live_bar.get_text()
+
+
+@pytest.mark.asyncio
+async def test_the_gateway_state_row_does_not_pass_a_frozen_state_off_as_current():
+    soup = await _overview_with(paused_gateway_down=True)
+
+    text = " ".join(soup.get_text().split())
+    assert "Connected (paused, Gateway not running)" in text

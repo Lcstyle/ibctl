@@ -88,7 +88,16 @@ async def send_command(request: Request):
 # --- IB System Status API ---
 
 
-@router.get("/api/v1/ib-status")
+# What an anonymous caller may read from the IB status. The operator's free-text
+# override reason and the scraper's fetch error are left out; everything else is
+# IB's own public status page or a flag.
+PUBLIC_IB_STATUS_FIELDS = frozenset({
+    "ok", "status", "override_active", "override_status", "last_updated",
+    "alerts", "daily_resets", "weekend_resets",
+})
+
+
+@router.api_route("/api/v1/ib-status", methods=["GET", "HEAD"])
 async def get_ib_status(request: Request):
     """Current IB system status with alerts and maintenance windows.
 
@@ -146,6 +155,8 @@ async def get_ib_status(request: Request):
         result["daily_resets"] = []
         result["weekend_resets"] = []
 
+    if getattr(request.state, "login", None) is None:
+        return {key: value for key, value in result.items() if key in PUBLIC_IB_STATUS_FIELDS}
     return result
 
 

@@ -28,8 +28,8 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.config import DashboardSettings
 from app.main import create_app
+from tests.auth_helpers import authed_settings
 
 SIGNING_KEY = "test-signing-key-for-e2e"  # gitleaks:allow
 
@@ -111,12 +111,9 @@ def _aggressive_status():
 
 
 def _make_app():
-    settings = DashboardSettings(
-        port=8080,
-        token="",
-        debug_mode=False,
-        ibctl_host="127.0.0.1",
-        ibctl_port=7462,
+    # A dashboard password is configured and the client stays signed out:
+    # a notification link works without a login.
+    settings = authed_settings(
         trading_mode="both",
         ibctl_paper_host="127.0.0.1",
         ibctl_paper_port=7463,
