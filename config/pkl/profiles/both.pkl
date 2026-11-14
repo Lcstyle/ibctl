@@ -1,0 +1,15 @@
+/// Dual mode profile — live + paper instances side by side.
+amends "../base.pkl"
+
+profile = "both"
+
+deployment {
+  tradingMode = "both"
+}
+
+compose {
+  exposeLiveApi = true
+  exposePaperApi = true
+  exposeCommandServer = true
+  exposePaperCommandServer = true
+}

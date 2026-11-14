@@ -1,0 +1,724 @@
+/// ibctl configuration schema.
+///
+/// This is the canonical type definition for the ibctl deployment model.
+/// All generated config artifacts (TOML, Compose, .env) derive from this schema.
+///
+/// The runtime layer mirrors ibctl/src/config.rs structs exactly — the generated
+/// TOML must satisfy the Rust parser.
+module ibctl.types
+
+import "ui_strings.pkl" as UiStringsModule
+
+// --- Module-level properties (amendable by base.pkl and profiles) ---
+
+/// Human-readable project name
+name: String = "ibctl"
+
+/// Profile identifier (e.g., "live", "both", "dashboard")
+profile: String = "base"
+
+/// High-level deployment settings
+deployment: Deployment = new Deployment {}
+
+/// Runtime config — maps to ibctl.toml sections consumed by Rust
+runtime: RuntimeConfig = new RuntimeConfig {}
+
+/// Container/image settings for Docker deployment
+container: ContainerConfig = new ContainerConfig {}
+
+/// Docker Compose service definition shape
+compose: ComposeConfig = new ComposeConfig {}
+
+/// UI string catalog — canonical English descriptions for status enums,
+/// recovery phases, control-bar buttons, and other UI terms that have no
+/// home in the runtime config schema. Sourced from ui_strings.pkl; the
+/// dashboard's Jinja ``tt(key)`` helper looks values up by dotted key
+/// path (e.g. ``tt('ui.recovery.phase.aggressive')``).
+ui = UiStringsModule
+
+// --- Enums ---
+
+typealias TradingMode = "live"|"paper"|"both"
+typealias TotpProvider = "oathtool"
+typealias TwoFaTimeoutAction = "restart"|"exit"
+typealias GatewayProgram = "gateway"|"tws"
+typealias SessionAction = "primary"|"secondary"|"primaryoverride"
+typealias AcceptIncoming = "accept"|"reject"|"manual"
+typealias SiteRole = "primary"|"standby"
+typealias LogLevel = "debug"|"info"|"warn"|"error"
+typealias IbStatusRegion = "NA"|"EU"|"APAC"
+typealias DockerRestartPolicy = "no"|"always"|"on-failure"|"unless-stopped"
+typealias NotificationChannel = "ntfy"|"slack"|"telegram"
+typealias ReloginFailureAction = "reauth"|"restart"
+typealias TcpPort = UInt16(this >= 1)
+typealias CallbackHours = UInt(this >= 1 && this <= 168)
+typealias DayOfWeek = UInt8(this <= 6)
+typealias HourOfDay = UInt8(this <= 23)
+
+// Formats preflight (dashboard/app/preflight/models.py) also checks, so a bad
+// value fails here, when the configs are generated, not at deploy.
+typealias AbsolutePath = String(startsWith("/"))
+typealias OptionalAbsolutePath = String(isEmpty || startsWith("/"))
+typealias HttpUrl = String(matches(Regex(#"https?://[^/?#\s]+([/?#]\S*)?"#)))
+typealias OptionalHttpUrl = String(isEmpty || matches(Regex(#"https?://[^/?#\s]+([/?#]\S*)?"#)))
+// An IPv4 address, or something shaped like an IPv6 one: hex digits and at least
+// two colons (preflight checks it fully).
+typealias IpAddress = String(
+  matches(Regex(#"((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)"#))
+  || matches(Regex(#"[0-9A-Fa-f.]*:[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*"#))
+)
+// An address, or a network with a prefix length (172.0.0.0/8).
+typealias IpOrNetwork = String(
+  matches(Regex(#"((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(/(3[0-2]|[12]?\d))?"#))
+  || matches(Regex(#"[0-9A-Fa-f.]*:[0-9A-Fa-f.]*:[0-9A-Fa-f:.]*(/(12[0-8]|1[01]\d|[1-9]?\d))?"#))
+)
+
+// --- Deployment Layer ---
+
+/// High-level deployment identity — what kind of system is this?
+class Deployment {
+  /// Trading mode for the deployment: live | paper | both. Propagated by base.pkl
+  /// into `runtime.auth.tradingMode` — the value rendered under `[auth].trading_mode`.
+  /// @env TRADING_MODE
+  tradingMode: TradingMode = "live"
+
+  /// Site role for HA topologies: primary | standby. Rendered under `[site].role`.
+  /// @env IBCTL_SITE_ROLE
+  siteRole: SiteRole = "primary"
+
+  /// Auto-launch Gateway on container startup. Rendered under `[site].auto_launch`.
+  /// A standby node with auto_launch=true is an HA split-brain foot-gun: two nodes
+  /// race the same IB session. Preflight has an IBCTL_STANDBY_AUTO_LAUNCH_OK=1
+  /// escape hatch for niche hot-standby setups.
+  /// @env IBCTL_AUTO_LAUNCH
+  autoLaunch: Boolean = true
+
+  /// IANA timezone name for the container. Consumed by `docker/entrypoint.sh`
+  /// via env — does NOT render into TOML.
+  timezone: String = "America/New_York"
+
+  /// Cross-field invariant: standby + auto_launch is a split-brain risk.
+  hidden ok = siteRole != "standby" || autoLaunch == false
+}
+
+// --- Runtime Layer (mirrors config.rs) ---
+
+/// Runtime config tree — mirrors ibctl/src/config.rs::Config. Unknown top-level
+/// sections are rejected by Pydantic preflight and silently ignored by Rust's
+/// serde parser (serde(flatten) semantics on Config).
+class RuntimeConfig {
+  /// IB login credentials. Passwords and TOTP secrets are env-only; only tws_userid
+  /// and trading_mode appear in generated TOML.
+  auth: AuthConfig = new AuthConfig {}
+
+  /// Two-factor authentication (TOTP) settings and human-in-the-loop backoff policy.
+  twofa: TwoFaConfig = new TwoFaConfig {}
+
+  /// Gateway/TWS installation paths, JVM tuning, and API/socat port assignments.
+  gateway: GatewayConfig = new GatewayConfig {}
+
+  /// Session conflict handling and scheduled cold-restart window.
+  session: SessionConfig = new SessionConfig {}
+
+  /// IBC-compatible TCP command server (required for dashboard control).
+  commandServer: CommandServerConfig = new CommandServerConfig {}
+
+  /// Rust↔Java agent IPC settings (Unix domain socket).
+  agent: AgentConfig = new AgentConfig {}
+
+  /// Web dashboard settings (consumed by entrypoint + FastAPI, not by Rust directly).
+  /// OAuth client secrets, bearer tokens are env-only.
+  dashboard: DashboardConfig = new DashboardConfig {}
+
+  /// IB system status scraper settings (consumed by dashboard daemon).
+  ibSystemStatus: IbSystemStatusConfig = new IbSystemStatusConfig {}
+
+  /// ibctl-side policy for IBSTATUS pushes (consumed by ibctl state machine).
+  /// Separate from ibSystemStatus which is the dashboard-side scraper.
+  ibStatus: IbStatusConfig = new IbStatusConfig {}
+
+  /// Log level, log directory, and futures-session log rotation.
+  logging: LoggingConfig = new LoggingConfig {}
+
+  /// Timing knobs for UI automation, retry cadence, and the three-phase reconnect
+  /// recovery coordinator.
+  timing: TimingConfig = new TimingConfig {}
+}
+
+/// Auth config. Passwords are env-only (TWS_PASSWORD / TWS_PASSWORD_FILE for live;
+/// TWS_PASSWORD_PAPER / TWS_PASSWORD_PAPER_FILE for paper) — never in TOML.
+/// Only tws_userid and trading_mode appear in generated TOML.
+class AuthConfig {
+  /// IB login username. Set via env var, not in TOML. Must be empty (env-only)
+  /// or an alphanumeric IB username.
+  /// @env TWS_USERID
+  twsUserid: String(matches(Regex("^[a-zA-Z0-9_]*$"))) = ""
+
+  /// Trading mode: live | paper | both. Overrides deployment.tradingMode when
+  /// set directly on runtime.auth.
+  /// @env TRADING_MODE
+  tradingMode: TradingMode = "paper"
+
+  /// Paper account sub-config, only needed for dual mode (trading_mode=both).
+  paper: PaperAuthConfig = new PaperAuthConfig {}
+}
+
+class PaperAuthConfig {
+  /// Paper account username. Set via env var, not in TOML. Must be empty
+  /// (env-only) or an alphanumeric IB username.
+  /// @env TWS_USERID_PAPER
+  twsUserid: String(matches(Regex("^[a-zA-Z0-9_]*$"))) = ""
+}
+
+/// Two-factor authentication settings.
+class TwoFaConfig {
+  /// Name of the env var holding the TOTP shared-key value used to generate 2FA codes.
+  /// Field stores the *env var name*, never the credential itself.
+  /// This is the *name* of an env var — not the secret value itself.
+  secretEnv: String(matches(Regex("^[A-Z][A-Z0-9_]*$"))) = "TWOFACTOR_CODE"
+
+  /// TOTP provider: "oathtool" (shells out) or "builtin" (not yet implemented).
+  /// @env TOTP_PROVIDER
+  provider: TotpProvider = "oathtool"
+
+  /// What a failed 2FA round does: "restart" (retry the login as `backoff`
+  /// says, in the running Gateway) or "exit" (shut ibctl down).
+  /// @env TWOFA_TIMEOUT_ACTION
+  timeoutAction: TwoFaTimeoutAction = "restart"
+
+  /// Seconds an IB Key push may go unanswered before ibctl says it is waiting.
+  /// It never ends the round: the Gateway does, by closing its prompt; a prompt
+  /// still open after 30 min is cancelled. Also bounds the wait for
+  /// the challenge after the device picker closes. Named after IBC's
+  /// SecondFactorAuthenticationExitInterval, IBC's wait AFTER the prompt closes.
+  /// Rust code default is 180; base.pkl overrides to 120 for Docker deployment.
+  /// @env TWOFA_EXIT_INTERVAL
+  exitInterval: UInt(this > 0) = 180
+
+  /// 2FA device name for the device selection dialog. Empty = skip selection.
+  /// @env TWOFA_DEVICE
+  device: String = ""
+
+  /// Force re-login even after a 2FA timeout — overrides timeoutAction=restart
+  /// semantics when set.
+  /// @env RELOGIN_AFTER_TWOFA_TIMEOUT
+  reloginAfterTimeout: Boolean = false
+
+  /// Human-in-the-loop 2FA backoff policy.
+  backoff: TwoFaBackoffConfig = new TwoFaBackoffConfig {}
+}
+
+/// Policy for failed 2FA rounds. A round fails when the Gateway ends it
+/// without a login — it closes the IB Key prompt and shows its login form
+/// again — never on a timer. Retries re-submit the login in the
+/// running Gateway. After `maxImmediateAttempts` failed rounds in a row, or
+/// the first one inside `unattendedHours`, ibctl enters WaitingForHitl2fa — a
+/// cooperative state that either auto-retries on a schedule, waits for an
+/// operator ntfy callback, or both. Prevents overnight IB Key prompt spam.
+///
+/// HMAC-SHA256 signing key for ntfy action URLs is env-only:
+/// IBCTL_NTFY_ACTION_SIGNING_KEY (never in TOML).
+class TwoFaBackoffConfig {
+  /// After this many failed 2FA rounds in a row, stop retrying and enter
+  /// WaitingForHitl2fa. 0 = disabled (legacy behavior: loop forever).
+  /// @env IBCTL_TWOFA_MAX_IMMEDIATE_ATTEMPTS
+  maxImmediateAttempts: UInt = 3
+
+  /// What a failed 2FA round leads to. The names date from when a timer
+  /// ended rounds and relaunched the JVM; retries now stay in the running Gateway.
+  ///   "restart_then_hitl" — retry the login; HITL once maxImmediateAttempts rounds failed (default)
+  ///   "restart_forever"   — never park (retry after every failed round)
+  ///   "hitl_immediately"  — the first failed round goes straight to HITL
+  /// unattendedHours outranks all three.
+  /// @env IBCTL_TWOFA_ON_TIMEOUT
+  onTimeout: TwoFaOnTimeout = "restart_then_hitl"
+
+  /// HITL resume strategy: "disabled" | "periodic" | "ntfy_callback" | "both".
+  /// "disabled" = stay in HITL forever (dashboard still reflects state; operator
+  /// must send HITL_RESUME manually via dashboard).
+  /// @env IBCTL_TWOFA_STRATEGY
+  strategy: HitlStrategy = "periodic"
+
+  /// Retry cadence in minutes for periodic / both. Single value = constant.
+  /// List = traverse then hold at last element. Must be non-empty for non-
+  /// disabled strategies that include a timer. Elements must be > 0.
+  /// @env IBCTL_TWOFA_INTERVALS_MINUTES
+  intervalsMinutes: Listing<UInt(this > 0)> = new Listing { 60 }
+
+  /// Hours the signed ntfy-action URL stays valid — one-shot, redeemed on
+  /// first successful click. Range 1..=168 (one week ceiling).
+  /// @env IBCTL_TWOFA_CALLBACK_VALID_HOURS
+  callbackValidHours: CallbackHours = 12
+
+  /// Counter-reset policy after a successful reach of Connected.
+  ///   "any_reach" — reset as soon as Connected (default)
+  ///   "stable"    — require Connected sustained for stableSecs before reset
+  /// @env IBCTL_TWOFA_COUNTER_RESET
+  counterReset: CounterResetScope = "any_reach"
+
+  /// Seconds Connected must persist before resetting the attempt counter
+  /// when counterReset = "stable". Ignored for "any_reach".
+  /// @env IBCTL_TWOFA_STABLE_SECS
+  stableSecs: UInt = 300
+
+  /// Does a scheduled cold restart preempt WaitingForHitl2fa?
+  /// true  — cold restart wins; exit HITL, run restart, re-enter login (default)
+  /// false — cold restart deferred until HITL exits via its normal path
+  /// @env IBCTL_TWOFA_COLD_RESTART_PREEMPTS_HITL
+  coldRestartPreemptsHitl: Boolean = true
+
+  /// If the initial ntfy push fails (network blip, ntfy server down), how many
+  /// times to retry the send on subsequent scheduled-retry wakeups. 0 = give up
+  /// silently. Only meaningful when strategy includes ntfy_callback.
+  /// @env IBCTL_TWOFA_NTFY_SEND_RETRIES
+  ntfySendRetries: UInt = 1
+
+  /// Hours nobody answers an IB Key push: "HH:MM-HH:MM" in the container's time
+  /// zone (TZ), may wrap midnight; "" or "off" = none. A 2FA round that fails
+  /// inside them parks in WaitingForHitl2fa with the Gateway kept running,
+  /// instead of sending another push. It stays parked until the operator's
+  /// Retry or the Sunday re-auth: no HITL auto-retry fires inside the window,
+  /// and none fires because it ended.
+  /// @env IBCTL_TWOFA_UNATTENDED_HOURS
+  unattendedHours: String(
+    matches(Regex(#"^(|off|([01]\d|2[0-3]):[0-5]\d-([01]\d|2[0-3]):[0-5]\d)$"#))
+    && (length < 11 || take(5) != drop(6))
+  ) = ""
+
+  /// Cross-field invariants mirroring dashboard/app/preflight/models.py::TwoFaBackoffConfig.
+  hidden ok = (onTimeout != "restart_then_hitl" || maxImmediateAttempts >= 1)
+           && (onTimeout != "hitl_immediately" || strategy != "disabled")
+           && (counterReset != "stable" || stableSecs > 0)
+           && ((strategy != "periodic" && strategy != "both") || intervalsMinutes.length > 0)
+           && (unattendedHours.length != 11 || unattendedHours.take(5) != unattendedHours.drop(6))
+}
+
+typealias TwoFaOnTimeout = "restart_then_hitl" | "restart_forever" | "hitl_immediately"
+typealias HitlStrategy = "disabled" | "periodic" | "ntfy_callback" | "both"
+typealias CounterResetScope = "any_reach" | "stable"
+
+/// Gateway/TWS installation and port settings.
+class GatewayConfig {
+  /// Path to the TWS/Gateway installation directory.
+  /// @env TWS_PATH
+  twsPath: AbsolutePath = "/home/ibgateway/Jts"
+
+  /// Settings storage path; empty = use twsPath. The recovery-marker persistence
+  /// layer writes here — ensure Jts_live and Jts_paper live on a persistent volume.
+  /// @env TWS_SETTINGS_PATH
+  twsSettingsPath: OptionalAbsolutePath = ""
+
+  /// Gateway/TWS major version. Auto-detected from the installation if empty.
+  /// @env TWS_MAJOR_VRSN
+  twsMajorVrsn: String = ""
+
+  /// JVM heap size in MB. Must be >= 64 or the JVM refuses to launch.
+  /// @env JAVA_HEAP_SIZE
+  javaHeapSize: UInt(this >= 64) = 768
+
+  /// Program type: "gateway" or "tws".
+  /// @env GATEWAY_OR_TWS
+  gatewayOrTws: GatewayProgram = "gateway"
+
+  /// Gateway API port for live trading (Gateway listens here; default 4001).
+  /// Paired with liveSocatPort which fronts external clients.
+  liveApiPort: TcpPort = 4001
+
+  /// Gateway API port for paper trading (Gateway listens here; default 4002).
+  paperApiPort: TcpPort = 4002
+
+  /// Socat forwarding port for live (external-facing; default 4003).
+  /// External clients connect here; socat forwards to liveApiPort.
+  liveSocatPort: TcpPort = 4003
+
+  /// Socat forwarding port for paper (external-facing; default 4004).
+  paperSocatPort: TcpPort = 4004
+}
+
+/// Session conflict handling and scheduled cold-restart window.
+class SessionConfig {
+  /// Session conflict action: "primary" | "secondary" | "primaryoverride".
+  /// @env IBCTL_SESSION_ACTION
+  action: SessionAction = "primary"
+
+  /// Incoming API connection policy: "accept" | "reject" | "manual".
+  /// @env IBCTL_ACCEPT_INCOMING
+  acceptIncoming: AcceptIncoming = "accept"
+
+  /// Cold restart time in "HH:MM" 24h format (e.g., "09:00"). Empty = disabled.
+  /// Schema-enforced format — hand-edits that violate it are rejected at Pkl eval.
+  /// @env TWS_COLD_RESTART
+  twsColdRestart: String(this == "" || matches(Regex("^([01][0-9]|2[0-3]):[0-5][0-9]$"))) = ""
+
+  /// Cold restart day of week: 0=Sunday, 1=Monday, ..., 6=Saturday. Default 0 (Sunday).
+  /// @env TWS_COLD_RESTART_DAY
+  twsColdRestartDay: DayOfWeek = 0
+}
+
+/// IBC-compatible TCP command server.
+class CommandServerConfig {
+  /// Enable the IBC-compatible TCP command server (required for dashboard control).
+  /// @env IBCTL_COMMAND_SERVER_ENABLED
+  enabled: Boolean = false
+
+  /// Live instance command server TCP port.
+  /// @env IBCTL_COMMAND_PORT
+  port: TcpPort = 7462
+
+  /// Paper instance command server TCP port.
+  paperPort: TcpPort = 7463
+
+  /// TCP bind address for the command server.
+  bindAddress: IpAddress = "0.0.0.0"
+
+  /// IP allow-list for command access — CIDR-aware. Env var accepts comma-separated form.
+  /// Empty locks out every client — schema rejects the empty case.
+  /// @env IBCTL_CONTROL_FROM
+  controlFrom: Listing<IpOrNetwork>(!isEmpty) = new Listing { "127.0.0.1"; "172.0.0.0/8" }
+}
+
+/// Java agent IPC settings.
+/// Dual-mode socket paths (agent-live.sock, agent-paper.sock) are derived
+/// by docker/entrypoint.sh at runtime, not configured here.
+class AgentConfig {
+  /// Unix domain socket path for Rust↔Java agent IPC.
+  /// @env IBCTL_AGENT_SOCKET
+  socketPath: AbsolutePath = "/run/ibctl/agent.sock"
+}
+
+/// Web dashboard settings (consumed by entrypoint + FastAPI, not by Rust directly).
+/// Stored in TOML under [dashboard] — Rust ignores unknown sections via serde(flatten).
+/// Auth secrets (OAuth client secrets, bearer tokens) are env-only — never in TOML.
+class DashboardConfig {
+  /// Enable the web dashboard. Starts the entrypoint FastAPI when true.
+  /// @env IBCTL_DASHBOARD_ENABLED
+  enabled: Boolean = false
+
+  /// Dashboard HTTP port.
+  /// @env IBCTL_DASHBOARD_PORT
+  port: TcpPort = 8080
+
+  /// Bearer token for API auth; empty = no auth. Secrets never go in TOML —
+  /// set the actual token via IBCTL_DASHBOARD_TOKEN. The schema enforces
+  /// length == 0 (env-only).
+  /// @env IBCTL_DASHBOARD_TOKEN
+  token: String(length == 0) = ""
+
+  /// Enable dashboard debug endpoints.
+  /// @env IBCTL_DEBUG_MODE
+  debugMode: Boolean = false
+
+  /// Enable GitHub OAuth login. Requires the IBCTL_GITHUB_OAUTH_CLIENT_ID and
+  /// IBCTL_GITHUB_OAUTH_CLIENT_SECRET env vars (secrets are env-only).
+  /// @env IBCTL_GITHUB_OAUTH_ENABLED
+  githubOauthEnabled: Boolean = false
+
+  /// Enable generic OIDC/SSO login (Authentik, Keycloak, etc.). Requires
+  /// IBCTL_OIDC_CLIENT_ID, IBCTL_OIDC_CLIENT_SECRET, and oidcIssuer.
+  /// @env IBCTL_OIDC_ENABLED
+  oidcEnabled: Boolean = false
+
+  /// OIDC issuer URL (e.g. https://auth.example.com/application/o/ibctl/).
+  /// @env IBCTL_OIDC_ISSUER
+  oidcIssuer: OptionalHttpUrl = ""
+
+  /// OIDC scopes, space-separated.
+  /// @env IBCTL_OIDC_SCOPES
+  oidcScopes: String = "openid profile email"
+
+  /// Enable notifications (ntfy, Slack, Telegram). Requires dashboard.enabled.
+  /// @env IBCTL_NOTIFICATIONS_ENABLED
+  notificationsEnabled: Boolean = false
+
+  /// Notification delivery channel: "ntfy" | "slack" | "telegram".
+  /// @env IBCTL_NOTIFICATION_CHANNEL
+  notificationChannel: NotificationChannel = "ntfy"
+
+  /// ZMQ PUB socket for external status subscribers. On by default when the
+  /// dashboard is running; set false to disable.
+  /// @env IBCTL_ZMQ_ENABLED
+  zmqEnabled: Boolean = true
+
+  /// ZMQ PUB socket TCP port.
+  /// @env IBCTL_ZMQ_PORT
+  zmqPort: TcpPort = 5556
+
+  /// External URL used to build ntfy action-button callback targets
+  /// (e.g. https://ibctl.example.com). Leave empty if the dashboard is only
+  /// reachable from inside the LAN and HITL ntfy_callback is unused.
+  /// @env IBCTL_DASHBOARD_EXTERNAL_URL
+  externalUrl: OptionalHttpUrl = ""
+
+  /// Minutes a mode's API session has to stay down before the dashboard sends
+  /// a "session down" alert. 0 turns the alert off.
+  /// @env IBCTL_SESSION_DOWN_ALERT_MINUTES
+  sessionDownAlertMinutes: UInt = 10
+
+  /// Minutes between repeat "still down" alerts while the session stays down.
+  /// 0 sends one alert per outage.
+  /// @env IBCTL_SESSION_DOWN_RENAG_MINUTES
+  sessionDownRenagMinutes: UInt = 60
+
+  /// When an outage starts at a scheduled restart (the daily auto restart or
+  /// the weekly cold restart), minutes to hold the first "session down" alert
+  /// while the Gateway comes back on its own. 0 = no grace.
+  /// @env IBCTL_SCHEDULED_RESTART_GRACE_MINUTES
+  scheduledRestartGraceMinutes: UInt = 20
+
+  /// API client ID the weekly Gateway version check connects with. If it's in
+  /// use it tries the next 7, so keep ID..ID+7 clear of your own API clients.
+  /// @env IBCTL_VERSION_PROBE_CLIENT_ID
+  versionProbeClientId: Int(isBetween(0, 2147483640)) = 9172
+}
+
+/// ibctl-side policy for IBSTATUS pushes (consumed by ibctl state machine).
+/// Separate from IbSystemStatusConfig which is the dashboard-side scraper.
+class IbStatusConfig {
+  /// When the dashboard pushes IBSTATUS=unavailable, should ibctl interrupt
+  /// an already-authenticated session? Default: false.
+  ///
+  /// IBSTATUS was designed as a retry-gate — if IBKR backends are unreachable,
+  /// don't hammer them with login attempts. It was never meant to kill active
+  /// sessions. The scraper can be wrong (CDN blips, slow page updates) and
+  /// Gateway's own UI label is the authoritative "my session is healthy"
+  /// signal — detected via label inspection in the revocation bus, not via
+  /// the public status page.
+  ///
+  /// Set to true only to restore the historical behavior where any unavailable
+  /// push transitions Connected → WaitingForIB. Only useful if you trust the
+  /// scraper more than the Gateway UI label.
+  ///
+  /// Preflight enforces a live-mode guard: kickActiveSession=true combined with
+  /// deployment.tradingMode in {"live","both"} raises unless IBCTL_KICK_LIVE_SESSION_OK=1.
+  kickActiveSession: Boolean = false
+}
+
+/// IB system status scraper settings (consumed by dashboard daemon).
+class IbSystemStatusConfig {
+  /// Enable IB system status monitoring (requires dashboard.enabled).
+  /// @env IBCTL_IB_STATUS_ENABLED
+  enabled: Boolean = false
+
+  /// Fail-open TTL: if no status update arrives within this period, assume
+  /// IB is available. Prevents stale-scraper false negatives.
+  ttlSeconds: UInt(this > 0) = 600
+
+  /// Seconds between IB status page scrapes. Default 300 (5 min).
+  /// @env IB_STATUS_CHECK_INTERVAL
+  checkIntervalSeconds: UInt(this > 0) = 300
+
+  /// IB system status page URL.
+  url: HttpUrl = "https://www.interactivebrokers.com/en/software/systemStatus.php"
+
+  /// Region filter for maintenance windows: "NA" | "EU" | "APAC".
+  /// @env IB_STATUS_REGION
+  region: IbStatusRegion = "NA"
+
+  /// IB backend servers to reach via TCP probe as a liveness signal.
+  backendHosts: Listing<String> = new Listing { "cdc1-hb1.ibllc.com"; "cdc1-hb2.ibllc.com" }
+
+  /// CDN fallback host for the internet-connectivity ping check.
+  fallbackHost: String = "interactivebrokers.com"
+
+  /// Additional exchange keywords appended to the built-in list — alerts
+  /// mentioning any of these are treated as non-blocking (e.g. "PAXOS,COINBASE").
+  extraExchangeKeywords: Listing<String> = new Listing {}
+
+  /// Additional benign phrases appended to the built-in list — alerts matching
+  /// these are treated as non-blocking (e.g. "is resolved").
+  extraBenignPhrases: Listing<String> = new Listing {}
+
+  /// Additional blocking keywords appended to the built-in list — alerts matching
+  /// these are forced to CRITICAL severity (e.g. "emergency").
+  extraBlockingKeywords: Listing<String> = new Listing {}
+}
+
+/// Log output settings.
+class LoggingConfig {
+  /// Log level: "debug" | "info" | "warn" | "error".
+  /// @env IBCTL_LOG_LEVEL
+  level: LogLevel = "info"
+
+  /// Directory for persistent log files; empty = stdout only (no file logging).
+  /// @env IBCTL_LOG_DIR
+  logDir: OptionalAbsolutePath = ""
+
+  /// Use futures market session dates for log filenames instead of calendar dates.
+  /// When true, log files roll at sessionReopenHour ET (default 18 = 6 PM);
+  /// when false, files roll at midnight local time.
+  /// @env IBCTL_FUTURES_SESSION_LOGGING
+  futuresSessionLogging: Boolean = false
+
+  /// Hour (0-23, US/Eastern) when the futures session reopens and the next
+  /// trading day's log file begins. Only used when futuresSessionLogging = true.
+  /// Default 18 (6 PM ET — CME futures reopen).
+  /// @env IBCTL_SESSION_REOPEN_HOUR
+  sessionReopenHour: HourOfDay = 18
+
+  /// Days of daily log files to keep, today included; older files are
+  /// deleted by the dashboard (at start, then every 6 hours) for ibctl and
+  /// the dashboard alike. 0 keeps everything.
+  /// @env IBCTL_LOG_RETENTION_DAYS
+  retentionDays: UInt = 0
+}
+
+/// Timing knobs for UI automation and retry behavior.
+class TimingConfig {
+  /// Delay between UI actions in the config dialog (ms).
+  uiTickMs: UInt(this > 0) = 100
+
+  /// Java agent-side delay after each Swing action (ms).
+  agentTickMs: UInt(this > 0) = 50
+
+  /// Wait after clicking login button before checking for 2FA (ms).
+  postLoginDelayMs: UInt(this > 0) = 1000
+
+  /// Seconds of no popups before considering login complete (quiet threshold).
+  popupQuietSecs: UInt(this > 0) = 5
+
+  /// Max seconds to wait for popups before moving on.
+  popupMaxWaitSecs: UInt(this > 0) = 30
+
+  /// Pause after clicking login radio buttons (IB API, Paper Trading) (ms).
+  loginRadioDelayMs: UInt(this > 0) = 100
+
+  /// Seconds to wait for JVM graceful shutdown (SIGTERM) before escalating to SIGKILL.
+  jvmShutdownTimeoutSecs: UInt(this > 0) = 5
+
+  /// Seconds to wait for the login window to appear before giving up.
+  /// 0 = wait indefinitely (useful for headless servers during IB maintenance).
+  /// Default 120. This field intentionally allows 0 — see doc.
+  /// @env IBCTL_LOGIN_TIMEOUT
+  loginDialogTimeoutSecs: UInt = 120
+
+  /// Seconds to wait before restarting the JVM after an error or failure.
+  /// Gives Gateway time to self-recover from transient connection losses.
+  /// Default 90.
+  /// @env IBCTL_RESTART_DELAY
+  restartDelaySecs: UInt(this > 0) = 90
+
+  /// Max re-login attempts before cancelling and restarting the JVM. On first
+  /// attempt, waits 30s then clicks Re-login; if it fails again (up to this
+  /// limit), clicks Cancel and takes reloginFailureAction. 0 = always cancel.
+  /// Default 1.
+  /// @env IBCTL_RELOGIN_ATTEMPTS
+  reloginMaxAttempts: UInt = 1
+
+  /// Action after exhausting re-login attempts.
+  ///   "reauth"  — re-use the existing login form without killing the JVM (default)
+  ///   "restart" — kill and relaunch the JVM for a clean slate
+  /// @env IBCTL_RELOGIN_FAILURE_ACTION
+  reloginFailureAction: ReloginFailureAction = "reauth"
+
+  /// TCP probe interval to Gateway's API port during post-auth states.
+  /// Ground-truth check for "is Gateway actually listening?" — independent of
+  /// Swing UI labels. 0 = disabled (rely on label probe only).
+  /// Range: 0 | 1..=3600 seconds.
+  /// @env IBCTL_API_PORT_PROBE_INTERVAL_SECS
+  apiPortProbeIntervalSecs: UInt(this <= 3600) = 5
+
+  /// Consecutive TCP probe failures before firing ApiPortListenerLost revocation.
+  /// Absorbs transient OS-level blips. Range: 1..=10.
+  /// @env IBCTL_API_PORT_PROBE_FAILS_BEFORE_REVOKE
+  apiPortProbeFailsBeforeRevoke: UInt(this >= 1 && this <= 10) = 3
+
+  /// Three-phase reconnect recovery coordinator (Aggressive → Backoff → GivenUp).
+  recovery: RecoveryTimingConfig = new RecoveryTimingConfig {}
+
+  /// Cross-field invariant: popup max-wait must be at least the quiet threshold.
+  hidden ok = popupMaxWaitSecs >= popupQuietSecs
+}
+
+/// [timing.recovery] — Aggressive → Backoff → GivenUp reconnect coordinator.
+/// Mirrors ibctl/src/config.rs::RecoveryTimingConfig. Env overrides
+/// (IBCTL_RECOVERY_*) layer on top in Rust's `to_runtime()`.
+///
+/// Bounds asymmetry note: giveupCallbackValidHours enforces 1..=168 in Pydantic
+/// preflight only — Rust u32 and Pkl UInt accept the full range. Preflight is
+/// the stricter gate, so a hand-edited TOML with giveup_callback_valid_hours=0
+/// is blocked at boot instead of silently disabling the retry link.
+class RecoveryTimingConfig {
+  /// master enable — set false in TOML to disable the coordinator entirely
+  /// without touching env. Env IBCTL_RECOVERY_DISABLED=1|true|yes wins if set.
+  /// Default true.
+  enabled: Boolean = true
+
+  /// Aggressive → Backoff threshold (seconds). Default 3600 (1h).
+  /// @env IBCTL_RECOVERY_AGGRESSIVE_MAX_SECS
+  aggressivePhaseMaxSecs: UInt(this > 0) = 3600
+
+  /// Backoff → GivenUp threshold (seconds). Default 10800 (3h).
+  /// @env IBCTL_RECOVERY_BACKOFF_MAX_SECS
+  backoffPhaseMaxSecs: UInt(this > 0) = 10800
+
+  /// Sleep between Backoff retries (seconds). Default 900 (15 min).
+  /// @env IBCTL_RECOVERY_BACKOFF_INTERVAL_SECS
+  backoffIntervalSecs: UInt(this > 0) = 900
+
+  /// Minimum Connected dwell to count as a success and reset the phase timer.
+  /// Default 60. Guards against a 3-second flap-Connect resetting the timer
+  /// indefinitely — the exact pathology this coordinator is meant to detect.
+  /// @env IBCTL_RECOVERY_MIN_SUCCESS_DWELL_SECS
+  minSuccessDwellSecs: UInt(this > 0) = 60
+
+  /// same-error streak forcing HITL — skips time-based escalation and enters
+  /// HITL immediately when the same error fingerprint recurs. Default 8
+  /// (~40 min at 5-min cycles).
+  /// @env IBCTL_RECOVERY_FINGERPRINT_STREAK
+  fingerprintStreakForcingHitl: UInt(this > 0) = 8
+
+  /// Coalescer key for the give-up ntfy alert. Distinct kind lets the
+  /// dashboard's ntfy coalescer dedupe re-fires within the resend interval.
+  giveupNtfyKind: String(length > 0) = "reconnect_gave_up"
+
+  /// Signed retry-link validity window on the give-up alert (hours, 1..=168).
+  /// Default 12 (matches the HITL 2FA callback convention).
+  /// @env IBCTL_RECOVERY_GIVEUP_CALLBACK_VALID_HOURS
+  giveupCallbackValidHours: CallbackHours = 12
+
+  /// Minimum wall-clock interval before re-firing a give-up alert while the
+  /// state machine is still parked in GivenUp (hours). Default 6.
+  /// @env IBCTL_RECOVERY_GIVEUP_ALERT_RESEND_INTERVAL_HOURS
+  giveupAlertResendIntervalHours: UInt(this > 0) = 6
+
+  /// Cross-field invariants: phases escalate Aggressive → Backoff → GivenUp;
+  /// success dwell must fit within the aggressive phase to ever accumulate.
+  hidden ok = backoffPhaseMaxSecs > aggressivePhaseMaxSecs
+           && (!enabled || minSuccessDwellSecs < aggressivePhaseMaxSecs)
+}
+
+// --- Container Layer ---
+
+/// Docker container settings (not consumed by Rust — used for Compose generation).
+class ContainerConfig {
+  /// Container name
+  containerName: String(length > 0) = "ibctl-gateway"
+  /// Restart policy — closed Docker-syntax set
+  restartPolicy: DockerRestartPolicy = "unless-stopped"
+}
+
+// --- Compose Layer ---
+
+/// Docker Compose service definition shape.
+class ComposeConfig {
+  /// Compose service name
+  serviceName: String(length > 0) = "ib-gateway"
+  /// Expose live API port to host
+  exposeLiveApi: Boolean = true
+  /// Expose paper API port to host
+  exposePaperApi: Boolean = true
+  /// Expose live command server port
+  exposeCommandServer: Boolean = true
+  /// Expose paper command server port
+  exposePaperCommandServer: Boolean = true
+  /// Expose VNC port
+  exposeVnc: Boolean = true
+  /// Expose noVNC websocket port
+  exposeNoVnc: Boolean = true
+  /// Expose dashboard port
+  exposeDashboard: Boolean = true
+  /// Named volume for persistent state
+  persistVolumeName: String(length > 0) = "ibctl-persist"
+  /// Container mount point for persistent state
+  persistMountPath: String(length > 0) = "/opt/ibctl/persist"
+}

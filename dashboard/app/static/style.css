@@ -1,0 +1,287 @@
+/* ibctl Dashboard — dark theme */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    min-height: 100vh;
+    overflow-x: hidden;
+    max-width: 100vw;
+}
+html { overflow-x: hidden; }
+
+header {
+    background: #16213e;
+    border-bottom: 1px solid #0f3460;
+}
+
+.header-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 8px 20px 0;
+}
+.header-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: #e2e8f0;
+    letter-spacing: 1.5px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+}
+.header-version {
+    font-size: 11px;
+    color: #4ade80;
+    font-family: 'SF Mono', monospace;
+    opacity: 0.8;
+}
+
+.tabs {
+    display: flex;
+    max-width: 1200px;
+    margin: 0 auto;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar { display: none; }
+
+.tab {
+    padding: 12px 20px;
+    color: #888;
+    text-decoration: none;
+    border-bottom: 2px solid transparent;
+    transition: all 0.2s;
+    white-space: nowrap;
+    font-size: 14px;
+    flex-shrink: 0;
+}
+
+.tab:hover { color: #e0e0e0; }
+.tab.active { color: #60a5fa; border-bottom-color: #60a5fa; }
+
+main {
+    max-width: 1200px;
+    margin: 20px auto;
+    padding: 0 20px;
+    overflow: hidden;
+}
+
+.status-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+}
+
+.card {
+    background: #0f3460;
+    padding: 16px;
+    border-radius: 8px;
+    width: 100%;
+    min-width: 0;
+}
+
+.card-label { font-size: 12px; color: #888; text-transform: uppercase; }
+.card-value { font-size: 24px; font-weight: bold; margin: 4px 0; }
+.card-detail { font-size: 12px; color: #666; }
+
+/* Config two-column layout */
+.config-columns { display: flex; gap: 16px; align-items: flex-start; width: 100%; min-width: 0; }
+.config-col { flex: 1 1 0%; min-width: 0; }
+.config-col-stack { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+
+.config-grid { width: 100%; min-width: 0; }
+.config-item { display: flex; align-items: center; justify-content: flex-start; gap: 12px; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.05); width: 100%; min-width: 0; }
+.config-key { color: #888; font-size: 13px; white-space: nowrap; flex: 0 0 auto; }
+.config-key .short { display: none; }
+.config-val { color: #e0e0e0; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1 1 0%; min-width: 0; text-align: right; }
+.config-masked { color: #555; }
+
+@media (max-width: 768px) {
+    .config-columns { flex-direction: column; }
+    .config-col, .config-col-stack { width: 100%; flex: 0 0 auto; }
+    .config-item { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .config-item::-webkit-scrollbar { display: none; }
+    .config-key { font-size: 11px; }
+    .config-key .full { display: none; }
+    .config-key .short { display: inline; }
+    .config-val { font-size: 12px; white-space: nowrap; overflow: visible; text-overflow: unset; }
+    .card { padding: 10px; }
+    .card-value { font-size: 18px; }
+    main { padding: 0 8px; margin: 8px auto; }
+    .status-cards { grid-template-columns: 1fr; }
+}
+
+.status-connected { color: #4ade80; }
+.status-warning { color: #fbbf24; }
+.status-error { color: #ef4444; }
+
+/* A page that uses the whole window width (the logs page). */
+main.main-wide { max-width: none; }
+
+.log-viewer {
+    background: #0a0a1a;
+    border-radius: 8px;
+    padding: 16px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    line-height: 1.5;
+    max-height: 70vh;
+    overflow-y: auto;
+    /* The page keeps the reader's place itself when older lines are added
+       above; the browser's own scroll anchoring would move it twice. */
+    overflow-anchor: none;
+}
+.log-edge { color: #52525b; text-align: center; padding: 4px 0; }
+/* The marker between two days' files: the end of the earlier one above, the
+   start of the later one below. */
+.log-line.log-new-day::before {
+    content: attr(data-day);
+    display: block;
+    white-space: pre-line;
+    margin: 12px 0 8px;
+    padding: 6px 12px;
+    background: #18181b;
+    border: 1px solid #3f3f46;
+    border-left: 3px solid #60a5fa;
+    border-radius: 4px;
+    color: #d4d4d8;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+}
+
+.log-line { white-space: pre-wrap; word-break: break-word; }
+.log-ts { color: #52525b; }
+.log-lvl { font-weight: 600; }
+.log-level-ERROR { color: #ef4444; }
+.log-level-WARN { color: #fbbf24; }
+.log-level-INFO { color: #4ade80; }
+.log-level-DEBUG { color: #888; }
+
+.controls-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+}
+
+.btn {
+    padding: 12px 20px;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 600;
+    transition: all 0.2s;
+}
+
+.btn-primary { background: #2563eb; color: white; }
+.btn-primary:hover { background: #1d4ed8; }
+.btn-danger { background: #dc2626; color: white; }
+.btn-danger:hover { background: #b91c1c; }
+.btn-warning { background: #d97706; color: white; }
+.btn-warning:hover { background: #b45309; }
+
+.health-banner {
+    padding: 10px 16px;
+    border-radius: 6px;
+    font-weight: 600;
+    margin-bottom: 16px;
+    text-align: center;
+}
+.health-ok { background: #166534; color: #4ade80; }
+.health-warning { background: #713f12; color: #fbbf24; }
+.health-error { background: #7f1d1d; color: #ef4444; }
+
+.loading { color: #666; padding: 20px; text-align: center; }
+
+h2 { margin-bottom: 16px; font-size: 20px; }
+h3 { margin: 16px 0 8px; font-size: 16px; color: #888; }
+
+.data-table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #0f3460;
+    border-radius: 8px;
+    overflow: hidden;
+}
+.data-table th {
+    text-align: left;
+    padding: 10px 12px;
+    background: #16213e;
+    color: #888;
+    font-size: 12px;
+    text-transform: uppercase;
+}
+.data-table td {
+    padding: 8px 12px;
+    border-top: 1px solid #1a1a2e;
+    font-size: 13px;
+}
+
+select {
+    background: #0f3460;
+    color: #e0e0e0;
+    border: 1px solid #16213e;
+    padding: 6px 10px;
+    border-radius: 4px;
+}
+
+.instance-section {
+    background: #0d1b3e;
+    border-radius: 10px;
+    padding: 16px;
+    border: 1px solid #16213e;
+}
+
+.instance-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.instance-badge {
+    font-size: 13px;
+    font-weight: 700;
+    padding: 4px 12px;
+    border-radius: 4px;
+    letter-spacing: 1px;
+}
+.badge-live { background: #1e40af; color: #93c5fd; }
+.badge-paper { background: #713f12; color: #fbbf24; }
+
+.health-pill {
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-weight: 600;
+}
+.health-pill.health-ok { background: #166534; color: #4ade80; }
+.health-pill.health-warning { background: #713f12; color: #fbbf24; }
+.health-pill.health-error { background: #7f1d1d; color: #ef4444; }
+
+/* Old config rules removed — now defined above with responsive support */
+
+.config-section {
+    background: #0f3460;
+    border-radius: 8px;
+    margin-bottom: 12px;
+    overflow: hidden;
+}
+
+.config-section summary {
+    padding: 10px 14px;
+    cursor: pointer;
+    font-weight: 600;
+    font-size: 14px;
+    color: #93c5fd;
+    background: #16213e;
+    user-select: none;
+}
+
+.config-section summary:hover { background: #1a2a4e; }
+
+.config-section[open] summary { border-bottom: 1px solid #0f3460; }

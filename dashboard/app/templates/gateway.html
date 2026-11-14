@@ -1,0 +1,186 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Gateway</h2>
+
+<div class="card" style="margin-bottom: 12px;">
+    <div class="card-label">Version</div>
+    <div id="gw-version" style="margin-top: 8px; font-size: 13px; line-height: 1.7;">Loading…</div>
+</div>
+
+<div class="card" style="margin-bottom: 12px;">
+    <div class="card-label">Upgrade policy</div>
+    <div id="upgrade-policy-error" style="display: none; margin-top: 8px; padding: 8px 12px; border-radius: 6px; background: #450a0a; border: 1px solid #991b1b; color: #fca5a5; font-size: 12px;"></div>
+    <div style="margin-top: 10px; display: grid; grid-template-columns: max-content 1fr; gap: 10px 14px; align-items: center; font-size: 13px; max-width: 560px;">
+        <label for="upgrade-enabled">Automatic upgrades</label>
+        <label style="display: flex; align-items: center; gap: 8px;">
+            <input type="checkbox" id="upgrade-enabled"> <span>on</span>
+        </label>
+
+        <label for="upgrade-channel">Channel</label>
+        <select id="upgrade-channel">
+            <option value="stable">stable</option>
+            <option value="latest">latest</option>
+        </select>
+
+        <label for="upgrade-cadence">Which Sundays</label>
+        <select id="upgrade-cadence">
+            <option value="first_sunday">the first Sunday of the month</option>
+            <option value="every_sunday">every Sunday</option>
+        </select>
+
+        <label for="upgrade-soak">Soak</label>
+        <span><input type="number" id="upgrade-soak" min="0" max="90" style="width: 5em;"> days a build must have been out</span>
+
+        <label for="upgrade-deadline">IB cutoff override</label>
+        <span><input type="number" id="upgrade-deadline" min="0" max="90" style="width: 5em;"> days: a cutoff this close upgrades at the next Sunday</span>
+    </div>
+    <div style="margin-top: 12px; display: flex; align-items: center; gap: 10px;">
+        <button type="button" id="upgrade-save" class="btn">Save policy</button>
+        <span id="upgrade-save-result" style="font-size: 12px;"></span>
+    </div>
+    <p style="margin-top: 10px; font-size: 12px; color: #a1a1aa; max-width: 640px;">
+        Upgrades run in the Sunday 08:58 maintenance window: PAPER logs in first as the canary, and a failed canary
+        rolls back to the previous image. LIVE then needs your 2FA approval, as every Sunday.
+    </p>
+</div>
+
+<div class="card">
+    <div class="card-label">Next upgrade</div>
+    <div id="upgrade-decision" style="margin-top: 8px; font-size: 13px; line-height: 1.7;">Loading…</div>
+    {# The switches live on the Alerts tab, the one place for them; this is a
+       count of this group's with a link straight to it. #}
+    <div id="upgrade-alerts" style="margin-top: 10px; font-size: 12px; color: #a1a1aa;">
+        <span id="upgrade-alerts-count">Upgrade alerts</span> &middot;
+        <a href="{{ root_path }}/notifications#alerts-gateway" style="color: #93c5fd;">Manage on the Alerts tab</a>
+    </div>
+</div>
+
+<script>
+(function () {
+    var API = ROOT_PATH + '/api/v1/gateway/upgrade';
+    var FIELDS = {
+        enabled: 'upgrade-enabled', channel: 'upgrade-channel', cadence: 'upgrade-cadence',
+        soak_days: 'upgrade-soak', deadline_days: 'upgrade-deadline'
+    };
+
+    function et(iso) {
+        if (!iso) return '—';
+        return new Date(iso).toLocaleString('en-US', {
+            timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric',
+            hour: '2-digit', minute: '2-digit', timeZoneName: 'short'
+        });
+    }
+
+    function rows(target, pairs) {
+        target.textContent = '';
+        pairs.forEach(function (p) {
+            var line = document.createElement('div');
+            var label = document.createElement('span');
+            label.style.color = '#a1a1aa';
+            label.textContent = p[0] + ': ';
+            var value = document.createElement('span');
+            value.textContent = p[1];
+            if (p[2]) value.style.color = p[2];
+            line.appendChild(label);
+            line.appendChild(value);
+            target.appendChild(line);
+        });
+    }
+
+    function renderVersion(v) {
+        var target = document.getElementById('gw-version');
+        if (!v || v.error) { target.textContent = 'Version tracking is not running.'; return; }
+        var avail = Object.keys(v.available || {}).map(function (c) { return c + ' ' + v.available[c]; }).join(', ');
+        rows(target, [
+            ['Running', (v.running || 'unknown') + ' · ' + v.status_label],
+            ['IB offers', avail || 'not read yet'],
+            ['Desupport', v.notice ? (v.notice.running + ' unsupported from ' + v.notice.cutoff + ' (minimum ' + v.notice.minimum + ')') : 'none announced',
+             v.notice ? '#fca5a5' : null],
+            ['Last checked', et(v.checked_at) + (v.probed_mode ? ' via ' + v.probed_mode : '')]
+        ]);
+    }
+
+    function renderUpgrade(u) {
+        var err = document.getElementById('upgrade-policy-error');
+        if (u.policy_error) {
+            err.style.display = 'block';
+            err.textContent = 'The saved policy cannot be read, so nothing will upgrade: ' + u.policy_error +
+                '. Saving the form replaces it.';
+        } else {
+            err.style.display = 'none';
+        }
+        if (u.policy) {
+            document.getElementById(FIELDS.enabled).checked = u.policy.enabled;
+            ['channel', 'cadence', 'soak_days', 'deadline_days'].forEach(function (k) {
+                document.getElementById(FIELDS[k]).value = u.policy[k];
+            });
+        }
+        var d = u.decision, s = u.swap, c = u.candidate, l = u.last_swap;
+        var pairs = [
+            ['Sunday window', d.swap_on],
+            ['Decision', d.due ? ('upgrade to ' + d.target + ' (' + d.channel + ')') : 'no upgrade', d.due ? '#86efac' : null],
+            ['Why', d.reason + (d.deadline ? ' — IB cutoff override' : '')],
+            ['Swap', s.ready ? 'ready: ' + s.version + ' @ ' + s.sha.slice(0, 12) : 'not ready (' + s.reason + ')',
+             s.ready ? '#86efac' : null]
+        ];
+        if (c) pairs.push(['Last build', c.version + ' ' + c.status + ' ' + et(c.reported_at) + (c.detail ? ' — ' + c.detail : ''),
+                           c.status === 'built' ? null : '#fca5a5']);
+        if (l) pairs.push(['Last swap', l.version + ' ' + l.result.replace('_', ' ') + ' ' + et(l.reported_at) + (l.detail ? ' — ' + l.detail : ''),
+                           l.result === 'ok' ? '#86efac' : '#fca5a5']);
+        rows(document.getElementById('upgrade-decision'), pairs);
+    }
+
+    function load() {
+        fetch(ROOT_PATH + '/api/v1/gateway/version').then(function (r) { return r.json(); })
+            .then(renderVersion).catch(function () { renderVersion(null); });
+        fetch(API).then(function (r) { return r.json(); }).then(renderUpgrade).catch(function () {
+            document.getElementById('upgrade-decision').textContent = 'Upgrade status unavailable.';
+        });
+        fetch(ROOT_PATH + '/api/v1/notifications/config').then(function (r) { return r.json(); })
+            .then(renderAlertCount).catch(function () { renderAlertCount(null); });
+    }
+
+    // "Upgrade alerts: 5 of 5 on", from the same catalog the Alerts tab draws.
+    function renderAlertCount(d) {
+        var el = document.getElementById('upgrade-alerts-count');
+        if (!d || !d.ok || !d.catalog) { el.textContent = 'Upgrade alerts: settings unavailable'; return; }
+        var group = (d.catalog.groups || []).filter(function (g) { return g.key === 'gateway'; })[0];
+        var events = (group && group.events) || [];
+        var saved = d.config.events || {};
+        var on = events.filter(function (e) { return saved[e.key] && saved[e.key].enabled; }).length;
+        el.textContent = d.config.enabled
+            ? 'Upgrade alerts: ' + on + ' of ' + events.length + ' on'
+            : 'Upgrade alerts: all alerts are off (Alerts tab)';
+        el.style.color = (!d.config.enabled || on < events.length) ? '#fbbf24' : '';
+    }
+
+    document.getElementById('upgrade-save').addEventListener('click', function () {
+        var out = document.getElementById('upgrade-save-result');
+        var body = {
+            enabled: document.getElementById(FIELDS.enabled).checked,
+            channel: document.getElementById(FIELDS.channel).value,
+            cadence: document.getElementById(FIELDS.cadence).value,
+            soak_days: parseInt(document.getElementById(FIELDS.soak_days).value, 10),
+            deadline_days: parseInt(document.getElementById(FIELDS.deadline_days).value, 10)
+        };
+        fetch(API + '/policy', {
+            method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+        }).then(function (r) {
+            return r.json().then(function (d) { return {ok: r.ok, d: d}; });
+        }).then(function (res) {
+            out.style.color = res.ok ? '#86efac' : '#fca5a5';
+            if (res.ok) { out.textContent = 'Saved'; renderUpgrade(res.d); return; }
+            var detail = res.d.error || (Array.isArray(res.d.detail)
+                ? res.d.detail.map(function (e) { return (e.loc || []).slice(-1)[0] + ': ' + e.msg; }).join('; ')
+                : 'not saved');
+            out.textContent = 'Not saved: ' + detail;
+        }).catch(function () {
+            out.style.color = '#fca5a5';
+            out.textContent = 'Not saved: the dashboard did not answer';
+        });
+    });
+
+    load();
+})();
+</script>
+{% endblock %}

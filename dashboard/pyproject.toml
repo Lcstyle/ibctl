@@ -1,0 +1,50 @@
+[project]
+name = "ibctl-dashboard"
+version = "0.1.0"
+description = "Web dashboard and REST API for ibctl gateway management"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "jinja2>=3.1",
+    "sse-starlette>=2.0",
+    "httpx>=0.27",
+    "pyzmq>=26.0",
+    "python-multipart>=0.0.20",
+    "requests>=2.32",
+    "beautifulsoup4>=4.12",
+    # Gateway version probe: a short read-only API connection, run in a
+    # subprocess (app/services/gateway_version/probe.py).
+    "ib_async>=2.1",
+    # ib_async's event library, listed only so the PyPI pin below applies to it
+    # (uv pins sources for direct dependencies). Same range ib_async requires.
+    "aeventkit>=2.1.0,<3",
+]
+
+[dependency-groups]
+# Canonical PEP 735 dev group — uv's `--no-dev` flag targets this
+# directly, without depending on the PEP-621-to-groups compatibility shim
+# uv uses for `[project.optional-dependencies].dev`.
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "httpx>=0.28",
+    "coverage>=7.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+# Resolve from PyPI. A developer's user-level uv config may add a private extra
+# index that carries forks of ib-async and aeventkit; uv merges that list with
+# this project's and tries extra indexes first, so these pins are what keep a
+# fork out of uv.lock. Lock with `uv lock` as usual.
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+explicit = true
+
+[tool.uv.sources]
+ib-async = { index = "pypi" }
+aeventkit = { index = "pypi" }

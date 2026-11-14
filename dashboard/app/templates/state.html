@@ -1,0 +1,650 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+.tp7 {
+    max-width: 500px; width: 500px;
+    margin: 0 auto;
+    background: transparent;
+    border: 1.5px solid #52525b;
+    border-radius: 14px;
+    padding: 22px 18px 18px;
+    position: relative;
+    background-image:
+        radial-gradient(circle at 20% 80%, rgba(249,115,22,0.03) 0%, transparent 50%),
+        radial-gradient(circle at 80% 20%, rgba(249,115,22,0.02) 0%, transparent 40%);
+}
+.tp7::before, .tp7::after { content: '⊕'; position: absolute; font-size: 8px; color: #52525b; }
+.tp7::before { top: 8px; right: 8px; }
+.tp7::after { bottom: 8px; left: 8px; }
+.tp7-label {
+    position: absolute; top: 10px; left: 18px;
+    font-size: 10px; font-weight: 300; color: #71717a;
+    letter-spacing: 3px; font-family: 'Helvetica Neue', sans-serif;
+}
+.tp7-oled {
+    position: absolute; top: 8px; right: 18px;
+    background: #0a0a0a; border: 1px solid #27272a; border-radius: 3px;
+    padding: 3px 10px; display: flex; gap: 10px; align-items: center;
+    box-shadow: inset 0 1px 3px rgba(0,0,0,0.5);
+}
+.tp7-oled-text { font-size: 11px; color: #d4d4d8; font-weight: 500; font-family: 'SF Mono', monospace; }
+.tp7-oled-time { font-size: 11px; color: #71717a; font-variant-numeric: tabular-nums; font-family: 'SF Mono', monospace; }
+
+/* Mode toggle */
+.tp7-mode { display: flex; justify-content: center; margin-bottom: 12px; gap: 0; }
+.tp7-mode-btn {
+    padding: 3px 18px; font-size: 9px; font-weight: 400; letter-spacing: 2px;
+    border: 1px solid #3f3f46; cursor: pointer; background: transparent;
+    font-family: 'Helvetica Neue', sans-serif; transition: all 0.2s;
+}
+.tp7-mode-btn:first-child { border-radius: 3px 0 0 3px; }
+.tp7-mode-btn:last-child { border-radius: 0 3px 3px 0; border-left: none; }
+.tp7-mode-btn.active { color: #f97316; border-color: #f97316; }
+.tp7-mode-btn:not(.active) { color: #52525b; }
+
+/* Speedometer Reel */
+.tp7-speedo-wrap { display: flex; justify-content: center; margin: 36px 0 16px; }
+.tp7-speedo {
+    width: 380px; height: 380px; position: relative;
+    user-select: none; -webkit-user-select: none;
+}
+.tp7-speedo-ring {
+    width: 100%; height: 100%; border-radius: 50%;
+    border: 1.5px solid #3f3f46; position: absolute;
+    background: radial-gradient(circle, transparent 60px, #3f3f4608 61px, transparent 62px),
+                radial-gradient(circle, transparent 100px, #3f3f4608 101px, transparent 102px);
+}
+.tp7-speedo-ring.spinning { animation: spin-slow 20s linear infinite; }
+@keyframes spin-slow { to { transform: rotate(360deg); } }
+/* State labels around the circumference */
+.tp7-state-label {
+    position: absolute; font-size: 11px; letter-spacing: 0.3px;
+    color: #71717a; font-family: 'SF Mono', monospace;
+    transform-origin: center; white-space: nowrap; cursor: pointer;
+    transition: color 0.2s, font-size 0.2s;
+}
+.tp7-state-label:hover { color: #d4d4d8; }
+.tp7-state-label.active { color: #f97316; font-weight: 700; font-size: 12px; }
+/* Tick marks */
+.tp7-tick {
+    position: absolute; width: 1px; height: 8px;
+    background: #3f3f46; transform-origin: bottom center;
+}
+.tp7-tick.active { background: #f97316; height: 10px; width: 2px; }
+
+/* Needle / Arrow */
+.tp7-needle {
+    position: absolute; top: 50%; left: 50%;
+    width: 2px; height: 110px; background: transparent;
+    transform-origin: bottom center;
+    transition: transform 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+    z-index: 5; cursor: grab;
+}
+.tp7-needle::before {
+    content: ''; position: absolute; top: 0; left: 50%;
+    transform: translateX(-50%);
+    width: 0; height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-bottom: 12px solid #f97316;
+}
+.tp7-needle::after {
+    content: ''; position: absolute; bottom: -4px; left: 50%;
+    transform: translateX(-50%);
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #f97316;
+}
+.tp7-needle.dragging { transition: none; cursor: grabbing; }
+
+/* Center hub */
+.tp7-hub {
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 20px; height: 20px; border-radius: 50%;
+    border: 1.5px solid #52525b; z-index: 6;
+}
+.tp7-hub::after {
+    content: ''; position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 4px; height: 4px; border-radius: 50%; background: #f97316;
+}
+
+/* Inner reel (spins) */
+.tp7-inner-reel {
+    position: absolute; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    width: 120px; height: 120px; border-radius: 50%;
+    border: 1px solid #27272a;
+    background: radial-gradient(circle, transparent 20px, #27272a10 21px, transparent 22px),
+                radial-gradient(circle, transparent 40px, #27272a10 41px, transparent 42px);
+}
+.tp7-inner-reel.spinning { animation: spin 6s linear infinite; }
+@keyframes spin { to { transform: translate(-50%, -50%) rotate(360deg); } }
+
+/* Transport */
+.tp7-transport {
+    display: flex; gap: 4px; justify-content: center;
+    margin-top: 18px; padding: 14px 0 0; border-top: 1px solid #27272a;
+}
+.tp7-btn {
+    width: 60px; height: 40px; border: 1px solid #3f3f46; border-radius: 4px;
+    background: #18181b; font-size: 16px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: all 0.1s; color: #71717a;
+}
+.tp7-btn:hover { border-color: #71717a; color: #d4d4d8; }
+.tp7-btn:active { transform: translateY(1px); background: #0a0a0a; }
+/* Pause — two bars */
+.tp7-btn-pause { gap: 3px; }
+.tp7-btn-pause .bar { width: 4px; height: 14px; background: #71717a; border-radius: 1px; }
+.tp7-btn-pause:hover .bar { background: #fbbf24; }
+.tp7-btn-pause.active .bar { background: #f97316; animation: pulse-bar 1.2s ease-in-out infinite; }
+@keyframes pulse-bar { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+.tp7-btn-play { font-size: 14px; }
+.tp7-btn-play:hover { color: #4ade80; border-color: #4ade80; }
+.tp7-btn-stop::after { content: ''; width: 10px; height: 10px; border: 1.5px solid #71717a; }
+.tp7-btn-stop:hover::after { border-color: #ef4444; }
+.tp7-btn-skip { font-size: 12px; }
+.tp7-btn-skip:hover { color: #fbbf24; border-color: #fbbf24; }
+
+/* Grooves + secondary */
+.tp7-grooves { display: flex; gap: 4px; justify-content: center; margin-top: 10px; }
+.tp7-groove { width: 1px; height: 16px; background: #27272a; }
+.tp7-secondary { display: flex; gap: 6px; justify-content: center; margin-top: 8px; }
+.tp7-sec-btn {
+    padding: 2px 8px; font-size: 8px; font-weight: 400; letter-spacing: 1px;
+    background: transparent; border: 1px solid #27272a; border-radius: 2px;
+    color: #52525b; cursor: pointer; font-family: 'Helvetica Neue', sans-serif;
+    transition: all 0.15s;
+}
+.tp7-sec-btn:hover { border-color: #71717a; color: #a1a1aa; }
+.dial-mode-btn.active { color: #f97316 !important; border-color: #f97316 !important; }
+.tp7-toast { text-align: center; margin-top: 6px; font-size: 10px; height: 14px; font-family: 'SF Mono', monospace; }
+
+/* Side-by-side layout */
+.tp7-page { display: flex; gap: 24px; align-items: flex-start; flex-wrap: wrap; }
+.tp7-left { flex-shrink: 0; }
+.tp7-history { flex: 1; min-width: 280px; }
+.tp7-history h3 { font-size: 12px; color: #71717a; letter-spacing: 1px; margin: 0 0 8px; font-weight: 400; }
+
+/* Mobile: hide dial, show simple controls */
+.tp7-mobile { display: none; }
+@media (max-width: 768px) {
+    .tp7-left { display: none; }
+    .tp7-mobile { display: block; margin-bottom: 16px; }
+    .tp7-mobile .card { margin-bottom: 8px; }
+    .tp7-m-transport { display: flex; gap: 6px; margin-top: 8px; }
+    .tp7-m-btn { flex: 1; padding: 12px; border: 1px solid #3f3f46; border-radius: 6px; background: #0f3460; color: #a1a1aa; font-size: 13px; cursor: pointer; text-align: center; font-family: inherit; transition: all 0.15s; }
+    .tp7-m-btn:hover:not(:disabled) { border-color: #71717a; color: #e0e0e0; }
+    .tp7-m-btn.danger:hover:not(:disabled) { border-color: #ef4444; color: #ef4444; }
+    .tp7-m-btn:disabled { opacity: 0.3; cursor: default; border-color: #27272a; }
+    .tp7-m-state { display: flex; gap: 8px; align-items: center; margin-top: 8px; }
+    .tp7-m-state select { flex: 1; padding: 8px; background: #0f3460; color: #e0e0e0; border: 1px solid #3f3f46; border-radius: 6px; font-size: 13px; }
+    .tp7-m-state button { padding: 8px 14px; }
+}
+</style>
+
+<div class="tp7-page">
+
+<!-- Mobile: simple controls (hidden on desktop) -->
+<div class="tp7-mobile">
+    <div class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+                <div style="font-size: 11px; color: #71717a; text-transform: uppercase; letter-spacing: 1px;">State Machine</div>
+                <div style="font-size: 22px; font-weight: 700; margin-top: 4px;" id="m-state-display" class="status-connected">—</div>
+            </div>
+            <div style="text-align: right;">
+                <div style="font-size: 11px; color: #71717a;">Uptime</div>
+                <div style="font-size: 16px; font-family: 'SF Mono', monospace;" id="m-uptime">0:00:00</div>
+            </div>
+        </div>
+        <div style="margin-top: 4px; font-size: 10px; color: #52525b;" id="m-ceiling-display"></div>
+        <div style="margin-top: 8px;">
+            <select id="m-mode-select" style="width: 100%; padding: 8px; background: #1a1a2e; color: #e0e0e0; border: 1px solid #3f3f46; border-radius: 6px; font-size: 13px;">
+                {% for m in modes %}
+                <option value="{{ m }}" {% if m == default_mode %}selected{% endif %}>{{ m | upper }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="tp7-m-transport">
+            <button class="tp7-m-btn" id="m-btn-pause" data-transport="pause" onclick="sendCmd('PAUSE')">⏸ Pause</button>
+            <button class="tp7-m-btn" id="m-btn-play" data-transport="resume" onclick="sendCmd('RESUME')">▶ Resume</button>
+            <button class="tp7-m-btn" id="m-btn-stop" data-transport="stop" onclick="sendCmd('STOP',true,'Stop instance?')">■ Stop</button>
+            <button class="tp7-m-btn" id="m-btn-start" data-transport="start" onclick="sendCmd('START',true,'Start this gateway?')">⏵ Start</button>
+            <button class="tp7-m-btn danger" id="m-btn-reset" onclick="sendCmd('RESTART',true,'Reset Gateway?')">⏮ Reset</button>
+        </div>
+        <!-- Mode toggle: Pause At / Set State -->
+        <div style="display: flex; gap: 0; margin-top: 8px;">
+            <button class="tp7-m-btn dial-mode-btn active" data-dial-mode="pauseat" onclick="setDialMode('pauseat')" style="flex:1; border-radius: 6px 0 0 6px; font-size: 10px; letter-spacing: 1px;">PAUSE AT</button>
+            <button class="tp7-m-btn dial-mode-btn" data-dial-mode="setstate" onclick="setDialMode('setstate')" style="flex:1; border-radius: 0 6px 6px 0; border-left: none; font-size: 10px; letter-spacing: 1px;">SET STATE</button>
+        </div>
+        <div class="tp7-m-state">
+            <select id="m-state-select" style="flex: 1;">
+                <option value="">Select State...</option>
+                <option value="Init">Init</option>
+                <option value="Launching">Launching</option>
+                <option value="WaitingForAgent">WaitingForAgent</option>
+                <option value="WaitingForLogin">WaitingForLogin</option>
+                <option value="Authenticating">Authenticating</option>
+                <option value="WaitingFor2fa">WaitingFor2fa</option>
+                <option value="DismissingPopups">DismissingPopups</option>
+                <option value="ConfiguringApi">ConfiguringApi</option>
+                <option value="Connected">Connected</option>
+                <option value="Restarting">Restarting</option>
+                <option value="Shutdown">Shutdown</option>
+            </select>
+            <button class="tp7-m-btn" onclick="mApplyState()" style="flex: 0;" id="m-apply-btn">Set</button>
+        </div>
+        <div id="m-command-result" style="font-size: 11px; margin-top: 4px; text-align: center;"></div>
+    </div>
+</div>
+
+<div class="tp7-left">
+<div class="tp7">
+    <div class="tp7-label">ibctl</div>
+    <div class="tp7-oled">
+        <span class="tp7-oled-text" id="oled-state">—</span>
+        <span class="tp7-oled-time" id="oled-uptime">0:00:00</span>
+    </div>
+    <div class="tp7-mode">
+        {% for m in modes %}
+        <button class="tp7-mode-btn {% if m == default_mode %}active{% endif %}"
+                data-mode="{{ m }}" onclick="setMode('{{ m }}')">{{ m | upper }}</button>
+        {% endfor %}
+    </div>
+
+    <!-- Speedometer Reel -->
+    <div class="tp7-speedo-wrap">
+        <div class="tp7-speedo" id="speedo">
+            <div class="tp7-speedo-ring"></div>
+            <div class="tp7-inner-reel" id="inner-reel"></div>
+            <div class="tp7-hub"></div>
+            <div class="tp7-needle" id="needle"></div>
+            <!-- State labels + ticks injected by JS -->
+        </div>
+    </div>
+
+    <div class="tp7-transport">
+        <button class="tp7-btn tp7-btn-pause" id="btn-pause" data-transport="pause" title="Pause" onclick="sendCmd('PAUSE')">
+            <div class="bar"></div><div class="bar"></div>
+        </button>
+        <button class="tp7-btn tp7-btn-play" id="btn-resume" data-transport="resume" title="Resume" onclick="sendCmd('RESUME')">▷</button>
+        <button class="tp7-btn tp7-btn-stop" id="btn-stop" data-transport="stop" title="Stop" onclick="sendCmd('STOP', true, 'Stop instance?')"></button>
+        <button class="tp7-btn tp7-btn-play" id="btn-start" data-transport="start" title="Start a stopped gateway" onclick="sendCmd('START', true, 'Start this gateway?')">⏵</button>
+        <button class="tp7-btn tp7-btn-skip" title="Reset" onclick="sendCmd('RESTART', true, 'Reset Gateway?')">⏭</button>
+    </div>
+    <div class="tp7-grooves"><div class="tp7-groove"></div><div class="tp7-groove"></div><div class="tp7-groove"></div></div>
+    <!-- Mode toggle: Pause At / Set State -->
+    <div style="display: flex; gap: 0; justify-content: center; margin-top: 8px;">
+        <button class="tp7-sec-btn dial-mode-btn active" data-dial-mode="pauseat" onclick="setDialMode('pauseat')" style="border-radius: 2px 0 0 2px; padding: 3px 14px;">PAUSE AT</button>
+        <button class="tp7-sec-btn dial-mode-btn" data-dial-mode="setstate" onclick="setDialMode('setstate')" style="border-radius: 0 2px 2px 0; border-left: none; padding: 3px 14px;">SET STATE</button>
+    </div>
+    <div class="tp7-toast" id="command-result"></div>
+    <div style="text-align: center; font-size: 9px; color: #52525b; margin-top: 2px;" id="ceiling-display"></div>
+</div>
+</div>
+
+<div class="tp7-history" id="state-content"
+     hx-get="{{ root_path }}/partials/state-history?mode={{ default_mode }}"
+     hx-trigger="load, ibctl-refresh"
+     hx-swap="innerHTML">
+    <div class="loading">Loading...</div>
+</div>
+</div>
+
+<script src="{{ root_path }}/static/transport.js?v=1"></script>
+<script>
+var STATES = ["Init","Launching","WaitingForAgent","WaitingForLogin","Authenticating",
+    "WaitingFor2fa","HandlingSessionConflict","DismissingPopups","ConfiguringApi",
+    "Connected","Restarting","WaitingForIB","Shutdown"];
+var currentMode = '{{ default_mode }}';
+var currentStateIdx = 0;
+var isPaused = false;
+var isDragging = false;
+var dialMode = 'pauseat'; // 'pauseat' or 'setstate'
+var ceilingState = null;
+
+function getMode() { return currentMode; }
+
+function setDialMode(mode) {
+    dialMode = mode;
+    document.querySelectorAll('.dial-mode-btn').forEach(function(b) {
+        b.classList.toggle('active', b.dataset.dialMode === mode);
+    });
+    // Update mobile apply button text
+    var btn = document.getElementById('m-apply-btn');
+    if (btn) btn.textContent = mode === 'pauseat' ? 'Pause At' : 'Set State';
+}
+
+// Position states around the top arc (like a speedometer: -135° to +135°)
+var START_ANGLE = -135;
+var END_ANGLE = 135;
+var ARC_SPAN = END_ANGLE - START_ANGLE;
+
+function stateAngle(idx) {
+    return START_ANGLE + (idx / (STATES.length - 1)) * ARC_SPAN;
+}
+
+// Build speedometer labels and ticks
+function buildSpeedo() {
+    var speedo = document.getElementById('speedo');
+    var cx = 190, cy = 190, labelR = 175, tickR = 150;
+
+    STATES.forEach(function(state, i) {
+        var angleDeg = stateAngle(i);
+        var angleRad = angleDeg * Math.PI / 180;
+
+        // Tick mark
+        var tick = document.createElement('div');
+        tick.className = 'tp7-tick';
+        tick.dataset.idx = i;
+        var tx = cx + tickR * Math.sin(angleRad);
+        var ty = cy - tickR * Math.cos(angleRad);
+        tick.style.left = tx + 'px';
+        tick.style.top = ty + 'px';
+        tick.style.transform = 'translate(-50%, 0) rotate(' + angleDeg + 'deg)';
+        speedo.appendChild(tick);
+
+        // Label
+        var label = document.createElement('div');
+        label.className = 'tp7-state-label';
+        label.dataset.idx = i;
+        label.dataset.state = state;
+        label.textContent = state.replace('WaitingFor', 'Wait').replace('Handling', 'Handle').replace('Dismissing', 'Dismiss').replace('Configuring', 'Config');
+        var lx = cx + labelR * Math.sin(angleRad);
+        var ly = cy - labelR * Math.cos(angleRad);
+
+        // Rotate label to be tangent to circle
+        var labelAngle = angleDeg;
+        if (angleDeg < -45) labelAngle = angleDeg + 90;
+        else if (angleDeg > 45) labelAngle = angleDeg - 90;
+        else labelAngle = 0;
+
+        label.style.left = lx + 'px';
+        label.style.top = ly + 'px';
+        label.style.transform = 'translate(-50%, -50%) rotate(' + labelAngle + 'deg)';
+        label.onclick = function(e) {
+            e.stopPropagation();
+            applyDialAction(state);
+        };
+        speedo.appendChild(label);
+    });
+}
+
+function setNeedle(idx) {
+    var needle = document.getElementById('needle');
+    var angleDeg = stateAngle(idx);
+    needle.style.transform = 'translate(-50%, -100%) rotate(' + angleDeg + 'deg)';
+
+    // Highlight active label + tick
+    document.querySelectorAll('.tp7-state-label').forEach(function(l) {
+        l.classList.toggle('active', parseInt(l.dataset.idx) === idx);
+    });
+    document.querySelectorAll('.tp7-tick').forEach(function(t) {
+        t.classList.toggle('active', parseInt(t.dataset.idx) === idx);
+    });
+}
+
+// Drag needle
+(function() {
+    var needle = document.getElementById('needle');
+    var speedo = document.getElementById('speedo');
+
+    function getAngleFromEvent(e) {
+        var rect = speedo.getBoundingClientRect();
+        var cx = rect.left + rect.width / 2;
+        var cy = rect.top + rect.height / 2;
+        var clientX = e.touches ? e.touches[0].clientX : e.clientX;
+        var clientY = e.touches ? e.touches[0].clientY : e.clientY;
+        var dx = clientX - cx;
+        var dy = clientY - cy;
+        return Math.atan2(dx, -dy) * 180 / Math.PI;
+    }
+
+    function snapToState(angleDeg) {
+        var closest = 0, minDist = 999;
+        STATES.forEach(function(_, i) {
+            var d = Math.abs(stateAngle(i) - angleDeg);
+            if (d < minDist) { minDist = d; closest = i; }
+        });
+        return closest;
+    }
+
+    needle.addEventListener('mousedown', startDrag);
+    needle.addEventListener('touchstart', startDrag, {passive: false});
+
+    function startDrag(e) {
+        e.preventDefault();
+        isDragging = true;
+        needle.classList.add('dragging');
+        document.addEventListener('mousemove', onDrag);
+        document.addEventListener('touchmove', onDrag, {passive: false});
+        document.addEventListener('mouseup', endDrag);
+        document.addEventListener('touchend', endDrag);
+    }
+    function onDrag(e) {
+        if (!isDragging) return;
+        e.preventDefault();
+        var angle = getAngleFromEvent(e);
+        angle = Math.max(START_ANGLE, Math.min(END_ANGLE, angle));
+        needle.style.transform = 'translate(-50%, -100%) rotate(' + angle + 'deg)';
+    }
+    function endDrag(e) {
+        if (!isDragging) return;
+        isDragging = false;
+        needle.classList.remove('dragging');
+        document.removeEventListener('mousemove', onDrag);
+        document.removeEventListener('touchmove', onDrag);
+        document.removeEventListener('mouseup', endDrag);
+        document.removeEventListener('touchend', endDrag);
+
+        var angle = getAngleFromEvent(e.changedTouches ? e.changedTouches[0] : e);
+        angle = Math.max(START_ANGLE, Math.min(END_ANGLE, angle));
+        var idx = snapToState(angle);
+        setNeedle(idx);
+
+        var state = STATES[idx];
+        if (state !== STATES[currentStateIdx]) {
+            applyDialAction(state);
+        } else {
+            setNeedle(currentStateIdx);
+        }
+    }
+})();
+
+// Mode switching
+function setMode(m) {
+    currentMode = m;
+    document.querySelectorAll('.tp7-mode-btn').forEach(function(b) {
+        b.classList.toggle('active', b.dataset.mode === m);
+    });
+    htmx.ajax('GET', ROOT_PATH + '/partials/state-history?mode=' + m, {target: '#state-content', swap: 'innerHTML'});
+}
+
+function sendCmd(command, needsConfirm, confirmMsg) {
+    if (needsConfirm && !confirm(confirmMsg)) return;
+    htmx.ajax('POST', ROOT_PATH + '/api/v1/command', {target: '#command-result', values: {command: command, mode: getMode()}});
+    if (command === 'PAUSE') {
+        isPaused = true;
+        document.getElementById('inner-reel').classList.remove('spinning');
+        document.querySelector('.tp7-speedo-ring').classList.remove('spinning');
+        document.getElementById('btn-pause').classList.add('active');
+    } else if (command.startsWith('PAUSE ')) {
+        // PAUSE AT — not immediately paused, ceiling set
+        ceilingState = command.split(' ')[1];
+        updateCeilingDisplay();
+    } else if (command === 'RESUME') {
+        isPaused = false;
+        ceilingState = null;
+        updateCeilingDisplay();
+        document.getElementById('inner-reel').classList.add('spinning');
+        document.querySelector('.tp7-speedo-ring').classList.add('spinning');
+        document.getElementById('btn-pause').classList.remove('active');
+    }
+}
+
+// Update dial + current state display from SSE-pushed data (no fetch, no TCP)
+function updateReelFromData(data) {
+    var state = data.state || '—';
+    if (state === 'unreachable' || state === '—') return;
+
+    // Sync "CURRENT STATE" text with the dial (same source of truth)
+    var csd = document.getElementById('current-state-display');
+    if (csd) {
+        csd.textContent = state;
+        csd.className = state === 'Connected' ? 'status-connected' : (state.indexOf('Error') >= 0 ? 'status-error' : 'status-warning');
+    }
+
+    var uptime = data.uptime_secs || 0;
+    var h = Math.floor(uptime / 3600);
+    var m = Math.floor((uptime % 3600) / 60);
+    var s = uptime % 60;
+
+    document.getElementById('oled-state').textContent = state;
+    document.getElementById('oled-uptime').textContent = h + ':' + String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+
+    // States off the dial (WaitingForLaunch after a STOP) leave the needle
+    // where it was; the buttons and reels below still follow them.
+    var idx = STATES.indexOf(state);
+    if (idx !== -1) {
+        currentStateIdx = idx;
+        if (!isDragging) setNeedle(idx);
+    }
+
+    isPaused = !!data.paused;
+    ceilingState = data.ceiling_state || null;
+    updateCeilingDisplay();
+
+    var pauseBtn = document.getElementById('btn-pause');
+    if (pauseBtn) pauseBtn.classList.toggle('active', isPaused);
+
+    var innerReel = document.getElementById('inner-reel');
+    var outerRing = document.querySelector('.tp7-speedo-ring');
+    var isActive = state !== 'Shutdown' && state !== 'WaitingForLaunch' && !state.startsWith('Error');
+    if (!isPaused && isActive) {
+        innerReel.classList.add('spinning');
+        outerRing.classList.add('spinning');
+    } else {
+        innerReel.classList.remove('spinning');
+        outerRing.classList.remove('spinning');
+    }
+    updateButtonStates(state);
+}
+
+// Init
+buildSpeedo();
+setNeedle(0);
+
+// One-time fetch for initial state (before first SSE event arrives)
+(async function() {
+    try {
+        var resp = await fetch(ROOT_PATH + '/api/v1/status/raw?mode=' + getMode());
+        var data = await resp.json();
+        updateReelFromData(data);
+    } catch(e) {}
+})();
+
+// SSE-driven updates — listen to base.html's EventSource via custom event
+window.addEventListener('ibctl-status', function(e) {
+    var instances = e.detail || [];
+    var inst = instances.find(function(i) { return i.mode === getMode(); });
+    if (inst && inst.status) updateReelFromData(inst.status);
+});
+
+// Mobile mode selector
+var mModeSelect = document.getElementById('m-mode-select');
+if (mModeSelect) {
+    mModeSelect.addEventListener('change', function() { setMode(this.value); });
+}
+
+// Apply dial action (shared by desktop dial, label click, and mobile)
+function applyDialAction(state) {
+    var mode = getMode().toUpperCase();
+    if (dialMode === 'pauseat') {
+        if (!confirm('Pause ' + mode + ' at ' + state + '?')) { setNeedle(currentStateIdx); return; }
+        sendCmd('PAUSE ' + state);
+        ceilingState = state;
+        updateCeilingDisplay();
+    } else {
+        if (!confirm('Force ' + mode + ' → ' + state + '? This will also pause.')) { setNeedle(currentStateIdx); return; }
+        sendCmd('SETSTATE ' + state);
+        sendCmd('PAUSE');
+    }
+}
+
+// Mobile apply state
+function mApplyState() {
+    var sel = document.getElementById('m-state-select');
+    var state = sel.value;
+    if (!state) return;
+    applyDialAction(state);
+    sel.value = '';
+}
+
+// Ceiling display
+function updateCeilingDisplay() {
+    var el = document.getElementById('ceiling-display');
+    var mel = document.getElementById('m-ceiling-display');
+    var text = ceilingState ? 'CEILING: ' + ceilingState : '';
+    if (el) el.textContent = text;
+    if (mel) mel.textContent = text;
+}
+
+// Enable the transport buttons the Gateway will act on in this state
+// (static/transport.js). Mobile buttons dim through :disabled; the desktop
+// TP-7 buttons dim through opacity.
+function updateButtonStates(state) {
+    var on = transportButtons(state, isPaused);
+    document.querySelectorAll('[data-transport]').forEach(function(b) {
+        var enabled = !!on[b.dataset.transport];
+        b.disabled = !enabled;
+        if (b.classList.contains('tp7-btn')) {
+            b.style.opacity = enabled ? '1' : '0.3';
+            b.style.pointerEvents = enabled ? 'auto' : 'none';
+        }
+    });
+}
+
+// Update mobile display from SSE data (no fetch, no TCP)
+function updateMobileFromData(data) {
+    var s = data.state || '—';
+    if (s === 'unreachable' || s === '—') return;
+    var u = data.uptime_secs || 0;
+    var h = Math.floor(u/3600), m = Math.floor((u%3600)/60), sec = u%60;
+    var el = document.getElementById('m-state-display');
+    if (el) {
+        el.textContent = s + (data.paused ? ' ⏸' : '');
+        el.className = s === 'Connected' ? 'status-connected' : s.startsWith('Error') ? 'status-error' : 'status-warning';
+    }
+    var ut = document.getElementById('m-uptime');
+    if (ut) ut.textContent = h + ':' + String(m).padStart(2,'0') + ':' + String(sec).padStart(2,'0');
+    isPaused = !!data.paused;
+    ceilingState = data.ceiling_state || null;
+    updateCeilingDisplay();
+    updateButtonStates(s);
+}
+
+// SSE also drives mobile updates (same listener, different function)
+window.addEventListener('ibctl-status', function(e) {
+    var instances = e.detail || [];
+    var inst = instances.find(function(i) { return i.mode === getMode(); });
+    if (inst && inst.status) updateMobileFromData(inst.status);
+});
+
+document.addEventListener('htmx:configRequest', function(evt) {
+    if (evt.detail.elt.id === 'state-content') evt.detail.path = ROOT_PATH + '/partials/state-history?mode=' + getMode();
+});
+document.body.addEventListener('htmx:afterSwap', function(evt) {
+    var tgt = evt.detail.target.id;
+    if (tgt === 'command-result' || tgt === 'm-command-result') {
+        try {
+            var data = JSON.parse(evt.detail.target.textContent);
+            evt.detail.target.innerHTML = '<span style="color:' + (data.ok ? '#4ade80' : '#ef4444') + '">' +
+                (data.ok ? '✓ ' + data.command : '✗ ' + data.error) + '</span>';
+            setTimeout(function() { evt.detail.target.innerHTML = ''; }, 3000);
+        } catch(e) {}
+    }
+});
+</script>
+{% endblock %}

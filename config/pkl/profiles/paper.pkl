@@ -1,0 +1,14 @@
+/// Paper-only profile — single paper trading instance.
+amends "../base.pkl"
+
+profile = "paper"
+
+deployment {
+  tradingMode = "paper"
+}
+
+compose {
+  exposeLiveApi = false
+  exposeCommandServer = false
+  exposePaperCommandServer = true
+}

@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [develop, main, master]
+  pull_request:
+    branches: [develop, main, master]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  CARGO_ENCODED_RUSTFLAGS: "-Dwarnings"
+
+jobs:
+  test:
+    name: Rust tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Run tests
+        run: cargo test --locked -p ibctl
+
+      - name: Run clippy
+        run: cargo clippy --locked -p ibctl -- -D warnings
+
+      - name: Documentation
+        env:
+          RUSTDOCFLAGS: "-Dwarnings"
+        run: cargo doc --no-deps --all-features
+
+      - name: Security audit
+        run: |
+          cargo install cargo-deny --locked
+          cargo deny check
+
+  java-build:
+    name: Java agent build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: 17
+
+      - name: Build agent jar
+        run: |
+          cd agent
+          mkdir -p target/classes
+          javac --release 17 -d target/classes src/main/java/ibctl/agent/*.java
+          jar cfm target/ibctl-agent.jar src/main/resources/META-INF/MANIFEST.MF -C target/classes .

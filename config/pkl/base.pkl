@@ -1,0 +1,117 @@
+/// ibctl base configuration — shared defaults for all profiles.
+///
+/// These defaults match docker/ibctl.toml (the Docker deployment defaults).
+/// Profile-specific overrides live in profiles/*.pkl.
+amends "types.pkl"
+
+name = "ibctl"
+profile = "base"
+
+deployment = new Deployment {
+  tradingMode = "paper"
+  siteRole = "primary"
+  autoLaunch = true
+  timezone = "America/New_York"
+}
+
+runtime = new RuntimeConfig {
+  auth = new AuthConfig {
+    twsUserid = ""
+    tradingMode = deployment.tradingMode
+    paper = new PaperAuthConfig {
+      twsUserid = ""
+    }
+  }
+
+  twofa = new TwoFaConfig {
+    secretEnv = "TWOFACTOR_CODE"  // pragma: allowlist secret
+    provider = "oathtool"
+    timeoutAction = "restart"
+    exitInterval = 120
+    device = ""
+    reloginAfterTimeout = false
+    backoff = new TwoFaBackoffConfig {
+      // Nobody answers a push overnight: one round, then wait.
+      // The 03:10 Sunday re-auth falls inside; the 09:00 fire does not.
+      unattendedHours = "22:00-08:00"
+    }
+  }
+
+  gateway = new GatewayConfig {
+    twsPath = "/home/ibgateway/Jts"
+    twsSettingsPath = ""
+    twsMajorVrsn = ""
+    javaHeapSize = 768
+    gatewayOrTws = "gateway"
+    liveApiPort = 4001
+    paperApiPort = 4002
+    liveSocatPort = 4003
+    paperSocatPort = 4004
+  }
+
+  session = new SessionConfig {
+    action = "primary"
+    acceptIncoming = "accept"
+    twsColdRestart = ""
+  }
+
+  commandServer = new CommandServerConfig {
+    enabled = false
+    port = 7462
+    paperPort = 7463
+    bindAddress = "0.0.0.0"
+    controlFrom = new Listing { "127.0.0.1"; "172.0.0.0/8" }
+  }
+
+  agent = new AgentConfig {
+    socketPath = "/run/ibctl/agent.sock"
+  }
+
+  dashboard = new DashboardConfig {
+    enabled = false
+    port = 8080
+    token = ""
+    debugMode = false
+  }
+
+  ibSystemStatus = new IbSystemStatusConfig {
+    enabled = false
+    ttlSeconds = 600
+  }
+
+  logging = new LoggingConfig {
+    level = "info"
+    logDir = ""
+    retentionDays = 90
+  }
+
+  timing = new TimingConfig {
+    uiTickMs = 100
+    agentTickMs = 50
+    postLoginDelayMs = 1000
+    popupQuietSecs = 5
+    popupMaxWaitSecs = 30
+    loginRadioDelayMs = 100
+    jvmShutdownTimeoutSecs = 5
+    loginDialogTimeoutSecs = 120
+    restartDelaySecs = 90
+    reloginMaxAttempts = 1
+    recovery = new RecoveryTimingConfig {}
+  }
+}
+
+container = new ContainerConfig {
+  containerName = "ibctl-gateway"
+  restartPolicy = "unless-stopped"
+}
+
+compose = new ComposeConfig {
+  serviceName = "ib-gateway"
+  exposeLiveApi = true
+  exposePaperApi = true
+  exposeCommandServer = true
+  exposePaperCommandServer = true
+  exposeVnc = true
+  exposeNoVnc = true
+  exposeDashboard = true
+}

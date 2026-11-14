@@ -1,0 +1,24 @@
+/// Dashboard profile — dual mode with dashboard and VNC enabled.
+/// Extends the "both" profile.
+amends "both.pkl"
+
+profile = "dashboard"
+
+runtime {
+  commandServer {
+    enabled = true
+  }
+  dashboard {
+    enabled = true
+    port = 8080
+  }
+  ibSystemStatus {
+    enabled = true
+  }
+}
+
+compose {
+  exposeVnc = true
+  exposeNoVnc = true
+  exposeDashboard = true
+}

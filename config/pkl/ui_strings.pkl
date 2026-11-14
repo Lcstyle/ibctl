@@ -1,0 +1,212 @@
+/// ibctl UI string catalog — canonical English descriptions for status
+/// enums, gateway phases, control-bar buttons, and other UI terms that
+/// have no home in the runtime config schema.
+///
+/// The renderer at ``tools/renderers/ui_strings_renderer.py`` walks this
+/// module and overlays ``ui.<section>.<key> -> <value>`` entries onto
+/// ``dashboard/app/preflight/descriptions.json`` alongside the config-field
+/// descriptions produced by ``toml_renderer.py``. The dashboard's Jinja
+/// ``tt(key)`` global (see ``dashboard/app/main.py``) looks values up by
+/// their dotted key path — e.g. ``tt('ui.recovery.phase.aggressive')``.
+///
+/// Convention (inverted from ``types.pkl``): each field's *value* is the
+/// English tooltip text; the ``///`` prose above the field is a maintainer
+/// note describing what the key is used for (which template site / which
+/// enum value). types.pkl uses ``///`` as the payload because the field
+/// itself carries a config default; here there is no config default, so
+/// the payload lives on the field value.
+module ibctl.ui_strings
+
+// --- Recovery loop (Aggressive → Backoff → GivenUp coordinator) ---
+
+/// Recovery-loop terminology — the "Recovery" kv-grid label and the
+/// three phase names surfaced by the header badge and the per-instance
+/// recovery row.
+class RecoveryStrings {
+  /// Tooltip for the "Recovery" dt label in overview_content.html.
+  term: String = "Recovery loop — background task that reconnects the Gateway after outages."
+
+  /// Tooltip descriptions for the three recovery-phase enum values.
+  phase: RecoveryPhaseStrings = new RecoveryPhaseStrings {}
+}
+
+class RecoveryPhaseStrings {
+  /// Tooltip for the "aggressive" phase word (phase == "aggressive").
+  aggressive: String = "Aggressive phase — retry every 30s to reconnect fast after a fresh outage."
+
+  /// Tooltip for the "backoff" phase word (phase == "backoff_every_15min").
+  backoff: String = "Backoff phase — retry every 15min after aggressive reconnects fail."
+
+  /// Tooltip for the "given up" phase word (phase == "given_up").
+  givenUp: String = "Given up — recovery loop stopped after exhausting retries; operator intervention required."
+}
+
+// --- Deployment site (site role + launch policy) ---
+
+/// Deployment-site terminology — the section header, the two dt labels
+/// (site role, launch policy), and descriptions for the SiteRole enum
+/// values.
+class DeploymentSiteStrings {
+  /// Tooltip for the "Deployment Site" section header term.
+  term: String = "Deployment Site — role and launch policy of this host in the failover mesh."
+
+  /// Tooltip for the "Site role" dt label.
+  siteRole: String = "Site role — primary or secondary; primary launches the Gateway, secondary stays warm."
+
+  /// Tooltip for the "Launch policy" dt label.
+  launchPolicy: String = "Launch policy — whether the Gateway auto-launches at boot or waits for a START command."
+
+  /// Descriptions of individual SiteRole enum values (primary | standby).
+  role: SiteRoleStrings = new SiteRoleStrings {}
+}
+
+class SiteRoleStrings {
+  /// Tooltip for the "primary" SiteRole enum value.
+  primary: String = "Primary site — launches the Gateway and holds the active IB session."
+
+  /// Tooltip for the "standby" SiteRole enum value.
+  standby: String = "Standby site — stays warm, ready to promote if the primary goes down."
+}
+
+// --- Gateway state ---
+
+/// Gateway-state terminology — the "Gateway state" kv-grid label.
+class GatewayStrings {
+  /// Tooltip for the "Gateway state" dt label term.
+  stateTerm: String = "Gateway state — connection state reported by the Java Gateway process (Connected, Disconnected, etc.)."
+}
+
+// --- IB system status (from the scraper) ---
+
+/// IB system status terminology — the indicator dot aria-label prefix and
+/// per-enum-value descriptions for the scraper's status values.
+class IbStatusStrings {
+  /// aria-label prefix for the IB status indicator dot in the IB Status
+  /// section header. Composed with the raw enum value at render time
+  /// (e.g. "IB status indicator: available").
+  indicatorPrefix: String = "IB status indicator"
+
+  /// Descriptions of the IB system status enum values.
+  status: IbStatusEnumStrings = new IbStatusEnumStrings {}
+}
+
+class IbStatusEnumStrings {
+  /// Tooltip for scraper status "available".
+  available: String = "IB backends are reachable and the status page reports no active outage."
+
+  /// Tooltip for scraper status "maintenance".
+  maintenance: String = "IB is in a scheduled maintenance window; sessions may be interrupted."
+
+  /// Tooltip for scraper status "scheduled".
+  scheduled: String = "A maintenance window is scheduled within the near future."
+
+  /// Tooltip for scraper status "unknown".
+  `unknown`: String = "IB status page is unreachable — cannot tell the current backend health."
+
+  /// Tooltip for scraper status "no_internet".
+  noInternet: String = "This host has no internet connectivity — cannot reach IB or the status page."
+
+  /// Tooltip for scraper status "unavailable".
+  unavailable: String = "IB backends are reporting an active outage; login attempts will fail."
+}
+
+// --- Connectivity dots (Internet / IB status page) ---
+
+/// Connectivity indicator strings — the Internet + IB status page dots in
+/// the IB Status right-side panel.
+class ConnectivityStrings {
+  /// aria-label branch when the internet check passed.
+  internetConnected: String = "Internet connected — this host can reach the public network."
+
+  /// aria-label branch when the internet check failed.
+  internetDisconnected: String = "Internet disconnected — this host cannot reach the public network."
+
+  /// aria-label branch when the IB status page fetch succeeded.
+  ibPageReachable: String = "IB status page reachable — the scraper's ground-truth check succeeded."
+
+  /// aria-label branch when the IB status page fetch failed.
+  ibPageUnreachable: String = "IB status page unreachable — cannot fetch the scraper's ground-truth signal."
+}
+
+// --- Per-instance control-bar buttons (LIVE / PAPER) ---
+
+/// Control-bar button tooltips — the four buttons at the bottom of each
+/// LIVE / PAPER per-instance section in overview_content.html.
+class ControlsStrings {
+  /// Tooltip for the "Reconnect Data" button.
+  reconnectData: String = "Reconnect market data feeds. Sends Ctrl+F to the Gateway, forcing it to re-establish data subscriptions."
+
+  /// Tooltip for the "Reconnect Account" button.
+  reconnectAccount: String = "Reconnect account data. Sends Ctrl+R to the Gateway, refreshing positions, orders, and account values."
+
+  /// Tooltip for the "Restart Socat" button.
+  restartSocat: String = "Restart the socat port forwarder. Kills and re-launches the TCP proxy that bridges the API port to the container interface."
+
+  /// Tooltip for the "Restart" (Gateway JVM) button.
+  restartGateway: String = "Restart the Gateway JVM. Kills the process and triggers a full re-authentication cycle including 2FA."
+
+  /// Tooltip for the "Stop" button.
+  stopGateway: String = "Stop the Gateway JVM and keep it stopped until Start. The Sunday cold restart leaves a stopped Gateway alone; a container restart or deploy launches it again."
+
+  /// Tooltip for the "Start" button.
+  startGateway: String = "Start a stopped Gateway. Only a Gateway waiting for START can be started; it launches and logs in again, with 2FA for LIVE."
+}
+
+// --- Health severities (section stripes + health pills) ---
+
+/// Health-severity labels — the three-state stripe color scheme
+/// (data-health="ok|warning|error") and the corresponding health-pill
+/// classes on per-instance section headers. Currently untool­tipped in
+/// the template; catalogued here so future revisions can wrap the pill
+/// text in a term span without re-authoring the copy.
+class HealthStrings {
+  /// Tooltip for the "ok" health severity.
+  ok: String = "Healthy — this component is operating normally."
+
+  /// Tooltip for the "warning" health severity.
+  warning: String = "Warning — this component is degraded or waiting; not blocking but worth watching."
+
+  /// Tooltip for the "error" health severity.
+  error: String = "Error — this component is unhealthy; operator action may be required."
+}
+
+// --- Trading mode (System row + LIVE / PAPER instance badges) ---
+
+/// Trading-mode strings — descriptions for the TradingMode enum values
+/// used by the System row and the LIVE / PAPER instance badges.
+class TradingModeStrings {
+  /// Tooltip for TradingMode == "live".
+  live: String = "Live trading mode — orders route to the real IB account."
+
+  /// Tooltip for TradingMode == "paper".
+  paper: String = "Paper trading mode — orders route to the IB paper simulator account."
+
+  /// Tooltip for TradingMode == "both".
+  both: String = "Live + Paper — dual-instance deployment running both real and paper sessions side by side."
+}
+
+// --- Root aggregate ---
+
+/// Recovery loop + phase strings.
+recovery: RecoveryStrings = new RecoveryStrings {}
+
+/// Deployment-site (role + launch policy) strings.
+deploymentSite: DeploymentSiteStrings = new DeploymentSiteStrings {}
+
+/// Gateway state strings.
+gateway: GatewayStrings = new GatewayStrings {}
+
+/// IB system status strings (scraper enum + indicator prefix).
+ibStatus: IbStatusStrings = new IbStatusStrings {}
+
+/// Connectivity indicator strings.
+connectivity: ConnectivityStrings = new ConnectivityStrings {}
+
+/// Control-bar button tooltips.
+controls: ControlsStrings = new ControlsStrings {}
+
+/// Health-severity strings.
+health: HealthStrings = new HealthStrings {}
+
+/// Trading-mode strings.
+tradingMode: TradingModeStrings = new TradingModeStrings {}

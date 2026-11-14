@@ -1,0 +1,346 @@
+//! ibctl — IBC replacement for automated IB Gateway/TWS login and session management.
+//!
+//! Launches IB Gateway with a Java agent for Swing UI automation, manages the login
+//! flow (credentials, 2FA, session conflicts, popups), and provides an IBC-compatible
+//! TCP command server for external tooling.
+
+mod agent_client;
+mod agent_events;
+mod cold_restart;
+mod command_server;
+mod config;
+mod event_stream;
+mod handlers;
+mod logging;
+mod maintenance_hold;
+mod payload;
+mod signals;
+mod state_machine;
+mod supervisor;
+mod totp;
+mod unattended;
+pub mod types;
+
+use std::process::ExitCode;
+
+use tokio::task::JoinSet;
+
+use config::{Config, ValidConfig};
+
+fn main() -> ExitCode {
+    // Parse CLI args (minimal, no clap dependency)
+    let args: Vec<String> = std::env::args().collect();
+
+    // `ibctl preflight --payload`: can this image launch the Gateway it
+    // carries? It needs no credentials, so it also runs at image build.
+    if args.get(1).map(String::as_str) == Some("preflight") {
+        return preflight_main(&args[2..]);
+    }
+
+    let config_path = parse_config_arg(&args);
+
+    // Load configuration (defaults -> TOML file -> env vars)
+    let config = match Config::load(config_path.as_deref()) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("Failed to load configuration: {}", e);
+            return ExitCode::from(1);
+        }
+    };
+
+    // Set env vars BEFORE starting tokio runtime (std::env::set_var is UB in
+    // multi-threaded context)
+    if std::env::var("RUST_LOG").is_err() {
+        std::env::set_var("RUST_LOG", format!("ibctl={}", config.logging.level));
+    }
+    std::env::set_var("IBCTL_AGENT_TICK_MS", config.timing.agent_tick_ms.to_string());
+
+    // Initialize logging — JSON Lines format for structured log aggregation.
+    // When log_dir is configured, tee output to both stdout and a market-day
+    // dated log file (ibctl-YYYY-MM-DD.log, rotates at 6 PM ET).
+    let mut builder = env_logger::Builder::from_default_env();
+    builder.format(|buf, record| {
+        use std::io::Write;
+        writeln!(
+            buf,
+            r#"{{"ts":"{}","level":"{}","target":"{}","msg":{}}}"#,
+            buf.timestamp_millis(),
+            record.level(),
+            record.target(),
+            serde_json::to_string(&format!("{}", record.args())).unwrap_or_default(),
+        )
+    });
+
+    if !config.logging.log_dir.is_empty() {
+        // In dual mode, separate log files: ibctl-live-{date}.log / ibctl-paper-{date}.log
+        // In single mode: ibctl-{date}.log
+        let prefix = format!("ibctl-{}", config.auth.trading_mode);
+        match logging::TeeWriter::new(
+            &config.logging.log_dir,
+            &prefix,
+            config.logging.futures_session_logging,
+            config.logging.session_reopen_hour,
+        ) {
+            Ok(tee) => {
+                builder.target(env_logger::Target::Pipe(Box::new(tee)));
+            }
+            Err(e) => {
+                eprintln!("Failed to open log directory '{}': {}", config.logging.log_dir, e);
+            }
+        }
+    }
+    builder.init();
+
+    log::info!("ibctl v{} ({} mode) starting", env!("IBCTL_VERSION"), config.auth.trading_mode);
+    if !config.logging.log_dir.is_empty() {
+        let date = logging::log_date(
+            config.logging.futures_session_logging,
+            config.logging.session_reopen_hour,
+        );
+        let mode_label = if config.logging.futures_session_logging {
+            format!("futures session (reopen {}:00 ET)", config.logging.session_reopen_hour)
+        } else {
+            "calendar".to_string()
+        };
+        log::info!("File logging to {}/ibctl-{}-{}.log ({})", config.logging.log_dir, config.auth.trading_mode, date, mode_label);
+    }
+
+    // Build the tokio runtime and run the async main
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build tokio runtime");
+
+    match rt.block_on(async_main(config)) {
+        Ok(()) => {
+            log::info!("ibctl exiting normally");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            log::error!("ibctl exiting with error: {}", e);
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Async entry point: sets up all components and runs the state machine.
+async fn async_main(config: ValidConfig) -> Result<(), Box<dyn std::error::Error>> {
+    // JoinSet owns all background tasks — structured concurrency ensures they
+    // are cleaned up (aborted) when the JoinSet is dropped or shut down.
+    let mut tasks: JoinSet<()> = JoinSet::new();
+
+    // Set up signal handling (SIGTERM, SIGINT -> channel)
+    let (signal_rx, signal_task) = signals::setup_signal_handler()?;
+    tasks.spawn(signal_task);
+
+    // Create the agent client (HTTP+JSON over Unix domain socket)
+    let agent_client = agent_client::AgentClient::new(&config.agent.socket_path);
+
+    // Create the JVM supervisor
+    let agent_jar_path = supervisor::agent_jar_path();
+
+    let supervisor = supervisor::Supervisor::new(
+        config.gateway.clone(),
+        &agent_jar_path,
+        config.agent.socket_path.clone(),
+        config.timing.jvm_shutdown_timeout_secs,
+    );
+
+    // Create the dialog handler registry with all built-in handlers
+    let handler_registry = handlers::DialogHandlerRegistry::with_defaults(&config);
+
+    // Create the watch channel for query snapshots.
+    // The state machine publishes snapshots; the command server reads them directly.
+    let (snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(
+        std::sync::Arc::new(types::QuerySnapshot::initializing()),
+    );
+
+    // Start the TCP command server (IBC-compatible + JSON queries for dashboard)
+    let (command_tx, command_rx) = tokio::sync::mpsc::channel(32);
+    let (query_tx, query_rx) = tokio::sync::mpsc::channel(32);
+    if config.command_server.enabled {
+        let cmd_server = command_server::CommandServer::new(config.command_server.clone());
+        let snap_rx = snapshot_rx.clone();
+        tasks.spawn(async move {
+            if let Err(e) = cmd_server.run(command_tx, query_tx, snap_rx).await {
+                log::error!("Command server failed: {}", e);
+            }
+        });
+        log::info!(
+            "Command server enabled on {}:{}",
+            config.command_server.bind_address,
+            config.command_server.port
+        );
+    }
+
+    // Start cold restart timer (Sunday weekly restart — IBC's ColdRestartTime)
+    // Gateway does NOT have a built-in cold restart. IBC implements its own timer,
+    // and so does ibctl. The timer fires on Sunday at the configured time, kills
+    // the JVM, and the state machine relaunches with full re-auth.
+    //
+    // Skip semantics: the scheduler also reads a per-mode fresh-auth marker
+    // written by the state machine. If a fresh login already happened earlier
+    // today, the scheduled fire is replaced by a `Skipped` signal — the state
+    // machine surfaces that in STATUS JSON instead of restarting.
+    let (cold_restart_tx, cold_restart_rx) = tokio::sync::mpsc::channel(1);
+    let cold_restart_time = config.session.cold_restart_time.clone();
+    let cold_restart_day = config.session.tws_cold_restart_day;
+    let settings_dir_for_marker = if config.gateway.settings_path.is_empty() {
+        std::env::var("TWS_SETTINGS_PATH")
+            .unwrap_or_else(|_| "/home/ibgateway/Jts".to_string())
+    } else {
+        config.gateway.settings_path.clone()
+    };
+    let cold_restart_equivalent_marker_path = std::path::PathBuf::from(&settings_dir_for_marker)
+        .join(".ibctl-cold-restart-equivalent-today");
+    if let Some(cold_restart_fut) = cold_restart::cold_restart_scheduler(
+        cold_restart_time,
+        cold_restart_day,
+        cold_restart_tx,
+        cold_restart_equivalent_marker_path.clone(),
+    ) {
+        tasks.spawn(cold_restart_fut);
+    }
+
+    // Start agent event stream reader (SUBSCRIBE on same socket — multiplexed protocol v2)
+    let event_rx = event_stream::spawn_event_reader(
+        std::path::PathBuf::from(&config.agent.socket_path),
+        64, // bounded channel capacity
+    );
+    log::info!("Agent event stream reader started for {}", config.agent.socket_path);
+
+    // Create and run the state machine
+    let channels = state_machine::Channels {
+        signals: signal_rx,
+        commands: command_rx,
+        queries: query_rx,
+        cold_restart: cold_restart_rx,
+        agent_events: event_rx,
+    };
+    let mut state_machine = state_machine::StateMachine::new(
+        config,
+        agent_client,
+        supervisor,
+        handler_registry,
+        channels,
+        snapshot_tx,
+        cold_restart_equivalent_marker_path,
+    );
+
+    state_machine.run().await?;
+
+    // Shut down all background tasks (signal handler, command server, cold restart)
+    tasks.shutdown().await;
+
+    Ok(())
+}
+
+/// Parse the `--config <path>` CLI argument.
+#[allow(clippy::never_loop)]
+/// `ibctl preflight --payload [--config <path>]`.
+///
+/// Resolves the Gateway launch exactly as a real launch does, runs the
+/// Gateway's Java, and checks the agent jar. Exit 0: this image can launch
+/// its Gateway. 1: it cannot, and each failing check says why. 2: usage.
+fn preflight_main(args: &[String]) -> ExitCode {
+    const USAGE: &str = "usage: ibctl preflight --payload [--config <path>]";
+    let mut payload = false;
+    let mut config_path: Option<String> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--payload" => payload = true,
+            "--config" | "-c" => match iter.next() {
+                Some(path) => config_path = Some(path.clone()),
+                None => {
+                    eprintln!("{USAGE}");
+                    return ExitCode::from(2);
+                }
+            },
+            _ if arg.starts_with("--config=") => {
+                config_path = Some(arg.trim_start_matches("--config=").to_string());
+            }
+            _ => {
+                eprintln!("unknown argument: {arg}\n{USAGE}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    if !payload {
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    }
+
+    let config = match Config::load_layered(config_path.as_deref()) {
+        Ok(config) => config,
+        Err(e) => {
+            eprintln!("PAYLOAD PREFLIGHT FAILED: cannot load configuration: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let checks = payload::check_payload(
+        payload::plan_launch(&config.gateway),
+        &supervisor::agent_jar_path(),
+        payload::JAVA_VERSION_TIMEOUT,
+    );
+    for check in &checks {
+        match &check.result {
+            Ok(detail) => println!("  ok    {:<10} {detail}", check.name),
+            Err(reason) => println!("  FAIL  {:<10} {reason}", check.name),
+        }
+    }
+    if checks.iter().all(payload::CheckOutcome::passed) {
+        println!("payload preflight passed");
+        ExitCode::SUCCESS
+    } else {
+        eprintln!("PAYLOAD PREFLIGHT FAILED: this image cannot launch its Gateway");
+        ExitCode::from(1)
+    }
+}
+
+fn parse_config_arg(args: &[String]) -> Option<String> {
+    let mut iter = args.iter().skip(1); // Skip binary name
+    // Every argument either is the answer or ends the process, so only the
+    // first one is ever examined.
+    if let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--config" | "-c" => {
+                return iter.next().cloned();
+            }
+            _ if arg.starts_with("--config=") => {
+                return Some(arg.trim_start_matches("--config=").to_string());
+            }
+            "--help" | "-h" => {
+                print_usage();
+                std::process::exit(0);
+            }
+            "--version" | "-V" => {
+                println!("ibctl {}", env!("IBCTL_VERSION"));
+                std::process::exit(0);
+            }
+            _ => {
+                eprintln!("Unknown argument: {}", arg);
+                print_usage();
+                std::process::exit(1);
+            }
+        }
+    }
+    None
+}
+
+/// Print usage information.
+fn print_usage() {
+    eprintln!(
+        "Usage: ibctl [OPTIONS]\n\
+         \x20      ibctl preflight --payload [--config <PATH>]\n\
+         \n\
+         Options:\n\
+         \x20 -c, --config <PATH>  Path to TOML config file (default: ibctl.toml)\n\
+         \x20 -h, --help           Print help\n\
+         \x20 -V, --version        Print version\n\
+         \n\
+         Environment variables override config file values. See ibctl.toml.example\n\
+         for the full list of configuration options."
+    );
+}
+

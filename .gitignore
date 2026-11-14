@@ -1,0 +1,72 @@
+# Rust
+/target/
+ibctl/target/
+
+# Java
+agent/target/
+*.class
+*.jar
+!agent/src/main/resources/**
+
+# Python
+**/__pycache__/
+**/*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+# Node (test tooling only)
+node_modules/
+# Agent/assistant tooling: per-machine settings and transcripts
+.claude/
+CLAUDE.local.md
+# Local runtime state (IBCTL_PERSIST_DIR pointed into the checkout) and logs
+/persist/
+*.log
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets & deployment — NEVER commit credentials or site-specific config
+.env
+.env.*
+!.env.example
+*.secret
+*.secrets
+/ibctl.toml
+.*-auth
+deploy.sh
+docker-compose.override.yml
+notifications.json
+scraper_overrides.json
+ib_status_audit.json
+
+# Backup/snapshot files — deployment tools may generate these on hosts
+*.bak
+*.backup
+*.snapshot
+*-backup.*
+*-snapshot.*
+*.site-specific.*
+jts.ini
+
+# Build artifacts
+docker/ibctl
+.superpowers/
+.full-review/
+# Private working notes: handoffs, and anything under docs/private/. The
+# other files in docs/ are the project's documentation and are tracked.
+docs/*handoff*
+docs/private/

@@ -1,0 +1,1554 @@
+//! Configuration loading with layered precedence:
+//! 1. Built-in defaults (lowest)
+//! 2. TOML config file
+//! 3. Environment variables (highest)
+//!
+//! Docker secrets (_FILE suffix) supported for sensitive values.
+
+use std::fmt;
+use std::path::Path;
+
+use secrecy::{ExposeSecret, SecretString};
+use serde::Deserialize;
+use thiserror::Error;
+
+// --- Typed enums for config fields ---
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TradingMode {
+    Live,
+    Paper,
+    Both,
+}
+
+impl fmt::Display for TradingMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Live => write!(f, "live"),
+            Self::Paper => write!(f, "paper"),
+            Self::Both => write!(f, "both"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TotpProvider {
+    Oathtool,
+    Builtin,
+}
+
+impl fmt::Display for TotpProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Oathtool => write!(f, "oathtool"),
+            Self::Builtin => write!(f, "builtin"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TwoFaTimeoutAction {
+    Restart,
+    Exit,
+}
+
+impl fmt::Display for TwoFaTimeoutAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Restart => write!(f, "restart"),
+            Self::Exit => write!(f, "exit"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GatewayProgram {
+    Gateway,
+    Tws,
+}
+
+impl fmt::Display for GatewayProgram {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Gateway => write!(f, "gateway"),
+            Self::Tws => write!(f, "tws"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionAction {
+    Primary,
+    Secondary,
+    #[serde(rename = "primaryoverride")]
+    PrimaryOverride,
+}
+
+impl fmt::Display for SessionAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Primary => write!(f, "primary"),
+            Self::Secondary => write!(f, "secondary"),
+            Self::PrimaryOverride => write!(f, "primaryoverride"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AcceptIncoming {
+    Accept,
+    Reject,
+    Manual,
+}
+
+impl fmt::Display for AcceptIncoming {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Accept => write!(f, "accept"),
+            Self::Reject => write!(f, "reject"),
+            Self::Manual => write!(f, "manual"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SiteRole {
+    #[default]
+    Primary,
+    Standby,
+}
+
+impl fmt::Display for SiteRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Primary => write!(f, "primary"),
+            Self::Standby => write!(f, "standby"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct SiteConfig {
+    pub role: SiteRole,
+    pub auto_launch: bool,
+}
+
+impl Default for SiteConfig {
+    fn default() -> Self {
+        Self {
+            role: SiteRole::Primary,
+            auto_launch: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    Debug,
+    #[default]
+    Info,
+    Warn,
+    Error,
+}
+
+impl fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Debug => write!(f, "debug"),
+            Self::Info => write!(f, "info"),
+            Self::Warn => write!(f, "warn"),
+            Self::Error => write!(f, "error"),
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("failed to read config file '{path}': {source}")]
+    ReadFile {
+        path: String,
+        source: std::io::Error,
+    },
+    #[error("failed to parse config file: {0}")]
+    Parse(#[from] toml::de::Error),
+    #[error("missing required configuration: {0}")]
+    Missing(String),
+}
+
+/// Top-level configuration for ibctl.
+/// Unknown TOML sections are silently ignored — this allows the config file
+/// to contain sections for other components (e.g., \[dashboard\]) without
+/// breaking ibctl's parser.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    pub auth: AuthConfig,
+    pub twofa: TwoFaConfig,
+    pub gateway: GatewayConfig,
+    pub session: SessionConfig,
+    pub command_server: CommandServerConfig,
+    pub agent: AgentConfig,
+    pub logging: LoggingConfig,
+    pub timing: TimingConfig,
+    pub site: SiteConfig,
+    pub ib_status: IbStatusConfig,
+    /// Catch-all for unknown sections (e.g., \[dashboard\]) — silently ignored.
+    #[serde(flatten)]
+    _extra: std::collections::HashMap<String, toml::Value>,
+}
+
+#[derive(Deserialize)]
+#[serde(default)]
+pub struct AuthConfig {
+    #[serde(rename = "tws_userid")]
+    pub username: String,
+    /// Password is env-only (TWS_PASSWORD / TWS_PASSWORD_FILE). Never in config file.
+    #[serde(skip)]
+    pub password: SecretString,
+    pub trading_mode: TradingMode,
+    pub paper: PaperAuthConfig,
+}
+
+impl Clone for AuthConfig {
+    fn clone(&self) -> Self {
+        Self {
+            username: self.username.clone(),
+            password: SecretString::from(self.password.expose_secret().to_string()),
+            trading_mode: self.trading_mode,
+            paper: self.paper.clone(),
+        }
+    }
+}
+
+impl fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthConfig")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .field("trading_mode", &self.trading_mode)
+            .field("paper", &self.paper)
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(default)]
+pub struct PaperAuthConfig {
+    #[serde(rename = "tws_userid")]
+    pub username: String,
+    /// Paper password is env-only (TWS_PASSWORD_PAPER / TWS_PASSWORD_PAPER_FILE).
+    #[serde(skip)]
+    pub password: SecretString,
+}
+
+impl Clone for PaperAuthConfig {
+    fn clone(&self) -> Self {
+        Self {
+            username: self.username.clone(),
+            password: SecretString::from(self.password.expose_secret().to_string()),
+        }
+    }
+}
+
+impl Default for PaperAuthConfig {
+    fn default() -> Self {
+        Self {
+            username: String::new(),
+            password: SecretString::from(String::new()),
+        }
+    }
+}
+
+impl fmt::Debug for PaperAuthConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PaperAuthConfig")
+            .field("username", &self.username)
+            .field("password", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct TwoFaConfig {
+    /// Name of the env var holding the TOTP secret (default: "TWOFACTOR_CODE")
+    pub secret_env: String,
+    pub provider: TotpProvider,
+    pub timeout_action: TwoFaTimeoutAction,
+    /// Seconds an IB Key push may go unanswered before ibctl says it is
+    /// waiting (TOML `exit_interval`, env `TWOFA_EXIT_INTERVAL`). Never ends
+    /// a round; also bounds the wait for the challenge after the
+    /// device picker closes.
+    #[serde(rename = "exit_interval")]
+    pub timeout_seconds: u64,
+    /// 2FA device name for device selection dialog (empty = skip)
+    #[serde(default)]
+    pub device: String,
+    /// Whether to relogin after 2FA timeout (overrides timeout_action=restart)
+    #[serde(default)]
+    pub relogin_after_timeout: bool,
+    /// Whether a TOTP secret is available (resolved at load time)
+    #[serde(skip)]
+    pub has_secret: bool,
+    /// Human-in-the-loop backoff policy.
+    #[serde(default)]
+    pub backoff: TwoFaBackoffConfig,
+}
+
+#[derive(Deserialize)]
+#[serde(default)]
+pub struct TwoFaBackoffConfig {
+    /// After this many failed 2FA rounds in a row, stop retrying and enter
+    /// WaitingForHitl2fa. 0 = disabled (loop forever — legacy).
+    pub max_immediate_attempts: u32,
+    /// What a failed 2FA round leads to (rounds end when the
+    /// Gateway ends them, never on `timeout_seconds`).
+    pub on_timeout: TwoFaOnTimeout,
+    /// HITL resume strategy.
+    pub strategy: HitlStrategy,
+    /// Retry cadence minutes. Single = constant; list = traverse then hold at last.
+    pub intervals_minutes: Vec<u32>,
+    /// Hours the signed ntfy-action URL stays valid.
+    pub callback_valid_hours: u32,
+    /// When to reset the attempt counter after a successful Connected.
+    pub counter_reset: CounterResetScope,
+    /// Seconds Connected must persist before reset under counter_reset = Stable.
+    pub stable_secs: u64,
+    /// Does scheduled cold restart preempt WaitingForHitl2fa?
+    pub cold_restart_preempts_hitl: bool,
+    /// How many times to retry a failing initial ntfy push.
+    pub ntfy_send_retries: u32,
+    /// Unattended hours, `"HH:MM-HH:MM"` local wall clock. Empty
+    /// or `off`: none. A round failing inside parks until the operator's
+    /// Retry or the Sunday re-auth. Resolved into `unattended` at load.
+    pub unattended_hours: String,
+    /// `unattended_hours` parsed; `None` when unset or unparseable (logged).
+    #[serde(skip)]
+    pub unattended: Option<crate::unattended::UnattendedHours>,
+    /// HMAC-SHA256 signing key for ntfy action URLs. Env only:
+    /// IBCTL_NTFY_ACTION_SIGNING_KEY. Never in TOML.
+    #[serde(skip)]
+    pub ntfy_action_signing_key: SecretString,
+}
+
+impl Clone for TwoFaBackoffConfig {
+    fn clone(&self) -> Self {
+        Self {
+            max_immediate_attempts: self.max_immediate_attempts,
+            on_timeout: self.on_timeout,
+            strategy: self.strategy,
+            intervals_minutes: self.intervals_minutes.clone(),
+            callback_valid_hours: self.callback_valid_hours,
+            counter_reset: self.counter_reset,
+            stable_secs: self.stable_secs,
+            cold_restart_preempts_hitl: self.cold_restart_preempts_hitl,
+            ntfy_send_retries: self.ntfy_send_retries,
+            unattended_hours: self.unattended_hours.clone(),
+            unattended: self.unattended,
+            ntfy_action_signing_key: SecretString::from(
+                self.ntfy_action_signing_key.expose_secret().to_string(),
+            ),
+        }
+    }
+}
+
+impl fmt::Debug for TwoFaBackoffConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TwoFaBackoffConfig")
+            .field("max_immediate_attempts", &self.max_immediate_attempts)
+            .field("on_timeout", &self.on_timeout)
+            .field("strategy", &self.strategy)
+            .field("intervals_minutes", &self.intervals_minutes)
+            .field("callback_valid_hours", &self.callback_valid_hours)
+            .field("counter_reset", &self.counter_reset)
+            .field("stable_secs", &self.stable_secs)
+            .field("cold_restart_preempts_hitl", &self.cold_restart_preempts_hitl)
+            .field("ntfy_send_retries", &self.ntfy_send_retries)
+            .field("unattended_hours", &self.unattended_hours)
+            .field("ntfy_action_signing_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl TwoFaBackoffConfig {
+    /// Parse `unattended_hours` into `unattended`. A value that
+    /// doesn't parse is logged as an ERROR and disables the window — ibctl
+    /// still starts; preflight rejects it before a deploy.
+    pub fn resolve_unattended(&mut self) {
+        self.unattended = match crate::unattended::UnattendedHours::parse(&self.unattended_hours) {
+            Ok(w) => w,
+            Err(e) => {
+                log::error!(
+                    "twofa.backoff.unattended_hours / IBCTL_TWOFA_UNATTENDED_HOURS: {} — \
+                     unattended hours DISABLED: a failed 2FA round at night will retry \
+                     (send another push) instead of waiting for you",
+                    e
+                );
+                None
+            }
+        };
+    }
+}
+
+impl Default for TwoFaBackoffConfig {
+    fn default() -> Self {
+        Self {
+            max_immediate_attempts: 3,
+            on_timeout: TwoFaOnTimeout::RestartThenHitl,
+            strategy: HitlStrategy::Periodic,
+            intervals_minutes: vec![60],
+            callback_valid_hours: 12,
+            counter_reset: CounterResetScope::AnyReach,
+            stable_secs: 300,
+            cold_restart_preempts_hitl: true,
+            ntfy_send_retries: 1,
+            unattended_hours: String::new(),
+            unattended: None,
+            ntfy_action_signing_key: SecretString::from(String::new()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TwoFaOnTimeout {
+    #[default]
+    RestartThenHitl,
+    RestartForever,
+    HitlImmediately,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HitlStrategy {
+    Disabled,
+    #[default]
+    Periodic,
+    NtfyCallback,
+    Both,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CounterResetScope {
+    #[default]
+    AnyReach,
+    Stable,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct GatewayConfig {
+    pub tws_path: String,
+    #[serde(rename = "tws_settings_path")]
+    pub settings_path: String,
+    #[serde(rename = "tws_major_vrsn")]
+    pub version: String,
+    #[serde(rename = "java_heap_size")]
+    pub java_heap_mb: u32,
+    #[serde(rename = "gateway_or_tws")]
+    pub program: GatewayProgram,
+    /// Gateway API port (live: 4001, paper: 4002)
+    pub live_api_port: u16,
+    pub paper_api_port: u16,
+    /// Socat forwarding port (live: 4003, paper: 4004)
+    pub live_socat_port: u16,
+    pub paper_socat_port: u16,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct SessionConfig {
+    pub action: SessionAction,
+    pub accept_incoming: AcceptIncoming,
+    /// Cold restart time in "HH:MM" 24h format (e.g., "09:00"). Empty = disabled.
+    #[serde(default, rename = "tws_cold_restart")]
+    pub cold_restart_time: String,
+    /// Cold restart day of week (0=Sunday, 1=Monday, ..., 6=Saturday). Default: 0 (Sunday).
+    #[serde(default)]
+    pub tws_cold_restart_day: u8,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct CommandServerConfig {
+    pub enabled: bool,
+    pub port: u16,
+    pub bind_address: String,
+    pub control_from: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct AgentConfig {
+    pub socket_path: String,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct IbStatusConfig {
+    /// When a dashboard-pushed IBSTATUS arrives marking IB unavailable, should
+    /// ibctl interrupt an already-authenticated session? Default: false.
+    ///
+    /// The IBSTATUS push was designed as a retry-gate: if IBKR backends are
+    /// unreachable, there's no point hammering new login attempts. It was
+    /// not designed as a kill-switch for active sessions. The scraper can
+    /// be wrong (CDN blips, slow updates) and Gateway is the authoritative
+    /// source for "is my session healthy" — detected via label inspection
+    /// in the revocation bus, not via the public status page.
+    ///
+    /// Set to `true` to restore the historical behavior where any unavailable
+    /// IBSTATUS push transitions Connected → WaitingForIB. Only useful if you
+    /// trust the scraper more than the Gateway UI label.
+    pub kick_active_session: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct LoggingConfig {
+    pub level: LogLevel,
+    /// Directory for persistent log files. Empty = no file logging (stdout only).
+    pub log_dir: String,
+    /// Use futures market session dates for log filenames instead of calendar dates.
+    /// When enabled, log files roll at `session_reopen_hour` ET (default 18 = 6 PM).
+    /// When disabled (default), log files roll at midnight local time.
+    pub futures_session_logging: bool,
+    /// Hour (0-23, US/Eastern) when the futures session reopens and the next trading
+    /// day's log file begins. Only used when `futures_session_logging = true`.
+    /// Default: 18 (6 PM ET — CME futures reopen).
+    pub session_reopen_hour: u8,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: LogLevel::default(),
+            log_dir: String::new(),
+            futures_session_logging: false,
+            session_reopen_hour: 18,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
+pub struct TimingConfig {
+    /// Delay between UI actions in the config dialog (ms)
+    pub ui_tick_ms: u64,
+    /// Java agent-side delay after each Swing action (ms)
+    pub agent_tick_ms: u64,
+    /// Delay after login button click before checking for 2FA (ms)
+    pub post_login_delay_ms: u64,
+    /// Popup quiet threshold — seconds of no popups before considering login complete
+    pub popup_quiet_secs: u64,
+    /// Max time to wait for popups before moving on (seconds)
+    pub popup_max_wait_secs: u64,
+    /// Delay after clicking login radio buttons (IB API, Paper Trading) (ms)
+    pub login_radio_delay_ms: u64,
+    /// Seconds to wait for JVM graceful shutdown (SIGTERM) before SIGKILL
+    pub jvm_shutdown_timeout_secs: u64,
+    /// Seconds to wait for login window to appear before giving up.
+    /// 0 = wait indefinitely (useful for headless servers during IB maintenance).
+    /// Default: 120
+    pub login_dialog_timeout_secs: u64,
+    /// Seconds to wait before restarting the JVM after an error or failure.
+    /// Gives Gateway time to self-recover from transient connection losses.
+    /// Default: 90
+    pub restart_delay_secs: u64,
+    /// Max re-login attempts before cancelling and restarting JVM.
+    /// On first attempt, waits 30s then clicks Re-login. If it fails again
+    /// (up to this limit), clicks Cancel and takes the relogin_failure_action.
+    /// Default: 1
+    pub relogin_max_attempts: u32,
+    /// Action after exhausting re-login attempts: "reauth" (default) re-uses
+    /// the existing login form without killing the JVM; "restart" kills and
+    /// relaunches the JVM for a clean slate.
+    /// Default: "reauth"
+    #[serde(rename = "relogin_failure_action")]
+    pub relogin_failure_action: ReloginFailureAction,
+
+    /// TCP probe interval to Gateway's API port during post-auth states.
+    /// 0 = disabled.
+    #[serde(default = "TimingConfig::default_api_port_probe_interval")]
+    pub api_port_probe_interval_secs: u64,
+
+    /// Consecutive probe failures before firing ApiPortListenerLost revocation.
+    #[serde(default = "TimingConfig::default_api_port_probe_fails")]
+    pub api_port_probe_fails_before_revoke: u32,
+
+    /// Three-phase reconnection recovery coordinator settings.
+    /// See `crate::state_machine::recovery` for the state model.
+    #[serde(default)]
+    #[allow(dead_code)] // added ahead of its StateMachine wiring
+    pub recovery: RecoveryTimingConfig,
+}
+
+impl TimingConfig {
+    fn default_api_port_probe_interval() -> u64 { 5 }
+    fn default_api_port_probe_fails() -> u32 { 3 }
+}
+
+/// TOML shape for [timing.recovery]. Runtime enforcement lives in
+/// `state_machine::recovery::RecoveryConfig`; this struct exists solely
+/// as the serde landing zone. Env overrides (`IBCTL_RECOVERY_*_SECS`) are
+/// layered on top by `RecoveryTimingConfig::to_runtime()` before the pure
+/// decision function ever sees the values.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)] // added ahead of its StateMachine wiring
+pub struct RecoveryTimingConfig {
+    /// Master enable — set false in TOML to disable the coordinator
+    /// entirely without touching env. Env `IBCTL_RECOVERY_DISABLED=1`
+    /// wins if set. Default true.
+    #[serde(default = "RecoveryTimingConfig::default_enabled")]
+    pub enabled: bool,
+    /// Aggressive → Backoff threshold. Default 3600 (1h).
+    #[serde(default = "RecoveryTimingConfig::default_aggressive_max_secs")]
+    pub aggressive_phase_max_secs: u64,
+    /// Backoff → GivenUp threshold. Default 10800 (3h).
+    #[serde(default = "RecoveryTimingConfig::default_backoff_max_secs")]
+    pub backoff_phase_max_secs: u64,
+    /// Sleep between Backoff retries. Default 900 (15 min).
+    #[serde(default = "RecoveryTimingConfig::default_backoff_interval_secs")]
+    pub backoff_interval_secs: u64,
+    /// Minimum Connected dwell to count as a success and reset the
+    /// phase timer. Default 60. Guards against a 3-second flap-Connect
+    /// resetting the timer indefinitely — the exact pathology this
+    /// coordinator is meant to detect.
+    #[serde(default = "RecoveryTimingConfig::default_min_success_dwell_secs")]
+    pub min_success_dwell_secs: u64,
+    /// Same-error streak that skips time-based escalation and forces
+    /// HITL immediately. Default 8 (~40 min at 5-min cycles).
+    #[serde(default = "RecoveryTimingConfig::default_fingerprint_streak")]
+    pub fingerprint_streak_forcing_hitl: u32,
+    /// Coalescer key for the give-up ntfy alert. Distinct kind lets the
+    /// dashboard's ntfy coalescer dedupe re-fires within the resend
+    /// interval below.
+    #[serde(default = "RecoveryTimingConfig::default_giveup_kind")]
+    pub giveup_ntfy_kind: String,
+    /// How long the signed retry-link on the give-up alert is valid.
+    /// Default 12 (matches the HITL 2FA callback convention).
+    #[serde(default = "RecoveryTimingConfig::default_callback_valid_hours")]
+    pub giveup_callback_valid_hours: u32,
+    /// Minimum wall-clock interval before re-firing a give-up alert
+    /// when the state machine is still parked in GivenUp. Default 6h.
+    #[serde(default = "RecoveryTimingConfig::default_resend_interval_hours")]
+    pub giveup_alert_resend_interval_hours: u32,
+}
+
+#[allow(dead_code)] // added ahead of its StateMachine wiring
+impl RecoveryTimingConfig {
+    fn default_enabled() -> bool { true }
+    fn default_aggressive_max_secs() -> u64 { 3600 }
+    fn default_backoff_max_secs() -> u64 { 10800 }
+    fn default_backoff_interval_secs() -> u64 { 900 }
+    fn default_min_success_dwell_secs() -> u64 { 60 }
+    fn default_fingerprint_streak() -> u32 { 8 }
+    fn default_giveup_kind() -> String { "reconnect_gave_up".to_string() }
+    fn default_callback_valid_hours() -> u32 { 12 }
+    fn default_resend_interval_hours() -> u32 { 6 }
+
+    /// Convert the TOML shape into the runtime shape used by the pure
+    /// decision function, applying env overrides in precedence order:
+    /// env > TOML > default.
+    ///
+    /// Env keys (all optional):
+    /// - `IBCTL_RECOVERY_DISABLED=1|true|yes` — kills the coordinator
+    /// - `IBCTL_RECOVERY_AGGRESSIVE_MAX_SECS`
+    /// - `IBCTL_RECOVERY_BACKOFF_MAX_SECS`
+    /// - `IBCTL_RECOVERY_BACKOFF_INTERVAL_SECS`
+    /// - `IBCTL_RECOVERY_MIN_SUCCESS_DWELL_SECS`
+    /// - `IBCTL_RECOVERY_FINGERPRINT_STREAK`
+    ///
+    /// Invalid env values (non-numeric) are IGNORED with a warn log so
+    /// a typo doesn't accidentally disable the whole subsystem.
+    pub fn to_runtime(&self) -> crate::state_machine::recovery::RecoveryConfig {
+        let env_bool = |key: &str| -> Option<bool> {
+            std::env::var(key).ok().map(|v| {
+                let low = v.to_ascii_lowercase();
+                matches!(low.as_str(), "1" | "true" | "yes" | "on")
+            })
+        };
+        let env_u64 = |key: &str, current: u64| -> u64 {
+            match std::env::var(key) {
+                Ok(v) => v.parse().unwrap_or_else(|_| {
+                    log::warn!("Ignoring non-numeric {key}={v:?}; using {current}");
+                    current
+                }),
+                Err(_) => current,
+            }
+        };
+        let env_u32 = |key: &str, current: u32| -> u32 {
+            match std::env::var(key) {
+                Ok(v) => v.parse().unwrap_or_else(|_| {
+                    log::warn!("Ignoring non-numeric {key}={v:?}; using {current}");
+                    current
+                }),
+                Err(_) => current,
+            }
+        };
+
+        let disabled = env_bool("IBCTL_RECOVERY_DISABLED").unwrap_or(!self.enabled);
+
+        crate::state_machine::recovery::RecoveryConfig {
+            aggressive_phase_max_secs: env_u64(
+                "IBCTL_RECOVERY_AGGRESSIVE_MAX_SECS",
+                self.aggressive_phase_max_secs,
+            ),
+            backoff_phase_max_secs: env_u64(
+                "IBCTL_RECOVERY_BACKOFF_MAX_SECS",
+                self.backoff_phase_max_secs,
+            ),
+            backoff_interval_secs: env_u64(
+                "IBCTL_RECOVERY_BACKOFF_INTERVAL_SECS",
+                self.backoff_interval_secs,
+            ),
+            min_success_dwell_secs: env_u64(
+                "IBCTL_RECOVERY_MIN_SUCCESS_DWELL_SECS",
+                self.min_success_dwell_secs,
+            ),
+            fingerprint_streak_forcing_hitl: env_u32(
+                "IBCTL_RECOVERY_FINGERPRINT_STREAK",
+                self.fingerprint_streak_forcing_hitl,
+            ),
+            // Thread the two ntfy-callback timing knobs through into the
+            // runtime config so
+            // the dashboard monitor's STATUS view reflects the operator's
+            // configured values rather than a fabricated default.
+            giveup_callback_valid_hours: env_u32(
+                "IBCTL_RECOVERY_GIVEUP_CALLBACK_VALID_HOURS",
+                self.giveup_callback_valid_hours,
+            ),
+            giveup_alert_resend_interval_hours: env_u32(
+                "IBCTL_RECOVERY_GIVEUP_ALERT_RESEND_INTERVAL_HOURS",
+                self.giveup_alert_resend_interval_hours,
+            ),
+            disabled,
+        }
+    }
+}
+
+impl Default for RecoveryTimingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            aggressive_phase_max_secs: Self::default_aggressive_max_secs(),
+            backoff_phase_max_secs: Self::default_backoff_max_secs(),
+            backoff_interval_secs: Self::default_backoff_interval_secs(),
+            min_success_dwell_secs: Self::default_min_success_dwell_secs(),
+            fingerprint_streak_forcing_hitl: Self::default_fingerprint_streak(),
+            giveup_ntfy_kind: Self::default_giveup_kind(),
+            giveup_callback_valid_hours: Self::default_callback_valid_hours(),
+            giveup_alert_resend_interval_hours: Self::default_resend_interval_hours(),
+        }
+    }
+}
+
+/// What to do after all re-login attempts fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReloginFailureAction {
+    /// Re-authenticate using the existing login form (no JVM restart).
+    Reauth,
+    /// Kill and restart the JVM for a clean slate.
+    Restart,
+}
+
+// --- Default implementations ---
+
+impl Default for TimingConfig {
+    fn default() -> Self {
+        Self {
+            ui_tick_ms: 100,
+            agent_tick_ms: 50,
+            post_login_delay_ms: 1000,
+            popup_quiet_secs: 5,
+            popup_max_wait_secs: 30,
+            login_radio_delay_ms: 100,
+            jvm_shutdown_timeout_secs: 5,
+            login_dialog_timeout_secs: 120,
+            restart_delay_secs: 90,
+            relogin_max_attempts: 1,
+            relogin_failure_action: ReloginFailureAction::Reauth,
+            api_port_probe_interval_secs: 5,
+            api_port_probe_fails_before_revoke: 3,
+            recovery: RecoveryTimingConfig::default(),
+        }
+    }
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            username: String::new(),
+            password: SecretString::from(String::new()),
+            trading_mode: TradingMode::Paper,
+            paper: PaperAuthConfig::default(),
+        }
+    }
+}
+
+
+impl Default for TwoFaConfig {
+    fn default() -> Self {
+        Self {
+            secret_env: "TWOFACTOR_CODE".to_string(), // pragma: allowlist secret
+            provider: TotpProvider::Oathtool,
+            timeout_action: TwoFaTimeoutAction::Restart,
+            timeout_seconds: 180,
+            device: String::new(),
+            relogin_after_timeout: false,
+            has_secret: false,
+            backoff: TwoFaBackoffConfig::default(),
+        }
+    }
+}
+
+impl Default for GatewayConfig {
+    fn default() -> Self {
+        Self {
+            tws_path: "/home/ibgateway/Jts".to_string(),
+            settings_path: String::new(),
+            version: String::new(),
+            java_heap_mb: 768,
+            program: GatewayProgram::Gateway,
+            live_api_port: 4001,
+            paper_api_port: 4002,
+            live_socat_port: 4003,
+            paper_socat_port: 4004,
+        }
+    }
+}
+
+impl Default for SessionConfig {
+    fn default() -> Self {
+        Self {
+            action: SessionAction::Primary,
+            accept_incoming: AcceptIncoming::Accept,
+            cold_restart_time: String::new(),
+            tws_cold_restart_day: 0, // Sunday
+        }
+    }
+}
+
+impl Default for CommandServerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 7462,
+            bind_address: "0.0.0.0".to_string(),
+            control_from: vec!["127.0.0.1".to_string(), "172.0.0.0/8".to_string()],
+        }
+    }
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            socket_path: "/run/ibctl/agent.sock".to_string(),
+        }
+    }
+}
+
+
+/// A config that has passed all validation checks.
+/// Can only be constructed via `Config::load()`.
+#[derive(Debug, Clone)]
+pub struct ValidConfig(Config);
+
+impl std::ops::Deref for ValidConfig {
+    type Target = Config;
+    fn deref(&self) -> &Config { &self.0 }
+}
+
+#[cfg(test)]
+impl ValidConfig {
+    /// Bypass validation for unit tests that need a `ValidConfig` with controlled values.
+    pub fn new_unchecked(config: Config) -> Self { Self(config) }
+}
+
+impl Config {
+    /// Load configuration with layered precedence:
+    /// defaults -> TOML file -> environment variables.
+    ///
+    /// Validation runs at the end — the returned `ValidConfig` is guaranteed
+    /// to have all required fields present (parse-don't-validate).
+    pub fn load(path: Option<&str>) -> Result<ValidConfig, ConfigError> {
+        let config = Self::load_layered(path)?;
+
+        // Validate before wrapping — invalid config cannot escape
+        config.validate()?;
+
+        Ok(ValidConfig(config))
+    }
+
+    /// The same layering as [`Config::load`] without validation. Only for
+    /// reading settings that need no credentials (the payload preflight runs
+    /// at image build, where there are none); never for starting a session.
+    pub fn load_layered(path: Option<&str>) -> Result<Config, ConfigError> {
+        // Start with defaults
+        let mut config = Config::default();
+
+        // Layer 2: TOML file (if it exists)
+        let config_path = path
+            .map(String::from)
+            .or_else(|| std::env::var("IBCTL_CONFIG").ok())
+            .unwrap_or_else(|| "ibctl.toml".to_string());
+
+        if Path::new(&config_path).exists() {
+            let contents = std::fs::read_to_string(&config_path).map_err(|e| {
+                ConfigError::ReadFile {
+                    path: config_path.clone(),
+                    source: e,
+                }
+            })?;
+            config = toml::from_str(&contents)?;
+            log::info!("Loaded config from {}", config_path);
+        } else if path.is_some() {
+            // Explicit path was given but file doesn't exist
+            return Err(ConfigError::ReadFile {
+                path: config_path.clone(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "config file not found",
+                ),
+            });
+        } else {
+            log::debug!("No config file found at {}, using defaults + env", config_path);
+        }
+
+        // Layer 3: Environment variable overrides
+        config.apply_env_overrides();
+
+        Ok(config)
+    }
+
+    /// Apply environment variable overrides on top of current config.
+    /// Env vars have highest precedence.
+    fn apply_env_overrides(&mut self) {
+        // Auth
+        if let Some(v) = env_or_file("TWS_USERID") {
+            self.auth.username = v;
+        }
+        if let Some(v) = env_or_file("TWS_PASSWORD") {
+            self.auth.password = SecretString::from(v);
+        }
+        if let Some(v) = env_or_file("TRADING_MODE") {
+            match v.to_lowercase().as_str() {
+                "live" => self.auth.trading_mode = TradingMode::Live,
+                "paper" => self.auth.trading_mode = TradingMode::Paper,
+                "both" => self.auth.trading_mode = TradingMode::Both,
+                other => log::warn!("Unknown TRADING_MODE '{}', keeping default", other),
+            }
+        }
+
+        // Paper auth
+        if let Some(v) = env_or_file("TWS_USERID_PAPER") {
+            self.auth.paper.username = v;
+        }
+        if let Some(v) = env_or_file("TWS_PASSWORD_PAPER") {
+            self.auth.paper.password = SecretString::from(v);
+        }
+
+        // 2FA
+        if let Some(v) = env_nonempty("TOTP_PROVIDER") {
+            match v.to_lowercase().as_str() {
+                "oathtool" => self.twofa.provider = TotpProvider::Oathtool,
+                "builtin" => self.twofa.provider = TotpProvider::Builtin,
+                other => log::warn!("Unknown TOTP_PROVIDER '{}', keeping default", other),
+            }
+        }
+        if let Some(v) = env_nonempty("TWOFA_TIMEOUT_ACTION") {
+            match v.to_lowercase().as_str() {
+                "restart" => self.twofa.timeout_action = TwoFaTimeoutAction::Restart,
+                "exit" => self.twofa.timeout_action = TwoFaTimeoutAction::Exit,
+                other => log::warn!("Unknown TWOFA_TIMEOUT_ACTION '{}', keeping default", other),
+            }
+        }
+        if let Some(v) = std::env::var("TWOFA_EXIT_INTERVAL").ok().and_then(|s| s.parse().ok()) {
+            self.twofa.timeout_seconds = v;
+        }
+        if let Some(v) = env_nonempty("TWOFA_DEVICE") {
+            self.twofa.device = v;
+        }
+        if let Some(v) = env_nonempty("RELOGIN_AFTER_TWOFA_TIMEOUT") {
+            self.twofa.relogin_after_timeout =
+                matches!(v.to_lowercase().as_str(), "yes" | "true" | "1");
+        }
+        // Resolve whether a TOTP secret is available
+        self.twofa.has_secret = env_or_file(&self.twofa.secret_env)
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+
+        // 2FA backoff (HITL)
+        if let Some(v) = std::env::var("IBCTL_TWOFA_MAX_IMMEDIATE_ATTEMPTS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
+            self.twofa.backoff.max_immediate_attempts = v;
+        }
+        if let Some(v) = env_nonempty("IBCTL_TWOFA_ON_TIMEOUT") {
+            match v.to_lowercase().as_str() {
+                "restart_then_hitl" => self.twofa.backoff.on_timeout = TwoFaOnTimeout::RestartThenHitl,
+                "restart_forever" => self.twofa.backoff.on_timeout = TwoFaOnTimeout::RestartForever,
+                "hitl_immediately" => self.twofa.backoff.on_timeout = TwoFaOnTimeout::HitlImmediately,
+                other => log::warn!("Unknown IBCTL_TWOFA_ON_TIMEOUT '{}', keeping default", other),
+            }
+        }
+        if let Some(v) = env_nonempty("IBCTL_TWOFA_STRATEGY") {
+            match v.to_lowercase().as_str() {
+                "disabled" => self.twofa.backoff.strategy = HitlStrategy::Disabled,
+                "periodic" => self.twofa.backoff.strategy = HitlStrategy::Periodic,
+                "ntfy_callback" => self.twofa.backoff.strategy = HitlStrategy::NtfyCallback,
+                "both" => self.twofa.backoff.strategy = HitlStrategy::Both,
+                other => log::warn!("Unknown IBCTL_TWOFA_STRATEGY '{}', keeping default", other),
+            }
+        }
+        if let Some(v) = env_nonempty("IBCTL_TWOFA_INTERVALS_MINUTES") {
+            let parsed: Vec<u32> = v.split(',')
+                .filter_map(|s| s.trim().parse().ok())
+                .collect();
+            if !parsed.is_empty() {
+                self.twofa.backoff.intervals_minutes = parsed;
+            }
+        }
+        if let Some(v) = std::env::var("IBCTL_TWOFA_CALLBACK_VALID_HOURS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
+            self.twofa.backoff.callback_valid_hours = v;
+        }
+        if let Some(v) = env_nonempty("IBCTL_TWOFA_COUNTER_RESET") {
+            match v.to_lowercase().as_str() {
+                "any_reach" => self.twofa.backoff.counter_reset = CounterResetScope::AnyReach,
+                "stable" => self.twofa.backoff.counter_reset = CounterResetScope::Stable,
+                other => log::warn!("Unknown IBCTL_TWOFA_COUNTER_RESET '{}', keeping default", other),
+            }
+        }
+        if let Some(v) = std::env::var("IBCTL_TWOFA_STABLE_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
+            self.twofa.backoff.stable_secs = v;
+        }
+        if let Some(v) = env_nonempty("IBCTL_TWOFA_COLD_RESTART_PREEMPTS_HITL") {
+            self.twofa.backoff.cold_restart_preempts_hitl =
+                matches!(v.to_lowercase().as_str(), "yes" | "true" | "1");
+        }
+        if let Some(v) = std::env::var("IBCTL_TWOFA_NTFY_SEND_RETRIES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
+            self.twofa.backoff.ntfy_send_retries = v;
+        }
+        if let Some(v) = env_nonempty("IBCTL_TWOFA_UNATTENDED_HOURS") {
+            self.twofa.backoff.unattended_hours = v;
+        }
+        self.twofa.backoff.resolve_unattended();
+        if let Some(v) = env_or_file("IBCTL_NTFY_ACTION_SIGNING_KEY") {
+            self.twofa.backoff.ntfy_action_signing_key = SecretString::from(v);
+        }
+
+        // Gateway
+        if let Some(v) = env_nonempty("TWS_PATH") {
+            self.gateway.tws_path = v;
+        }
+        if let Some(v) = env_nonempty("TWS_SETTINGS_PATH") {
+            self.gateway.settings_path = v;
+        }
+        if let Some(v) = env_nonempty("TWS_MAJOR_VRSN") {
+            self.gateway.version = v;
+        }
+        if let Some(v) = std::env::var("JAVA_HEAP_SIZE").ok().and_then(|s| s.parse().ok()) {
+            self.gateway.java_heap_mb = v;
+        }
+        if let Some(v) = env_nonempty("GATEWAY_OR_TWS") {
+            match v.to_lowercase().as_str() {
+                "gateway" => self.gateway.program = GatewayProgram::Gateway,
+                "tws" => self.gateway.program = GatewayProgram::Tws,
+                other => log::warn!("Unknown GATEWAY_OR_TWS '{}', keeping default", other),
+            }
+        }
+
+        // Session
+        if let Some(v) = env_nonempty("IBCTL_SESSION_ACTION") {
+            match v.to_lowercase().as_str() {
+                "primary" => self.session.action = SessionAction::Primary,
+                "secondary" => self.session.action = SessionAction::Secondary,
+                "primaryoverride" => self.session.action = SessionAction::PrimaryOverride,
+                other => log::warn!("Unknown IBCTL_SESSION_ACTION '{}', keeping default", other),
+            }
+        }
+        // IBCTL_ACCEPT_INCOMING takes precedence; fall back to IBC-compatible TWS_ACCEPT_INCOMING
+        if let Some(v) = env_nonempty("IBCTL_ACCEPT_INCOMING")
+            .or_else(|| env_nonempty("TWS_ACCEPT_INCOMING"))
+        {
+            match v.to_lowercase().as_str() {
+                "accept" => self.session.accept_incoming = AcceptIncoming::Accept,
+                "reject" => self.session.accept_incoming = AcceptIncoming::Reject,
+                "manual" => self.session.accept_incoming = AcceptIncoming::Manual,
+                other => log::warn!("Unknown ACCEPT_INCOMING '{}', keeping default", other),
+            }
+        }
+        if let Some(v) = env_nonempty("TWS_COLD_RESTART") {
+            self.session.cold_restart_time = v;
+        }
+        if let Some(v) = env_nonempty("TWS_COLD_RESTART_DAY") {
+            if let Ok(day) = v.parse::<u8>() {
+                if day <= 6 {
+                    self.session.tws_cold_restart_day = day;
+                } else {
+                    log::warn!("TWS_COLD_RESTART_DAY={} out of range (0-6), keeping default", day);
+                }
+            }
+        }
+
+        // Command server
+        if let Some(v) = env_nonempty("IBCTL_COMMAND_SERVER_ENABLED") {
+            self.command_server.enabled = v.to_lowercase() != "false" && v != "0" && v.to_lowercase() != "no";
+        }
+        if let Some(v) = std::env::var("IBCTL_COMMAND_PORT").ok().and_then(|s| s.parse().ok()) {
+            self.command_server.port = v;
+        }
+        if let Some(v) = env_nonempty("IBCTL_CONTROL_FROM") {
+            self.command_server.control_from =
+                v.split(',').map(|s| s.trim().to_string()).collect();
+        }
+
+        // Timing
+        if let Some(v) = std::env::var("IBCTL_LOGIN_TIMEOUT").ok().and_then(|s| s.parse().ok()) {
+            self.timing.login_dialog_timeout_secs = v;
+        }
+        if let Some(v) = std::env::var("IBCTL_RESTART_DELAY").ok().and_then(|s| s.parse().ok()) {
+            self.timing.restart_delay_secs = v;
+        }
+        if let Some(v) = std::env::var("IBCTL_RELOGIN_ATTEMPTS").ok().and_then(|s| s.parse().ok()) {
+            self.timing.relogin_max_attempts = v;
+        }
+        if let Some(v) = env_nonempty("IBCTL_RELOGIN_FAILURE_ACTION") {
+            match v.to_lowercase().as_str() {
+                "reauth" => self.timing.relogin_failure_action = ReloginFailureAction::Reauth,
+                "restart" => self.timing.relogin_failure_action = ReloginFailureAction::Restart,
+                _ => log::warn!("Invalid IBCTL_RELOGIN_FAILURE_ACTION '{}' — must be 'reauth' or 'restart'", v),
+            }
+        }
+        if let Some(v) = std::env::var("IBCTL_API_PORT_PROBE_INTERVAL_SECS").ok().and_then(|s| s.parse().ok()) {
+            self.timing.api_port_probe_interval_secs = v;
+        }
+        if let Some(v) = std::env::var("IBCTL_API_PORT_PROBE_FAILS_BEFORE_REVOKE").ok().and_then(|s| s.parse().ok()) {
+            self.timing.api_port_probe_fails_before_revoke = v;
+        }
+
+        // Agent
+        if let Some(v) = env_nonempty("IBCTL_AGENT_SOCKET") {
+            self.agent.socket_path = v;
+        }
+
+        // Logging
+        if let Some(v) = env_nonempty("IBCTL_LOG_LEVEL") {
+            match v.to_lowercase().as_str() {
+                "debug" => self.logging.level = LogLevel::Debug,
+                "info" => self.logging.level = LogLevel::Info,
+                "warn" | "warning" => self.logging.level = LogLevel::Warn,
+                "error" => self.logging.level = LogLevel::Error,
+                other => log::warn!("Unknown IBCTL_LOG_LEVEL '{}', keeping default", other),
+            }
+        }
+        if let Some(v) = env_nonempty("IBCTL_LOG_DIR") {
+            self.logging.log_dir = v;
+        }
+        if let Some(v) = env_nonempty("IBCTL_FUTURES_SESSION_LOGGING") {
+            self.logging.futures_session_logging = matches!(v.to_lowercase().as_str(), "true" | "yes" | "1");
+        }
+        if let Some(v) = env_nonempty("IBCTL_SESSION_REOPEN_HOUR") {
+            if let Ok(h) = v.parse::<u8>() {
+                if h < 24 {
+                    self.logging.session_reopen_hour = h;
+                }
+            }
+        }
+
+        // Site
+        if let Some(v) = env_nonempty("IBCTL_SITE_ROLE") {
+            match v.to_lowercase().as_str() {
+                "primary" => self.site.role = SiteRole::Primary,
+                "standby" => self.site.role = SiteRole::Standby,
+                other => log::warn!("Unknown IBCTL_SITE_ROLE '{}', keeping default", other),
+            }
+        }
+        if let Some(v) = env_nonempty("IBCTL_AUTO_LAUNCH") {
+            self.site.auto_launch = matches!(v.to_lowercase().as_str(), "true" | "yes" | "1");
+        }
+    }
+
+    /// Validate that required fields are present.
+    /// Private — called at the end of `load()` to enforce the ValidConfig invariant.
+    fn validate(&self) -> Result<(), ConfigError> {
+        // Primary credentials — required for all modes
+        if self.auth.username.is_empty() {
+            return Err(ConfigError::Missing(
+                "tws_userid (set TWS_USERID env var or tws_userid in TOML)".to_string(),
+            ));
+        }
+        if self.auth.password.expose_secret().is_empty() {
+            return Err(ConfigError::Missing(
+                "TWS_PASSWORD or TWS_PASSWORD_FILE env var".to_string(),
+            ));
+        }
+
+        // Paper credentials — required for dual mode
+        if self.auth.trading_mode == TradingMode::Both {
+            if self.auth.paper.username.is_empty() {
+                return Err(ConfigError::Missing(
+                    "paper tws_userid (set TWS_USERID_PAPER env var) — required for trading_mode=both".to_string(),
+                ));
+            }
+            if self.auth.paper.password.expose_secret().is_empty() {
+                return Err(ConfigError::Missing(
+                    "TWS_PASSWORD_PAPER or TWS_PASSWORD_PAPER_FILE env var — required for trading_mode=both".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+}
+
+/// Read an environment variable, skipping empty values.
+/// Empty string = not set = use TOML default.
+fn env_nonempty(var: &str) -> Option<String> {
+    std::env::var(var).ok().filter(|v| !v.is_empty())
+}
+
+/// Read an environment variable, with Docker secrets `_FILE` support.
+///
+/// If `VAR_FILE` is set, reads the file contents. Otherwise returns `VAR` value.
+/// The `_FILE` variant takes precedence (Docker secrets pattern).
+pub fn env_or_file(var: &str) -> Option<String> {
+    // Check _FILE variant first (Docker secrets)
+    let file_var = format!("{}_FILE", var);
+    if let Ok(path) = std::env::var(&file_var) {
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => return Some(contents.trim().to_string()),
+            Err(e) => {
+                log::warn!("Failed to read secret file {} (from {}): {}", path, file_var, e);
+            }
+        }
+    }
+
+    // Fall back to direct env var — skip empty strings (empty = use TOML default)
+    std::env::var(var).ok().filter(|v| !v.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Enum deserialization tests ---
+
+    #[test]
+    fn test_trading_mode_deserialize() {
+        assert_eq!(
+            toml::from_str::<AuthConfig>("trading_mode = \"live\"").unwrap().trading_mode,
+            TradingMode::Live
+        );
+        assert_eq!(
+            toml::from_str::<AuthConfig>("trading_mode = \"paper\"").unwrap().trading_mode,
+            TradingMode::Paper
+        );
+        assert_eq!(
+            toml::from_str::<AuthConfig>("trading_mode = \"both\"").unwrap().trading_mode,
+            TradingMode::Both
+        );
+    }
+
+    #[test]
+    fn test_totp_provider_deserialize() {
+        assert_eq!(
+            toml::from_str::<TwoFaConfig>("provider = \"oathtool\"").unwrap().provider,
+            TotpProvider::Oathtool
+        );
+        assert_eq!(
+            toml::from_str::<TwoFaConfig>("provider = \"builtin\"").unwrap().provider,
+            TotpProvider::Builtin
+        );
+    }
+
+    #[test]
+    fn test_session_action_deserialize() {
+        assert_eq!(
+            toml::from_str::<SessionConfig>("action = \"primary\"").unwrap().action,
+            SessionAction::Primary
+        );
+        assert_eq!(
+            toml::from_str::<SessionConfig>("action = \"secondary\"").unwrap().action,
+            SessionAction::Secondary
+        );
+        assert_eq!(
+            toml::from_str::<SessionConfig>("action = \"primaryoverride\"").unwrap().action,
+            SessionAction::PrimaryOverride
+        );
+    }
+
+    #[test]
+    fn test_gateway_program_deserialize() {
+        assert_eq!(
+            toml::from_str::<GatewayConfig>("gateway_or_tws = \"gateway\"").unwrap().program,
+            GatewayProgram::Gateway
+        );
+        assert_eq!(
+            toml::from_str::<GatewayConfig>("gateway_or_tws = \"tws\"").unwrap().program,
+            GatewayProgram::Tws
+        );
+    }
+
+    #[test]
+    fn test_log_level_deserialize() {
+        assert_eq!(
+            toml::from_str::<LoggingConfig>("level = \"debug\"").unwrap().level,
+            LogLevel::Debug
+        );
+        assert_eq!(
+            toml::from_str::<LoggingConfig>("level = \"error\"").unwrap().level,
+            LogLevel::Error
+        );
+    }
+
+    #[test]
+    fn test_invalid_enum_value_fails() {
+        assert!(toml::from_str::<AuthConfig>("trading_mode = \"invalid\"").is_err());
+        assert!(toml::from_str::<GatewayConfig>("gateway_or_tws = \"something\"").is_err());
+    }
+
+    // --- Display tests (used in JSON serialization) ---
+
+    #[test]
+    fn test_enum_display_roundtrip() {
+        assert_eq!(TradingMode::Live.to_string(), "live");
+        assert_eq!(TradingMode::Paper.to_string(), "paper");
+        assert_eq!(TradingMode::Both.to_string(), "both");
+        assert_eq!(SessionAction::PrimaryOverride.to_string(), "primaryoverride");
+        assert_eq!(AcceptIncoming::Manual.to_string(), "manual");
+        assert_eq!(LogLevel::Warn.to_string(), "warn");
+    }
+
+    // --- Config defaults tests ---
+
+    #[test]
+    fn test_default_config_values() {
+        let config = Config::default();
+        assert_eq!(config.auth.trading_mode, TradingMode::Paper);
+        assert_eq!(config.twofa.provider, TotpProvider::Oathtool);
+        assert_eq!(config.twofa.timeout_action, TwoFaTimeoutAction::Restart);
+        assert_eq!(config.gateway.program, GatewayProgram::Gateway);
+        assert_eq!(config.session.action, SessionAction::Primary);
+        assert_eq!(config.session.accept_incoming, AcceptIncoming::Accept);
+        assert_eq!(config.logging.level, LogLevel::Info);
+        assert_eq!(config.command_server.port, 7462);
+        assert!(!config.command_server.enabled);
+        assert_eq!(config.timing.login_dialog_timeout_secs, 120);
+    }
+
+    #[test]
+    fn test_login_timeout_zero_from_toml() {
+        let toml_str = r#"
+[timing]
+login_dialog_timeout_secs = 0
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.timing.login_dialog_timeout_secs, 0);
+    }
+
+    #[test]
+    fn test_login_timeout_custom_from_toml() {
+        let toml_str = r#"
+[timing]
+login_dialog_timeout_secs = 300
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.timing.login_dialog_timeout_secs, 300);
+    }
+
+    // --- TOML parsing tests ---
+
+    #[test]
+    fn test_shipped_toml_sets_unattended_hours() {
+        // The shipped default parks overnight after one push.
+        let mut config: Config = toml::from_str(include_str!("../../docker/ibctl.toml")).unwrap();
+        config.twofa.backoff.resolve_unattended();
+        let w = config.twofa.backoff.unattended.expect("unattended hours configured");
+        assert_eq!(w.to_string(), "22:00-08:00");
+    }
+
+    #[test]
+    fn test_bad_unattended_hours_disable_the_window() {
+        let mut b = TwoFaBackoffConfig { unattended_hours: "9pm-7am".into(), ..Default::default() };
+        b.resolve_unattended();
+        assert_eq!(b.unattended, None);
+    }
+
+    #[test]
+    fn test_parse_minimal_toml() {
+        let toml_str = r#"
+[auth]
+trading_mode = "paper"
+
+[gateway]
+gateway_or_tws = "tws"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.auth.trading_mode, TradingMode::Paper);
+        assert_eq!(config.gateway.program, GatewayProgram::Tws);
+        // Defaults for unspecified fields
+        assert_eq!(config.twofa.provider, TotpProvider::Oathtool);
+    }
+
+    #[test]
+    fn test_unknown_toml_sections_ignored() {
+        let toml_str = r#"
+[auth]
+trading_mode = "live"
+
+[dashboard]
+enabled = true
+port = 8080
+
+[some_future_feature]
+key = "value"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.auth.trading_mode, TradingMode::Live);
+    }
+
+    // --- Validation tests ---
+
+    #[test]
+    fn test_validate_missing_username() {
+        let config = Config::default();
+        // validate() is private; call it via the test-only access
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_missing_password() {
+        let mut config = Config::default();
+        config.auth.username = "testuser".to_string(); // nosecret
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_ok_with_credentials() {
+        let mut config = Config::default();
+        config.auth.username = "testuser".to_string(); // nosecret
+        config.auth.password = SecretString::from("testpass".to_string());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_both_mode_missing_paper_username() {
+        let mut config = Config::default();
+        config.auth.username = "testuser".to_string(); // nosecret
+        config.auth.password = SecretString::from("testpass".to_string());
+        config.auth.trading_mode = TradingMode::Both;
+        // Paper username empty, paper password empty
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_both_mode_missing_paper_password() {
+        let mut config = Config::default();
+        config.auth.username = "testuser".to_string(); // nosecret
+        config.auth.password = SecretString::from("testpass".to_string());
+        config.auth.trading_mode = TradingMode::Both;
+        config.auth.paper.username = "paperuser".to_string();
+        // Paper password still empty
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn test_validate_both_mode_ok_with_all_credentials() {
+        let mut config = Config::default();
+        config.auth.username = "testuser".to_string(); // nosecret
+        config.auth.password = SecretString::from("testpass".to_string());
+        config.auth.trading_mode = TradingMode::Both;
+        config.auth.paper.username = "paperuser".to_string();
+        config.auth.paper.password = SecretString::from("paperpass".to_string());
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_live_mode_doesnt_need_paper() {
+        let mut config = Config::default();
+        config.auth.username = "testuser".to_string(); // nosecret
+        config.auth.password = SecretString::from("testpass".to_string());
+        config.auth.trading_mode = TradingMode::Live;
+        // No paper credentials
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_valid_config_deref() {
+        let mut config = Config::default();
+        config.auth.username = "testuser".to_string(); // nosecret
+        config.auth.password = SecretString::from("testpass".to_string());
+        let valid = ValidConfig::new_unchecked(config);
+        // Deref allows field access through ValidConfig
+        assert_eq!(valid.auth.username, "testuser");
+    }
+
+    #[test]
+    fn test_password_redacted_in_debug() {
+        let mut config = Config::default();
+        config.auth.password = SecretString::from("supersecret".to_string());
+        let debug_output = format!("{:?}", config.auth);
+        assert!(
+            !debug_output.contains("supersecret"),
+            "Password leaked in Debug output: {}", debug_output
+        );
+        assert!(debug_output.contains("REDACTED"));
+    }
+
+    #[test]
+    fn test_password_expose_secret() {
+        let mut config = Config::default();
+        config.auth.password = SecretString::from("mypass".to_string());
+        assert_eq!(config.auth.password.expose_secret(), "mypass");
+    }
+
+    // --- Site config tests ---
+
+    #[test]
+    fn test_site_config_defaults() {
+        let config = Config::default();
+        assert_eq!(config.site.role, SiteRole::Primary);
+        assert!(config.site.auto_launch);
+    }
+
+    #[test]
+    fn test_site_config_from_toml() {
+        let toml_str = r#"
+[site]
+role = "standby"
+auto_launch = false
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.site.role, SiteRole::Standby);
+        assert!(!config.site.auto_launch);
+    }
+
+    #[test]
+    fn test_site_role_display() {
+        assert_eq!(SiteRole::Primary.to_string(), "primary");
+        assert_eq!(SiteRole::Standby.to_string(), "standby");
+    }
+}

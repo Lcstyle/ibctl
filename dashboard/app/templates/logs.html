@@ -1,0 +1,280 @@
+{% extends "base.html" %}
+{% block main_attrs %} class="main-wide"{% endblock %}
+{% block content %}
+<h2>Logs</h2>
+<div style="margin-bottom: 12px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+    <div>
+        <label for="log-source" style="font-size: 12px; color: #a1a1aa;">Source</label>
+        <select id="log-source">
+            <option value="ibctl-live">ibctl (Live)</option>
+            <option value="ibctl-paper">ibctl (Paper)</option>
+            <option value="dashboard">Dashboard</option>
+        </select>
+    </div>
+    <div>
+        <label for="log-date" style="font-size: 12px; color: #a1a1aa;">Date</label>
+        <select id="log-date">
+            <option value="">Current</option>
+        </select>
+    </div>
+    <div>
+        <label for="log-level" style="font-size: 12px; color: #a1a1aa;">Level</label>
+        <select id="log-level">
+            <option value="">All</option>
+            <option value="ERROR">ERROR</option>
+            <option value="WARNING">WARNING</option>
+            <option value="INFO">INFO</option>
+            <option value="DEBUG">DEBUG</option>
+        </select>
+    </div>
+    <div style="margin-left: auto;">
+        <label style="font-size: 12px; color: #a1a1aa; cursor: pointer;"
+               title="Follow new lines. Scrolling up turns it off; scrolling back down to the newest line turns it on.">
+            <input type="checkbox" id="log-autoscroll" checked style="vertical-align: middle;"> Auto-scroll
+        </label>
+    </div>
+</div>
+{# Plain JavaScript, no hx-* attributes: the dashboard's htmx refreshes select
+   [hx-trigger] elements, so they can never reload or replace this viewer. #}
+<div id="log-content" class="log-viewer" tabindex="0" aria-label="Log lines">
+    <div id="log-top" class="log-edge">Loading logs…</div>
+    <div id="log-rows"></div>
+    <div id="log-bottom" class="log-edge" hidden></div>
+</div>
+<script src="{{ root_path }}/static/logwindow.js?v=3"></script>
+<script>
+(function () {
+    // Lines arrive a page at a time from /api/v1/logs/page and the window keeps
+    // at most MAX_LINES of them (static/logwindow.js). Scrolling near either
+    // edge fetches the next page that way, across day files: back to the first
+    // day kept, and forward to the newest line.
+    var PAGE = 200;          // lines per request
+    var MAX_LINES = 3000;    // lines kept on screen; the rest are fetched again on demand
+    var NEAR = 600;          // px from an edge that starts the next fetch
+    var TAIL_MS = 5000;      // how often the newest file is checked for new lines
+    var RETRY_MS = 3000;     // pause after a failed fetch
+
+    var view = document.getElementById('log-content');
+    var rowsEl = document.getElementById('log-rows');
+    var topEl = document.getElementById('log-top');
+    var bottomEl = document.getElementById('log-bottom');
+    var follow = document.getElementById('log-autoscroll');
+    var sourceSel = document.getElementById('log-source');
+    var dateSel = document.getElementById('log-date');
+    var levelSel = document.getElementById('log-level');
+
+    var win = null;          // what is on screen, and the cursors either side
+    var live = true;         // showing "Current": follow the newest file into new days
+    var gen = 0;             // bumped by reload(); older responses are dropped
+    var loadingOlder = false, loadingNewer = false, failedAt = 0;
+    var lastTop = 0;
+
+    function fetchPage(req) {
+        var q = new URLSearchParams({ source: sourceSel.value, limit: String(PAGE) });
+        if (levelSel.value) q.set('level', levelSel.value);
+        Object.keys(req).forEach(function (k) { q.set(k, String(req[k])); });
+        return fetch(ROOT_PATH + '/api/v1/logs/page?' + q.toString(), { credentials: 'same-origin' })
+            .then(function (r) {
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                return r.json();
+            });
+    }
+
+
+    function row(line, date) {
+        var div = document.createElement('div');
+        div.className = 'log-line log-level-' + line.level;
+        div.dataset.date = date;
+        if (line.ts) {
+            var ts = document.createElement('span');
+            ts.className = 'log-ts';
+            ts.textContent = line.ts;
+            div.appendChild(ts);
+            div.appendChild(document.createTextNode(' '));
+        }
+        var lvl = document.createElement('span');
+        lvl.className = 'log-lvl';
+        lvl.textContent = '[' + line.level + ']';
+        div.appendChild(lvl);
+        div.appendChild(document.createTextNode(' ' + line.msg));
+        return div;
+    }
+
+    function rows(page) {
+        var frag = document.createDocumentFragment();
+        page.lines.forEach(function (line) { frag.appendChild(row(line, page.date)); });
+        return frag;
+    }
+
+    // The first row of a day after a row of an earlier day carries the marker
+    // between the two files (both days and both file names).
+    function markDay(el, prev) {
+        if (el && prev && el.dataset.date !== prev.dataset.date) {
+            el.classList.add('log-new-day');
+            el.dataset.day = LogWindow.transitionLabel(sourceSel.value, prev.dataset.date, el.dataset.date);
+        }
+    }
+
+    function atBottom() { return view.scrollHeight - view.scrollTop - view.clientHeight < 4; }
+    // A scroll the page makes is not the reader scrolling: remember where it left off.
+    function settle() { lastTop = view.scrollTop; }
+    function toBottom() { view.scrollTop = view.scrollHeight; settle(); }
+    function canFetch() { return Date.now() - failedAt > RETRY_MS; }
+    function sourceName() { return sourceSel.options[sourceSel.selectedIndex].text; }
+
+    function edges() {
+        if (!win) return;
+        if (!win.rows.length && LogWindow.atStart(win) && LogWindow.atEnd(win)) {
+            topEl.textContent = 'No ' + (levelSel.value ? levelSel.value + ' ' : '') + 'log entries for ' + sourceName() + '.';
+        } else if (LogWindow.atStart(win)) {
+            topEl.textContent = 'Beginning of logs: ' + sourceName() + ', ' + LogWindow.dayName(win.start.date);
+        } else {
+            topEl.textContent = loadingOlder ? 'Loading earlier lines…' : 'Scroll up for earlier lines';
+        }
+        bottomEl.hidden = LogWindow.atEnd(win);
+        bottomEl.textContent = loadingNewer ? 'Loading newer lines…' : 'Scroll down for newer lines';
+    }
+
+    // Keep fetching older pages while the reader is near the top (or the lines
+    // don't fill the viewer yet): a filtered page, or a quiet day, can be empty.
+    function fill() {
+        if (!win || LogWindow.atStart(win) || !canFetch()) return;
+        if (view.scrollTop < NEAR || view.scrollHeight - view.clientHeight < NEAR) loadOlder();
+    }
+
+    function reload() {
+        var my = ++gen;
+        live = !dateSel.value;
+        win = null;
+        loadingOlder = loadingNewer = false;
+        rowsEl.textContent = '';
+        bottomEl.hidden = true;
+        topEl.textContent = 'Loading logs…';
+        fetchPage(dateSel.value ? { date: dateSel.value } : {}).then(function (page) {
+            if (my !== gen) return;
+            win = LogWindow.fromPage(page);
+            rowsEl.appendChild(rows(page));
+            follow.checked = true;  // at the newest line of the day shown
+            edges();
+            toBottom();
+            fill();
+        }, function (err) {
+            if (my === gen) topEl.textContent = 'Could not load logs (' + err.message + ').';
+        });
+    }
+
+    function loadOlder() {
+        var req = win && LogWindow.olderRequest(win);
+        if (!req || loadingOlder || !canFetch()) return;
+        var my = gen;
+        loadingOlder = true;
+        edges();
+        fetchPage(req).then(function (page) {
+            if (my !== gen) return;
+            var res = LogWindow.older(win, page, MAX_LINES);
+            var height = view.scrollHeight, top = view.scrollTop;
+            var oldFirst = rowsEl.firstChild;
+            rowsEl.insertBefore(rows(page), oldFirst);
+            markDay(oldFirst, oldFirst && oldFirst.previousSibling);
+            view.scrollTop = top + (view.scrollHeight - height);  // the reader stays on the same line
+            for (var i = 0; i < res.dropBottom; i++) rowsEl.removeChild(rowsEl.lastChild);
+            if (res.dropBottom) follow.checked = false;
+            win = res.win;
+            settle();
+        }, function () {
+            failedAt = Date.now();
+        }).then(function () {
+            if (my !== gen) return;
+            loadingOlder = false;
+            edges();
+            settle();
+            fill();
+        });
+    }
+
+    function loadNewer() {
+        if (!win || loadingNewer || !canFetch()) return;
+        var my = gen;
+        loadingNewer = true;
+        fetchPage(LogWindow.newerRequest(win)).then(function (page) {
+            if (my !== gen) return;
+            if (page.reset) {  // the file was replaced under the cursor
+                loadingNewer = false;
+                reload();
+                return;
+            }
+            var res = LogWindow.newer(win, page, MAX_LINES);
+            var oldLast = rowsEl.lastChild;
+            if (page.lines.length) {
+                rowsEl.appendChild(rows(page));
+                markDay(oldLast && oldLast.nextSibling, oldLast);
+            }
+            if (res.dropTop) {
+                var height = view.scrollHeight;
+                for (var i = 0; i < res.dropTop; i++) rowsEl.removeChild(rowsEl.firstChild);
+                view.scrollTop -= height - view.scrollHeight;  // the reader stays on the same line
+            }
+            win = res.win;
+            if (follow.checked) toBottom(); else settle();
+        }, function () {
+            failedAt = Date.now();
+        }).then(function () {
+            if (my !== gen) return;
+            loadingNewer = false;
+            edges();
+            // Showing or hiding the bottom marker changes the height, and the
+            // browser clamps the scroll; that is not the reader scrolling.
+            if (follow.checked) toBottom(); else settle();
+        });
+    }
+
+    view.addEventListener('scroll', function () {
+        var top = view.scrollTop;
+        var movedUp = top < lastTop - 1;
+        lastTop = top;
+        if (!win) return;
+        follow.checked = LogWindow.follows(follow.checked, movedUp, atBottom(), LogWindow.atEnd(win));
+        if (top < NEAR) loadOlder();
+        if (!LogWindow.atEnd(win) && view.scrollHeight - top - view.clientHeight < NEAR) loadNewer();
+    }, { passive: true });
+
+    follow.addEventListener('change', function () {
+        if (!follow.checked || !win) return;
+        if (LogWindow.atEnd(win)) toBottom(); else reload();  // jump to the newest line
+    });
+
+    function loadDates() {
+        fetch(ROOT_PATH + '/api/v1/logs/dates?source=' + encodeURIComponent(sourceSel.value), { credentials: 'same-origin' })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                var current = dateSel.value;
+                dateSel.innerHTML = '<option value="">Current</option>';
+                (data.dates || []).forEach(function (d) {
+                    var opt = document.createElement('option');
+                    opt.value = d;
+                    opt.textContent = d;
+                    if (d === current) opt.selected = true;
+                    dateSel.appendChild(opt);
+                });
+            })
+            .catch(function () {});
+    }
+
+    sourceSel.addEventListener('change', function () { loadDates(); reload(); });
+    dateSel.addEventListener('change', reload);
+    levelSel.addEventListener('change', reload);
+
+    // The newest file grows: fetch only what was appended, while the window
+    // reaches its end. When the next day's file appears the window moves into
+    // it if the reader is following; otherwise scrolling down fetches it.
+    setInterval(function () {
+        if (!live || !win || !win.endAtFileEnd || document.hidden) return;
+        if (win.endNext && !follow.checked) return;
+        loadNewer();
+    }, TAIL_MS);
+
+    loadDates();
+    reload();
+})();
+</script>
+{% endblock %}

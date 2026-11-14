@@ -1,0 +1,56 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    ":dependencyDashboard"
+  ],
+  "labels": ["deps"],
+  "schedule": ["before 6am on monday"],
+  "prConcurrentLimit": 5,
+  "prHourlyLimit": 2,
+  "rangeStrategy": "bump",
+  "lockFileMaintenance": {
+    "enabled": false
+  },
+  "packageRules": [
+    {
+      "description": "Group patch-level bumps across managers into one PR per week.",
+      "matchUpdateTypes": ["patch"],
+      "groupName": "patch updates",
+      "schedule": ["before 6am on monday"]
+    },
+    {
+      "description": "Rust: bump manifest constraints; humans regenerate Cargo.lock intentionally.",
+      "matchManagers": ["cargo"],
+      "rangeStrategy": "bump"
+    },
+    {
+      "description": "Python: bump pyproject.toml constraints; uv.lock refresh happens on the same PR (renovate runs `uv lock` post-update).",
+      "matchManagers": ["pep621"],
+      "rangeStrategy": "bump",
+      "postUpdateOptions": ["pythonUvUpdate"]
+    },
+    {
+      "description": "Docker base images: rate-limit to monthly to avoid churn from daily point releases.",
+      "matchManagers": ["dockerfile", "woodpecker"],
+      "matchDatasources": ["docker"],
+      "schedule": ["before 6am on the first day of the month"]
+    },
+    {
+      "description": "mise-managed runtimes (pkl, etc.): review each release manually — CVE-driven pins.",
+      "matchManagers": ["mise"],
+      "automerge": false,
+      "schedule": ["before 6am on the first day of the month"]
+    },
+    {
+      "description": "GitHub Actions: pin to major so drift is visible but not noisy.",
+      "matchManagers": ["github-actions"],
+      "rangeStrategy": "pin"
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "labels": ["deps", "security"],
+    "schedule": ["at any time"]
+  }
+}

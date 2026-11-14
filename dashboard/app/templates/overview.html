@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<div id="overview-content"
+     hx-get="{{ root_path }}/partials/overview"
+     hx-trigger="load, every 5s, ibctl-refresh"
+     hx-swap="innerHTML"
+     data-fixed-rate>
+    <div class="loading">Connecting to ibctl...</div>
+</div>
+{% endblock %}

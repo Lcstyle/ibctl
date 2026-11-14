@@ -1,0 +1,59 @@
+{
+  "version": "0.1.0-test",
+  "ready": false,
+  "state": "ReconnectingSession",
+  "trading_mode": "paper",
+  "uptime_secs": 12345,
+  "connected_uptime_secs": null,
+  "jvm": {
+    "pid": 4711,
+    "alive": true,
+    "uptime_secs": 12000,
+    "config_dir": "/home/ibgateway/Jts",
+    "agent_socket": "/tmp/ibctl-agent.sock"
+  },
+  "socat": {
+    "running": true,
+    "pid": 4712
+  },
+  "clients": {
+    "count": 0,
+    "ids": []
+  },
+  "ib_system": {
+    "available": false,
+    "status": "unavailable",
+    "reason": "IB reports maintenance",
+    "expires_in_secs": 540
+  },
+  "site": {
+    "role": "primary",
+    "auto_launch": true
+  },
+  "paused": false,
+  "ceiling_state": null,
+  "stats": {
+    "restarts_today": 3,
+    "relogins_today": 12,
+    "dialogs_dismissed": 4,
+    "last_2fa_duration_secs": null,
+    "config_apply_duration_secs": null
+  },
+  "client_advisory": {
+    "should_connect": false,
+    "should_wait": true,
+    "wait_reason": "ibctl still reconnecting",
+    "client_id_likely_stale": false
+  },
+  "hitl": null,
+  "last_cold_restart_skip": null,
+  "recovery": {
+    "phase": "backoff_every_15min",
+    "phase_entered_at": "2026-07-11T10:00:00-04:00[America/New_York]",
+    "phase_elapsed_secs": 3600,
+    "last_full_success_at": null,
+    "giveup_alert_sent_at": null,
+    "next_retry_at": "2026-07-11T11:15:00-04:00[America/New_York]",
+    "blocked_awaiting_resume": false
+  }
+}

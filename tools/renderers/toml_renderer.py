@@ -1,0 +1,574 @@
+"""Render ibctl TOML config files from evaluated Pkl config objects.
+
+Two output modes:
+
+- ``render_docker_toml`` — deployment defaults for ``docker/ibctl.toml`` with
+  every leaf field annotated by the Pkl ``///`` doc comment for that field.
+- ``render_example_toml`` — user-facing template for ``ibctl.toml.example``,
+  same doc comments plus the file-preamble copy that guides operators.
+
+Both functions optionally populate a ``descriptions`` map of
+``{"<section>.<key>": "<description>"}`` — the toml_renderer is the single
+producer of ``dashboard/app/preflight/descriptions.json``, so this is where
+the map is built. Pass an empty dict via ``descriptions_out=`` to receive it.
+
+The doc comments live in ``config/pkl/types.pkl`` as ``///`` blocks on each
+field. See ``tools/pkl_docs.py`` for the extractor. Remaining hand-authored
+``tomlkit.comment(...)`` calls in this file fall into two categories:
+(1) file-preamble banners (renderer identity, precedence rules, secrets
+policy) and (2) in-table hint blocks that document env-only secrets with no
+TOML field to attach to (paper credentials hint, HMAC signing key hint).
+Descriptive comments *for fields* must ALWAYS come from Pkl.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Iterable
+
+import tomlkit
+
+from pkl_docs import (
+    FieldDoc,
+    extract_module_props,
+    extract_pkl_docs,
+    join_description,
+    lookup,
+)
+
+
+# --- Pkl doc extraction, memoized ---
+_PKL_TYPES_PATH = (
+    Path(__file__).resolve().parents[2] / "config" / "pkl" / "types.pkl"
+)
+_PKL_UI_STRINGS_PATH = (
+    Path(__file__).resolve().parents[2] / "config" / "pkl" / "ui_strings.pkl"
+)
+_PKL_DOCS_CACHE: dict[str, dict[str, FieldDoc]] | None = None
+_PKL_UI_CLASSES_CACHE: dict[str, dict[str, FieldDoc]] | None = None
+_PKL_UI_PROPS_CACHE: dict[str, FieldDoc] | None = None
+
+
+def _pkl_docs() -> dict[str, dict[str, FieldDoc]]:
+    """Return the parsed Pkl doc-comment map, cached after first call."""
+    global _PKL_DOCS_CACHE
+    if _PKL_DOCS_CACHE is None:
+        _PKL_DOCS_CACHE = extract_pkl_docs(_PKL_TYPES_PATH)
+    return _PKL_DOCS_CACHE
+
+
+def _pkl_ui_classes() -> dict[str, dict[str, FieldDoc]]:
+    """Return ``{ClassName: {fieldName: FieldDoc}}`` for ``ui_strings.pkl``."""
+    global _PKL_UI_CLASSES_CACHE
+    if _PKL_UI_CLASSES_CACHE is None:
+        _PKL_UI_CLASSES_CACHE = extract_pkl_docs(_PKL_UI_STRINGS_PATH)
+    return _PKL_UI_CLASSES_CACHE
+
+
+def _pkl_ui_module_props() -> dict[str, FieldDoc]:
+    """Return ``{propName: FieldDoc}`` for the ``ui_strings.pkl`` module head."""
+    global _PKL_UI_PROPS_CACHE
+    if _PKL_UI_PROPS_CACHE is None:
+        _PKL_UI_PROPS_CACHE = extract_module_props(_PKL_UI_STRINGS_PATH)
+    return _PKL_UI_PROPS_CACHE
+
+
+def _camel_to_snake(name: str) -> str:
+    """Convert a camelCase identifier to snake_case.
+
+    Used to translate Pkl field names (``deploymentSite``, ``noInternet``,
+    ``givenUp``) into the dotted-lowercase keys the dashboard expects
+    (``deployment_site``, ``no_internet``, ``given_up``) — matching the
+    convention that ``toml_renderer._emit`` already uses for the config-side
+    ``[section].snake_key`` keys in ``descriptions.json``.
+    """
+    # Insert an underscore before any capital letter that follows a lowercase
+    # letter (or digit) — handles the plain camelCase we use in ui_strings.pkl.
+    # ``ibPageReachable`` -> ``ib_page_reachable``,  ``URL`` runs are not
+    # expected in field names here so we don't handle acronym boundaries.
+    import re as _re
+
+    return _re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", name).lower()
+
+
+def _walk_ui_class(
+    class_name: str,
+    prefix: str,
+    descriptions_out: dict[str, str],
+) -> None:
+    """Recursively populate ``descriptions_out`` with ``ui.<prefix>.<field>``
+    entries for every ``String``-typed leaf in ``class_name``.
+
+    Fields whose type is another class known to ``_pkl_ui_classes()`` recurse
+    with an extended prefix; leaf ``String`` fields land as ``ui.<path>``
+    keys with the field's string default as the value. Fields without a
+    string default and without a resolvable nested class are silently
+    skipped — the UI-strings module only carries these two shapes today.
+    """
+    classes = _pkl_ui_classes()
+    for field_name, doc in classes.get(class_name, {}).items():
+        snake = _camel_to_snake(field_name)
+        key = f"{prefix}.{snake}" if prefix else snake
+        if doc.default_string is not None:
+            descriptions_out[key] = doc.default_string
+            continue
+        if doc.type_name and doc.type_name in classes:
+            _walk_ui_class(doc.type_name, key, descriptions_out)
+
+
+def render_ui_descriptions(descriptions_out: dict[str, str]) -> None:
+    """Populate ``descriptions_out`` with ``ui.*`` entries from ``ui_strings.pkl``.
+
+    Walks the ``ibctl.ui_strings`` module: for every top-level module
+    property (``recovery``, ``deploymentSite``, …), recurse into its class
+    and emit ``ui.<snake_top>.<snake_path>`` = ``<string_default>`` for each
+    leaf ``String`` field. camelCase field names are converted to
+    snake_case so keys line up with the design's catalog
+    (e.g. ``ui.recovery.phase.given_up``, ``ui.connectivity.ib_page_reachable``).
+
+    ``ui.*`` entries are ONLY written to ``descriptions_out`` — they do NOT
+    surface in ``docker/ibctl.toml`` or ``ibctl.toml.example``, which
+    ``render_docker_toml`` / ``render_example_toml`` build from ``types.pkl``.
+    Keeping the write path split preserves the invariant that TOML is
+    config, not UI copy.
+    """
+    props = _pkl_ui_module_props()
+    classes = _pkl_ui_classes()
+    for prop_name, doc in props.items():
+        if not doc.type_name or doc.type_name not in classes:
+            continue
+        snake_top = _camel_to_snake(prop_name)
+        _walk_ui_class(doc.type_name, f"ui.{snake_top}", descriptions_out)
+
+
+def _listing_to_list(obj) -> list:
+    """Convert a Pkl Listing (or Python list) to a plain list."""
+    if isinstance(obj, list):
+        return obj
+    try:
+        return list(obj)
+    except TypeError:
+        return []
+
+
+# --- Field emitter ---
+
+def _emit(
+    table,
+    section: str,
+    class_name: str,
+    field_name: str,
+    toml_key: str,
+    value,
+    descriptions: dict[str, str] | None,
+    *,
+    inline_comment: str | None = None,
+) -> None:
+    """Emit one field with its Pkl ``///`` doc comment above it.
+
+    Also records ``descriptions[f"{section}.{toml_key}"] = <joined lines>`` so
+    the dashboard tooltip layer can look the description up by dotted path.
+    When the Pkl block carried an ``@env FOO`` annotation the emitted TOML
+    grows a trailing ``# @env: FOO`` comment line under the field and the
+    tooltip string grows an ``(env: FOO)`` suffix — operators never lose the
+    env-var pointer when the canonical description moves from the old
+    hand-authored ``# ... (env: FOO)`` inline comments to Pkl.
+
+    ``inline_comment`` — optional trailing ``# ...`` comment on the same line
+    as the value (e.g. ``pragma: allowlist secret``). Passed through to
+    tomlkit's inline-comment API.
+    """
+    doc = lookup(_pkl_docs(), class_name, field_name)
+    for line in doc.lines:
+        # tomlkit.comment already prepends ``# `` — pass the trimmed content.
+        table.add(tomlkit.comment(line))
+
+    if inline_comment is None:
+        table.add(toml_key, value)
+    else:
+        item = tomlkit.item(value)
+        item.comment(inline_comment)
+        table.add(toml_key, item)
+
+    if doc.env:
+        table.add(tomlkit.comment(f"@env: {doc.env}"))
+
+    if descriptions is not None and (doc.lines or doc.env):
+        descriptions[f"{section}.{toml_key}"] = join_description(doc)
+
+
+# --- Docker deployment TOML ---
+
+def render_docker_toml(
+    cfg, descriptions_out: dict[str, str] | None = None
+) -> str:
+    """Render ``docker/ibctl.toml``: full deployment defaults with all sections.
+
+    Every leaf field carries its Pkl ``///`` doc block as a preceding
+    ``# ...`` comment. When ``descriptions_out`` is provided (a mutable dict),
+    each field also lands in it as ``"<section>.<key>": "<description>"``.
+    Callers that only need the TOML string can leave ``descriptions_out``
+    ``None`` and the extraction is skipped.
+    """
+    doc = tomlkit.document()
+    doc.add(tomlkit.comment("Generated by tools/generate_configs.py — DO NOT EDIT"))
+    doc.add(tomlkit.comment("ibctl configuration — defaults for Docker deployment"))
+    doc.add(
+        tomlkit.comment(
+            "Override any value via environment variables (see docs/CLIENT_INTEGRATION_GUIDE.md)."
+        )
+    )
+    doc.add(
+        tomlkit.comment(
+            "Passwords/secrets are NEVER in this file — use env vars (TWS_PASSWORD, etc.)"
+        )
+    )
+    doc.add(tomlkit.nl())
+
+    rt = cfg.runtime
+
+    # [auth]
+    auth = tomlkit.table()
+    _emit(auth, "auth", "AuthConfig", "twsUserid", "tws_userid", rt.auth.twsUserid, descriptions_out)
+    _emit(auth, "auth", "AuthConfig", "tradingMode", "trading_mode", rt.auth.tradingMode, descriptions_out)
+    auth.add(tomlkit.comment("Paper credentials (for TRADING_MODE=both):"))
+    auth.add(tomlkit.comment('paper.tws_userid = ""    # set via TWS_USERID_PAPER env var'))
+    doc.add("auth", auth)
+    doc.add(tomlkit.nl())
+
+    # [twofa]
+    twofa = tomlkit.table()
+    _emit(twofa, "twofa", "TwoFaConfig", "provider", "provider", rt.twofa.provider, descriptions_out)
+    _emit(
+        twofa,
+        "twofa",
+        "TwoFaConfig",
+        "secretEnv",
+        "secret_env",
+        rt.twofa.secretEnv,
+        descriptions_out,
+        inline_comment="pragma: allowlist secret",
+    )
+    _emit(twofa, "twofa", "TwoFaConfig", "timeoutAction", "timeout_action", rt.twofa.timeoutAction, descriptions_out)
+    _emit(twofa, "twofa", "TwoFaConfig", "exitInterval", "exit_interval", int(rt.twofa.exitInterval), descriptions_out)
+    _emit(twofa, "twofa", "TwoFaConfig", "device", "device", rt.twofa.device, descriptions_out)
+    _emit(twofa, "twofa", "TwoFaConfig", "reloginAfterTimeout", "relogin_after_timeout", rt.twofa.reloginAfterTimeout, descriptions_out)
+
+    # [twofa.backoff]
+    backoff = tomlkit.table()
+    _emit(backoff, "twofa.backoff", "TwoFaBackoffConfig", "maxImmediateAttempts", "max_immediate_attempts", int(rt.twofa.backoff.maxImmediateAttempts), descriptions_out)
+    _emit(backoff, "twofa.backoff", "TwoFaBackoffConfig", "onTimeout", "on_timeout", rt.twofa.backoff.onTimeout, descriptions_out)
+    _emit(backoff, "twofa.backoff", "TwoFaBackoffConfig", "strategy", "strategy", rt.twofa.backoff.strategy, descriptions_out)
+    _emit(
+        backoff,
+        "twofa.backoff",
+        "TwoFaBackoffConfig",
+        "intervalsMinutes",
+        "intervals_minutes",
+        [int(m) for m in _listing_to_list(rt.twofa.backoff.intervalsMinutes)],
+        descriptions_out,
+    )
+    _emit(backoff, "twofa.backoff", "TwoFaBackoffConfig", "callbackValidHours", "callback_valid_hours", int(rt.twofa.backoff.callbackValidHours), descriptions_out)
+    _emit(backoff, "twofa.backoff", "TwoFaBackoffConfig", "counterReset", "counter_reset", rt.twofa.backoff.counterReset, descriptions_out)
+    _emit(backoff, "twofa.backoff", "TwoFaBackoffConfig", "stableSecs", "stable_secs", int(rt.twofa.backoff.stableSecs), descriptions_out)
+    _emit(backoff, "twofa.backoff", "TwoFaBackoffConfig", "coldRestartPreemptsHitl", "cold_restart_preempts_hitl", rt.twofa.backoff.coldRestartPreemptsHitl, descriptions_out)
+    _emit(backoff, "twofa.backoff", "TwoFaBackoffConfig", "ntfySendRetries", "ntfy_send_retries", int(rt.twofa.backoff.ntfySendRetries), descriptions_out)
+    _emit(backoff, "twofa.backoff", "TwoFaBackoffConfig", "unattendedHours", "unattended_hours", rt.twofa.backoff.unattendedHours, descriptions_out)
+    twofa.add("backoff", backoff)
+    doc.add("twofa", twofa)
+    doc.add(tomlkit.nl())
+
+    # [gateway]
+    gw = tomlkit.table()
+    _emit(gw, "gateway", "GatewayConfig", "twsPath", "tws_path", rt.gateway.twsPath, descriptions_out)
+    _emit(gw, "gateway", "GatewayConfig", "twsSettingsPath", "tws_settings_path", rt.gateway.twsSettingsPath, descriptions_out)
+    _emit(gw, "gateway", "GatewayConfig", "twsMajorVrsn", "tws_major_vrsn", rt.gateway.twsMajorVrsn, descriptions_out)
+    _emit(gw, "gateway", "GatewayConfig", "javaHeapSize", "java_heap_size", int(rt.gateway.javaHeapSize), descriptions_out)
+    _emit(gw, "gateway", "GatewayConfig", "gatewayOrTws", "gateway_or_tws", rt.gateway.gatewayOrTws, descriptions_out)
+    _emit(gw, "gateway", "GatewayConfig", "liveApiPort", "live_api_port", int(rt.gateway.liveApiPort), descriptions_out)
+    _emit(gw, "gateway", "GatewayConfig", "paperApiPort", "paper_api_port", int(rt.gateway.paperApiPort), descriptions_out)
+    _emit(gw, "gateway", "GatewayConfig", "liveSocatPort", "live_socat_port", int(rt.gateway.liveSocatPort), descriptions_out)
+    _emit(gw, "gateway", "GatewayConfig", "paperSocatPort", "paper_socat_port", int(rt.gateway.paperSocatPort), descriptions_out)
+    doc.add("gateway", gw)
+    doc.add(tomlkit.nl())
+
+    # [session]
+    sess = tomlkit.table()
+    _emit(sess, "session", "SessionConfig", "action", "action", rt.session.action, descriptions_out)
+    _emit(sess, "session", "SessionConfig", "acceptIncoming", "accept_incoming", rt.session.acceptIncoming, descriptions_out)
+    _emit(sess, "session", "SessionConfig", "twsColdRestart", "tws_cold_restart", rt.session.twsColdRestart, descriptions_out)
+    _emit(sess, "session", "SessionConfig", "twsColdRestartDay", "tws_cold_restart_day", int(rt.session.twsColdRestartDay), descriptions_out)
+    doc.add("session", sess)
+    doc.add(tomlkit.nl())
+
+    # [command_server]
+    cs = tomlkit.table()
+    _emit(cs, "command_server", "CommandServerConfig", "enabled", "enabled", rt.commandServer.enabled, descriptions_out)
+    _emit(cs, "command_server", "CommandServerConfig", "port", "port", int(rt.commandServer.port), descriptions_out)
+    _emit(cs, "command_server", "CommandServerConfig", "paperPort", "paper_port", int(rt.commandServer.paperPort), descriptions_out)
+    _emit(cs, "command_server", "CommandServerConfig", "bindAddress", "bind_address", rt.commandServer.bindAddress, descriptions_out)
+    _emit(cs, "command_server", "CommandServerConfig", "controlFrom", "control_from", _listing_to_list(rt.commandServer.controlFrom), descriptions_out)
+    doc.add("command_server", cs)
+    doc.add(tomlkit.nl())
+
+    # [agent]
+    agent = tomlkit.table()
+    _emit(agent, "agent", "AgentConfig", "socketPath", "socket_path", rt.agent.socketPath, descriptions_out)
+    doc.add("agent", agent)
+    doc.add(tomlkit.nl())
+
+    # [ib_status] — ibctl-side policy for IBSTATUS pushes
+    ibs_policy = tomlkit.table()
+    _emit(ibs_policy, "ib_status", "IbStatusConfig", "kickActiveSession", "kick_active_session", rt.ibStatus.kickActiveSession, descriptions_out)
+    doc.add("ib_status", ibs_policy)
+    doc.add(tomlkit.nl())
+
+    # [dashboard]
+    dash = tomlkit.table()
+    _emit(dash, "dashboard", "DashboardConfig", "enabled", "enabled", rt.dashboard.enabled, descriptions_out)
+    _emit(dash, "dashboard", "DashboardConfig", "port", "port", int(rt.dashboard.port), descriptions_out)
+    _emit(dash, "dashboard", "DashboardConfig", "token", "token", rt.dashboard.token, descriptions_out)
+    _emit(dash, "dashboard", "DashboardConfig", "debugMode", "debug_mode", rt.dashboard.debugMode, descriptions_out)
+    dash.add(tomlkit.nl())
+    _emit(dash, "dashboard", "DashboardConfig", "githubOauthEnabled", "github_oauth_enabled", rt.dashboard.githubOauthEnabled, descriptions_out)
+    _emit(dash, "dashboard", "DashboardConfig", "oidcEnabled", "oidc_enabled", rt.dashboard.oidcEnabled, descriptions_out)
+    _emit(dash, "dashboard", "DashboardConfig", "oidcIssuer", "oidc_issuer", rt.dashboard.oidcIssuer, descriptions_out)
+    _emit(dash, "dashboard", "DashboardConfig", "oidcScopes", "oidc_scopes", rt.dashboard.oidcScopes, descriptions_out)
+    dash.add(tomlkit.nl())
+    _emit(dash, "dashboard", "DashboardConfig", "notificationsEnabled", "notifications_enabled", rt.dashboard.notificationsEnabled, descriptions_out)
+    _emit(dash, "dashboard", "DashboardConfig", "notificationChannel", "notification_channel", rt.dashboard.notificationChannel, descriptions_out)
+    dash.add(tomlkit.nl())
+    _emit(dash, "dashboard", "DashboardConfig", "zmqEnabled", "zmq_enabled", rt.dashboard.zmqEnabled, descriptions_out)
+    _emit(dash, "dashboard", "DashboardConfig", "zmqPort", "zmq_port", int(rt.dashboard.zmqPort), descriptions_out)
+    dash.add(tomlkit.nl())
+    _emit(dash, "dashboard", "DashboardConfig", "externalUrl", "external_url", rt.dashboard.externalUrl, descriptions_out)
+    dash.add(tomlkit.nl())
+    _emit(dash, "dashboard", "DashboardConfig", "sessionDownAlertMinutes", "session_down_alert_minutes", int(rt.dashboard.sessionDownAlertMinutes), descriptions_out)
+    _emit(dash, "dashboard", "DashboardConfig", "sessionDownRenagMinutes", "session_down_renag_minutes", int(rt.dashboard.sessionDownRenagMinutes), descriptions_out)
+    _emit(dash, "dashboard", "DashboardConfig", "scheduledRestartGraceMinutes", "scheduled_restart_grace_minutes", int(rt.dashboard.scheduledRestartGraceMinutes), descriptions_out)
+    _emit(dash, "dashboard", "DashboardConfig", "versionProbeClientId", "version_probe_client_id", int(rt.dashboard.versionProbeClientId), descriptions_out)
+    doc.add("dashboard", dash)
+    doc.add(tomlkit.nl())
+
+    # [ib_system_status]
+    ibs = tomlkit.table()
+    _emit(ibs, "ib_system_status", "IbSystemStatusConfig", "enabled", "enabled", rt.ibSystemStatus.enabled, descriptions_out)
+    _emit(ibs, "ib_system_status", "IbSystemStatusConfig", "ttlSeconds", "ttl_seconds", int(rt.ibSystemStatus.ttlSeconds), descriptions_out)
+    _emit(ibs, "ib_system_status", "IbSystemStatusConfig", "checkIntervalSeconds", "check_interval_seconds", int(rt.ibSystemStatus.checkIntervalSeconds), descriptions_out)
+    _emit(ibs, "ib_system_status", "IbSystemStatusConfig", "url", "url", rt.ibSystemStatus.url, descriptions_out)
+    _emit(ibs, "ib_system_status", "IbSystemStatusConfig", "region", "region", rt.ibSystemStatus.region, descriptions_out)
+    _emit(ibs, "ib_system_status", "IbSystemStatusConfig", "backendHosts", "backend_hosts", _listing_to_list(rt.ibSystemStatus.backendHosts), descriptions_out)
+    _emit(ibs, "ib_system_status", "IbSystemStatusConfig", "fallbackHost", "fallback_host", rt.ibSystemStatus.fallbackHost, descriptions_out)
+    _emit(ibs, "ib_system_status", "IbSystemStatusConfig", "extraExchangeKeywords", "extra_exchange_keywords", _listing_to_list(rt.ibSystemStatus.extraExchangeKeywords), descriptions_out)
+    _emit(ibs, "ib_system_status", "IbSystemStatusConfig", "extraBenignPhrases", "extra_benign_phrases", _listing_to_list(rt.ibSystemStatus.extraBenignPhrases), descriptions_out)
+    _emit(ibs, "ib_system_status", "IbSystemStatusConfig", "extraBlockingKeywords", "extra_blocking_keywords", _listing_to_list(rt.ibSystemStatus.extraBlockingKeywords), descriptions_out)
+    doc.add("ib_system_status", ibs)
+    doc.add(tomlkit.nl())
+
+    # [logging]
+    log = tomlkit.table()
+    _emit(log, "logging", "LoggingConfig", "level", "level", rt.logging.level, descriptions_out)
+    _emit(log, "logging", "LoggingConfig", "logDir", "log_dir", rt.logging.logDir, descriptions_out)
+    _emit(log, "logging", "LoggingConfig", "futuresSessionLogging", "futures_session_logging", rt.logging.futuresSessionLogging, descriptions_out)
+    _emit(log, "logging", "LoggingConfig", "sessionReopenHour", "session_reopen_hour", int(rt.logging.sessionReopenHour), descriptions_out)
+    _emit(log, "logging", "LoggingConfig", "retentionDays", "retention_days", int(rt.logging.retentionDays), descriptions_out)
+    doc.add("logging", log)
+    doc.add(tomlkit.nl())
+
+    # [timing]
+    tm = tomlkit.table()
+    _emit(tm, "timing", "TimingConfig", "uiTickMs", "ui_tick_ms", int(rt.timing.uiTickMs), descriptions_out)
+    _emit(tm, "timing", "TimingConfig", "agentTickMs", "agent_tick_ms", int(rt.timing.agentTickMs), descriptions_out)
+    _emit(tm, "timing", "TimingConfig", "postLoginDelayMs", "post_login_delay_ms", int(rt.timing.postLoginDelayMs), descriptions_out)
+    _emit(tm, "timing", "TimingConfig", "popupQuietSecs", "popup_quiet_secs", int(rt.timing.popupQuietSecs), descriptions_out)
+    _emit(tm, "timing", "TimingConfig", "popupMaxWaitSecs", "popup_max_wait_secs", int(rt.timing.popupMaxWaitSecs), descriptions_out)
+    _emit(tm, "timing", "TimingConfig", "loginRadioDelayMs", "login_radio_delay_ms", int(rt.timing.loginRadioDelayMs), descriptions_out)
+    _emit(tm, "timing", "TimingConfig", "jvmShutdownTimeoutSecs", "jvm_shutdown_timeout_secs", int(rt.timing.jvmShutdownTimeoutSecs), descriptions_out)
+    _emit(tm, "timing", "TimingConfig", "loginDialogTimeoutSecs", "login_dialog_timeout_secs", int(rt.timing.loginDialogTimeoutSecs), descriptions_out)
+    _emit(tm, "timing", "TimingConfig", "restartDelaySecs", "restart_delay_secs", int(rt.timing.restartDelaySecs), descriptions_out)
+    _emit(tm, "timing", "TimingConfig", "reloginMaxAttempts", "relogin_max_attempts", int(rt.timing.reloginMaxAttempts), descriptions_out)
+    _emit(tm, "timing", "TimingConfig", "reloginFailureAction", "relogin_failure_action", rt.timing.reloginFailureAction, descriptions_out)
+    _emit(tm, "timing", "TimingConfig", "apiPortProbeIntervalSecs", "api_port_probe_interval_secs", int(rt.timing.apiPortProbeIntervalSecs), descriptions_out)
+    _emit(tm, "timing", "TimingConfig", "apiPortProbeFailsBeforeRevoke", "api_port_probe_fails_before_revoke", int(rt.timing.apiPortProbeFailsBeforeRevoke), descriptions_out)
+
+    # [timing.recovery]
+    rec = tomlkit.table()
+    _emit(rec, "timing.recovery", "RecoveryTimingConfig", "enabled", "enabled", rt.timing.recovery.enabled, descriptions_out)
+    _emit(rec, "timing.recovery", "RecoveryTimingConfig", "aggressivePhaseMaxSecs", "aggressive_phase_max_secs", int(rt.timing.recovery.aggressivePhaseMaxSecs), descriptions_out)
+    _emit(rec, "timing.recovery", "RecoveryTimingConfig", "backoffPhaseMaxSecs", "backoff_phase_max_secs", int(rt.timing.recovery.backoffPhaseMaxSecs), descriptions_out)
+    _emit(rec, "timing.recovery", "RecoveryTimingConfig", "backoffIntervalSecs", "backoff_interval_secs", int(rt.timing.recovery.backoffIntervalSecs), descriptions_out)
+    _emit(rec, "timing.recovery", "RecoveryTimingConfig", "minSuccessDwellSecs", "min_success_dwell_secs", int(rt.timing.recovery.minSuccessDwellSecs), descriptions_out)
+    _emit(rec, "timing.recovery", "RecoveryTimingConfig", "fingerprintStreakForcingHitl", "fingerprint_streak_forcing_hitl", int(rt.timing.recovery.fingerprintStreakForcingHitl), descriptions_out)
+    _emit(rec, "timing.recovery", "RecoveryTimingConfig", "giveupNtfyKind", "giveup_ntfy_kind", rt.timing.recovery.giveupNtfyKind, descriptions_out)
+    _emit(rec, "timing.recovery", "RecoveryTimingConfig", "giveupCallbackValidHours", "giveup_callback_valid_hours", int(rt.timing.recovery.giveupCallbackValidHours), descriptions_out)
+    _emit(rec, "timing.recovery", "RecoveryTimingConfig", "giveupAlertResendIntervalHours", "giveup_alert_resend_interval_hours", int(rt.timing.recovery.giveupAlertResendIntervalHours), descriptions_out)
+    tm.add("recovery", rec)
+
+    doc.add("timing", tm)
+    doc.add(tomlkit.nl())
+
+    # [site]
+    site = tomlkit.table()
+    _emit(site, "site", "Deployment", "siteRole", "role", cfg.deployment.siteRole, descriptions_out)
+    _emit(site, "site", "Deployment", "autoLaunch", "auto_launch", cfg.deployment.autoLaunch, descriptions_out)
+    doc.add("site", site)
+
+    return tomlkit.dumps(doc)
+
+
+# --- User-facing example TOML ---
+
+def render_example_toml(
+    cfg, descriptions_out: dict[str, str] | None = None
+) -> str:
+    """Render ``ibctl.toml.example``: user-facing template.
+
+    Same Pkl doc comments as ``render_docker_toml`` but with a longer file
+    preamble that explains precedence and the secrets policy. Some fields have
+    example values that differ from the deployment defaults (e.g. the
+    ``agent.socket_path`` example uses ``/tmp/ibctl.sock`` because
+    non-container operators can't write to ``/run/ibctl``).
+    """
+    doc = tomlkit.document()
+    doc.add(tomlkit.comment("Generated by tools/generate_configs.py — DO NOT EDIT"))
+    doc.add(tomlkit.comment("ibctl configuration file"))
+    doc.add(tomlkit.comment(""))
+    doc.add(tomlkit.comment("Precedence (highest to lowest):"))
+    doc.add(tomlkit.comment("  1. Environment variables (override everything)"))
+    doc.add(tomlkit.comment("  2. This config file"))
+    doc.add(tomlkit.comment("  3. Built-in defaults"))
+    doc.add(tomlkit.comment(""))
+    doc.add(
+        tomlkit.comment(
+            "Passwords and TOTP secrets are env-var only (with _FILE support)."
+        )
+    )
+    doc.add(
+        tomlkit.comment(
+            "They are never read from this file to prevent committing secrets."
+        )
+    )
+    doc.add(tomlkit.comment(""))
+    doc.add(tomlkit.comment("Copy this file to ibctl.toml and edit as needed."))
+    doc.add(tomlkit.nl())
+
+    rt = cfg.runtime
+
+    # [auth]
+    auth = tomlkit.table()
+    _emit(auth, "auth", "AuthConfig", "twsUserid", "tws_userid", "", descriptions_out)
+    _emit(auth, "auth", "AuthConfig", "tradingMode", "trading_mode", rt.auth.tradingMode, descriptions_out)
+    doc.add("auth", auth)
+    doc.add(tomlkit.nl())
+
+    # [auth.paper]
+    auth_paper = tomlkit.table()
+    _emit(auth_paper, "auth.paper", "PaperAuthConfig", "twsUserid", "tws_userid", "", descriptions_out)
+    auth["paper"] = auth_paper
+    doc.add(tomlkit.nl())
+
+    # [twofa]
+    twofa = tomlkit.table()
+    _emit(twofa, "twofa", "TwoFaConfig", "provider", "provider", rt.twofa.provider, descriptions_out)
+    _emit(twofa, "twofa", "TwoFaConfig", "timeoutAction", "timeout_action", rt.twofa.timeoutAction, descriptions_out)
+    # Example uses Rust code default (180), not Docker deployment default (120)
+    _emit(twofa, "twofa", "TwoFaConfig", "exitInterval", "exit_interval", 180, descriptions_out)
+
+    # [twofa.backoff]
+    ex_backoff = tomlkit.table()
+    _emit(ex_backoff, "twofa.backoff", "TwoFaBackoffConfig", "maxImmediateAttempts", "max_immediate_attempts", int(rt.twofa.backoff.maxImmediateAttempts), descriptions_out)
+    _emit(ex_backoff, "twofa.backoff", "TwoFaBackoffConfig", "onTimeout", "on_timeout", rt.twofa.backoff.onTimeout, descriptions_out)
+    _emit(ex_backoff, "twofa.backoff", "TwoFaBackoffConfig", "strategy", "strategy", rt.twofa.backoff.strategy, descriptions_out)
+    _emit(
+        ex_backoff,
+        "twofa.backoff",
+        "TwoFaBackoffConfig",
+        "intervalsMinutes",
+        "intervals_minutes",
+        [int(m) for m in _listing_to_list(rt.twofa.backoff.intervalsMinutes)],
+        descriptions_out,
+    )
+    _emit(ex_backoff, "twofa.backoff", "TwoFaBackoffConfig", "callbackValidHours", "callback_valid_hours", int(rt.twofa.backoff.callbackValidHours), descriptions_out)
+    _emit(ex_backoff, "twofa.backoff", "TwoFaBackoffConfig", "counterReset", "counter_reset", rt.twofa.backoff.counterReset, descriptions_out)
+    _emit(ex_backoff, "twofa.backoff", "TwoFaBackoffConfig", "stableSecs", "stable_secs", int(rt.twofa.backoff.stableSecs), descriptions_out)
+    _emit(ex_backoff, "twofa.backoff", "TwoFaBackoffConfig", "coldRestartPreemptsHitl", "cold_restart_preempts_hitl", rt.twofa.backoff.coldRestartPreemptsHitl, descriptions_out)
+    _emit(ex_backoff, "twofa.backoff", "TwoFaBackoffConfig", "ntfySendRetries", "ntfy_send_retries", int(rt.twofa.backoff.ntfySendRetries), descriptions_out)
+    _emit(ex_backoff, "twofa.backoff", "TwoFaBackoffConfig", "unattendedHours", "unattended_hours", rt.twofa.backoff.unattendedHours, descriptions_out)
+    ex_backoff.add(tomlkit.nl())
+    ex_backoff.add(
+        tomlkit.comment(
+            "HMAC-SHA256 key for signing ntfy action URLs. Env only — never in TOML."
+        )
+    )
+    ex_backoff.add(tomlkit.comment("Env: IBCTL_NTFY_ACTION_SIGNING_KEY"))
+    twofa.add("backoff", ex_backoff)
+    doc.add("twofa", twofa)
+    doc.add(tomlkit.nl())
+
+    # [gateway]
+    gw = tomlkit.table()
+    _emit(gw, "gateway", "GatewayConfig", "twsPath", "tws_path", rt.gateway.twsPath, descriptions_out)
+    _emit(gw, "gateway", "GatewayConfig", "twsSettingsPath", "tws_settings_path", "", descriptions_out)
+    _emit(gw, "gateway", "GatewayConfig", "twsMajorVrsn", "tws_major_vrsn", "", descriptions_out)
+    _emit(gw, "gateway", "GatewayConfig", "javaHeapSize", "java_heap_size", int(rt.gateway.javaHeapSize), descriptions_out)
+    _emit(gw, "gateway", "GatewayConfig", "gatewayOrTws", "gateway_or_tws", rt.gateway.gatewayOrTws, descriptions_out)
+    doc.add("gateway", gw)
+    doc.add(tomlkit.nl())
+
+    # [session]
+    sess = tomlkit.table()
+    _emit(sess, "session", "SessionConfig", "action", "action", rt.session.action, descriptions_out)
+    _emit(sess, "session", "SessionConfig", "acceptIncoming", "accept_incoming", rt.session.acceptIncoming, descriptions_out)
+    doc.add("session", sess)
+    doc.add(tomlkit.nl())
+
+    # [command_server]
+    cs = tomlkit.table()
+    _emit(cs, "command_server", "CommandServerConfig", "enabled", "enabled", rt.commandServer.enabled, descriptions_out)
+    _emit(cs, "command_server", "CommandServerConfig", "port", "port", int(rt.commandServer.port), descriptions_out)
+    _emit(cs, "command_server", "CommandServerConfig", "bindAddress", "bind_address", rt.commandServer.bindAddress, descriptions_out)
+    # Example uses simpler control_from (localhost only, no Docker bridge)
+    _emit(cs, "command_server", "CommandServerConfig", "controlFrom", "control_from", ["127.0.0.1"], descriptions_out)
+    doc.add("command_server", cs)
+    doc.add(tomlkit.nl())
+
+    # [agent]
+    agent = tomlkit.table()
+    # Example uses /tmp path (non-Docker), not /run/ibctl path (Docker)
+    _emit(agent, "agent", "AgentConfig", "socketPath", "socket_path", "/tmp/ibctl.sock", descriptions_out)
+    doc.add("agent", agent)
+    doc.add(tomlkit.nl())
+
+    # [ib_status]
+    ibs_policy = tomlkit.table()
+    _emit(ibs_policy, "ib_status", "IbStatusConfig", "kickActiveSession", "kick_active_session", rt.ibStatus.kickActiveSession, descriptions_out)
+    doc.add("ib_status", ibs_policy)
+    doc.add(tomlkit.nl())
+
+    # [logging]
+    log = tomlkit.table()
+    _emit(log, "logging", "LoggingConfig", "level", "level", rt.logging.level, descriptions_out)
+    doc.add("logging", log)
+    doc.add(tomlkit.nl())
+
+    # [timing]
+    tm = tomlkit.table()
+    _emit(tm, "timing", "TimingConfig", "apiPortProbeIntervalSecs", "api_port_probe_interval_secs", int(rt.timing.apiPortProbeIntervalSecs), descriptions_out)
+    _emit(tm, "timing", "TimingConfig", "apiPortProbeFailsBeforeRevoke", "api_port_probe_fails_before_revoke", int(rt.timing.apiPortProbeFailsBeforeRevoke), descriptions_out)
+
+    # [timing.recovery]
+    ex_rec = tomlkit.table()
+    _emit(ex_rec, "timing.recovery", "RecoveryTimingConfig", "enabled", "enabled", rt.timing.recovery.enabled, descriptions_out)
+    _emit(ex_rec, "timing.recovery", "RecoveryTimingConfig", "aggressivePhaseMaxSecs", "aggressive_phase_max_secs", int(rt.timing.recovery.aggressivePhaseMaxSecs), descriptions_out)
+    _emit(ex_rec, "timing.recovery", "RecoveryTimingConfig", "backoffPhaseMaxSecs", "backoff_phase_max_secs", int(rt.timing.recovery.backoffPhaseMaxSecs), descriptions_out)
+    _emit(ex_rec, "timing.recovery", "RecoveryTimingConfig", "backoffIntervalSecs", "backoff_interval_secs", int(rt.timing.recovery.backoffIntervalSecs), descriptions_out)
+    _emit(ex_rec, "timing.recovery", "RecoveryTimingConfig", "minSuccessDwellSecs", "min_success_dwell_secs", int(rt.timing.recovery.minSuccessDwellSecs), descriptions_out)
+    _emit(ex_rec, "timing.recovery", "RecoveryTimingConfig", "fingerprintStreakForcingHitl", "fingerprint_streak_forcing_hitl", int(rt.timing.recovery.fingerprintStreakForcingHitl), descriptions_out)
+    _emit(ex_rec, "timing.recovery", "RecoveryTimingConfig", "giveupNtfyKind", "giveup_ntfy_kind", rt.timing.recovery.giveupNtfyKind, descriptions_out)
+    _emit(ex_rec, "timing.recovery", "RecoveryTimingConfig", "giveupCallbackValidHours", "giveup_callback_valid_hours", int(rt.timing.recovery.giveupCallbackValidHours), descriptions_out)
+    _emit(ex_rec, "timing.recovery", "RecoveryTimingConfig", "giveupAlertResendIntervalHours", "giveup_alert_resend_interval_hours", int(rt.timing.recovery.giveupAlertResendIntervalHours), descriptions_out)
+    tm.add("recovery", ex_rec)
+
+    doc.add("timing", tm)
+
+    return tomlkit.dumps(doc)
